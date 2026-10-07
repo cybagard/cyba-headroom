@@ -51,7 +51,7 @@ Containers: `alpine`, each holding N bytes in `/dev/shm` (counted in the contain
 
 ## Docker API (what the Go collector will use)
 
-Socket: `unix:///Users/promptcritical/.docker/run/docker.sock` (from `docker context inspect`). That's 45 bytes, well under the macOS 104-byte `sun_path` limit.
+Socket: `unix://~/.docker/run/docker.sock` (from `docker context inspect`). That's 45 bytes, well under the macOS 104-byte `sun_path` limit.
 
 | Call | Latency |
 |---|---|

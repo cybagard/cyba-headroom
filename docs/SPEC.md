@@ -2,7 +2,7 @@
 
 Oct 7, 2026 · @cybagard · repo `cyba-headroom`, binary `headroom`
 
-**Licence:** MIT, `Copyright (c) 2026 cybagard`. `LICENSE` file at the repo root, `License: MIT` at the end of the README. No CLA needed.
+**Licence:** AGPL-3.0-only, `Copyright (c) 2026 cybagard`. `LICENSE` file at the repo root holds the unmodified GNU AGPL v3 text, `License: AGPL-3.0-only` at the end of the README. No CLA needed.
 
 ## Problem statement
 

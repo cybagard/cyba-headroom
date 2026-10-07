@@ -30,7 +30,7 @@ func TestRealLMStudio(t *testing.T) {
 	if err := json.Unmarshal(out, &loaded); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Models) != len(loaded) || got.FootprintBytes == 0 {
+	if len(got.Models) != len(loaded) || got.FootprintBytes == nil {
 		t.Fatalf("%d models, footprint %d; lms ps lists %d", len(got.Models), got.FootprintBytes, len(loaded))
 	}
 }

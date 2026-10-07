@@ -38,25 +38,41 @@ func (f fakeCLI) Run(_ context.Context, args ...string) ([]byte, error) {
 
 // fakeProcs is a process table with footprints.
 type fakeProcs struct {
-	procs     []vmproc.Process
-	footprint map[int]uint64
+	procs        []vmproc.Process
+	footprint    map[int]uint64
+	footprintErr error
 }
 
-func (f fakeProcs) ProcessesNamed(comm string) ([]vmproc.Process, error) {
+// Tree returns root and its descendants, root first, like vmproc.Host.
+func (f fakeProcs) Tree(root int) ([]vmproc.Process, error) {
 	var out []vmproc.Process
 	for _, p := range f.procs {
-		if p.Comm == comm {
+		if p.PID == root {
 			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no such process")
+	}
+	for i := 0; i < len(out); i++ {
+		for _, p := range f.procs {
+			if p.PPID == out[i].PID {
+				out = append(out, p)
+			}
 		}
 	}
 	return out, nil
 }
 
-func (f fakeProcs) Footprint(_ context.Context, pid int) (uint64, error) {
-	if fp, ok := f.footprint[pid]; ok {
-		return fp, nil
+func (f fakeProcs) Footprints(_ context.Context, pids ...int) (uint64, error) {
+	if f.footprintErr != nil {
+		return 0, f.footprintErr
 	}
-	return 0, errors.New("no such process")
+	var total uint64
+	for _, pid := range pids {
+		total += f.footprint[pid]
+	}
+	return total, nil
 }
 
 // lmHome creates ~/.lmstudio/.internal with the install location and,
@@ -102,14 +118,14 @@ func TestNotInstalled(t *testing.T) {
 }
 
 func TestNotRunningNeverCallsLMS(t *testing.T) {
-	backend := vmproc.Process{PID: 500, PPID: 1, Comm: "LM Studio", Args: []string{appExec}}
+	backend := vmproc.Process{PID: 500, PPID: 1, Exec: appExec, Args: []string{appExec}}
 	cases := map[string]struct {
 		lock  string
 		procs []vmproc.Process
 	}{
 		"no pid lock":           {"", []vmproc.Process{backend}},
 		"stale pid lock":        {"500", nil},
-		"pid reused by another": {"500", []vmproc.Process{{PID: 500, Comm: "LM Studio", Args: []string{"/usr/bin/other"}}}},
+		"pid reused by another": {"500", []vmproc.Process{{PID: 500, Exec: "/usr/bin/other", Args: []string{"/usr/bin/other"}}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -122,24 +138,29 @@ func TestNotRunningNeverCallsLMS(t *testing.T) {
 	}
 }
 
-// running returns a source over a running LM Studio: backend 500 with two
-// node workers (one holding the model, one idle utility) and an unrelated
-// node process elsewhere.
+// lmTree is a running LM Studio: backend 500 with an Electron helper, two
+// node workers (one holding the model, one idle), an engine process that is a
+// grandchild, and an unrelated node process elsewhere.
+func lmTree(home string) fakeProcs {
+	node := filepath.Join(home, ".lmstudio", ".internal", "utils", "node")
+	return fakeProcs{
+		procs: []vmproc.Process{
+			{PID: 500, PPID: 1, Exec: appExec, Args: []string{appExec, "--run-as-service"}},
+			{PID: 501, PPID: 500, Exec: node, Args: []string{node, "-e", "..."}},
+			{PID: 502, PPID: 500, Exec: node, Args: []string{node, "-e", "..."}},
+			{PID: 503, PPID: 500, Exec: "/Applications/LM Studio.app/Contents/Frameworks/Helper", Args: []string{"Helper"}},
+			{PID: 504, PPID: 501, Exec: filepath.Join(home, ".lmstudio/extensions/backends/mlx/python"), Args: []string{"python"}},
+			{PID: 900, PPID: 1, Exec: "/opt/homebrew/bin/node", Args: []string{"node", "server.js"}},
+		},
+		footprint: map[int]uint64{500: 300 << 20, 501: 15086 << 20, 502: 70 << 20, 503: 40 << 20, 504: 1000 << 20, 900: 1 << 30},
+	}
+}
+
 func running(t *testing.T, psFile string) *lmstudio.Source {
 	t.Helper()
 	home := lmHome(t, "500")
-	node := filepath.Join(home, ".lmstudio", ".internal", "utils", "node")
-	procs := fakeProcs{
-		procs: []vmproc.Process{
-			{PID: 500, PPID: 1, Comm: "LM Studio", Args: []string{appExec, "--run-as-service"}},
-			{PID: 501, PPID: 500, Comm: "node", Args: []string{node, "-e", "..."}},
-			{PID: 502, PPID: 500, Comm: "node", Args: []string{node, "-e", "..."}},
-			{PID: 900, PPID: 1, Comm: "node", Args: []string{"/opt/homebrew/bin/node", "server.js"}},
-		},
-		footprint: map[int]uint64{500: 300 << 20, 501: 15086 << 20, 502: 70 << 20, 900: 1 << 30},
-	}
 	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": psFile}}
-	return lmstudio.New(cli, procs, home)
+	return lmstudio.New(cli, lmTree(home), home)
 }
 
 func TestLoadedModelAndMeasuredCost(t *testing.T) {
@@ -154,22 +175,23 @@ func TestLoadedModelAndMeasuredCost(t *testing.T) {
 		SizeBytes:     15136817368,
 		ContextLength: 180736,
 		Status:        "idle",
-		LastUsedAt:    time.UnixMilli(1791397953705),
+		LastUsedAt:    ptr(time.UnixMilli(1791397953705)),
 	}
-	if m := got.Models[0]; !m.LastUsedAt.Equal(want.LastUsedAt) || m.Key != want.Key || m.Type != want.Type ||
+	if m := got.Models[0]; m.LastUsedAt == nil || !m.LastUsedAt.Equal(*want.LastUsedAt) || m.Key != want.Key || m.Type != want.Type ||
 		m.Format != want.Format || m.SizeBytes != want.SizeBytes || m.ContextLength != want.ContextLength ||
 		m.Status != want.Status || m.TTL != nil {
 		t.Fatalf("model = %+v, want %+v", m, want)
 	}
-	// Backend plus its own workers; not the unrelated node process.
-	if want := uint64(300+15086+70) << 20; got.FootprintBytes != want {
-		t.Fatalf("footprint = %d MiB, want %d MiB", got.FootprintBytes>>20, want>>20)
+	// The whole tree under the backend, grandchildren included; not the
+	// unrelated node process.
+	if want := uint64(300+15086+70+40+1000) << 20; got.FootprintBytes == nil || *got.FootprintBytes != want {
+		t.Fatalf("footprint = %v, want %d MiB", got.FootprintBytes, want>>20)
 	}
 }
 
 func TestRunningWithNothingLoaded(t *testing.T) {
 	got := collect(t, running(t, "ps-empty.json"))
-	if !got.Running || len(got.Models) != 0 || got.FootprintBytes == 0 {
+	if !got.Running || len(got.Models) != 0 || got.FootprintBytes == nil {
 		t.Fatalf("got %+v, want running, no models, baseline footprint", got)
 	}
 }
@@ -178,5 +200,55 @@ func TestLMSFailureWhileRunningIsAnError(t *testing.T) {
 	src := running(t, "missing.json")
 	if _, err := src.Collect(context.Background()); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestBackendMatchedByExecutableNotArgv0(t *testing.T) {
+	home := lmHome(t, "500")
+	procs := lmTree(home)
+	procs.procs[0].Args = []string{"LM Studio", "--run-as-service"} // relative argv[0]
+	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": "ps-empty.json"}}
+	if got := collect(t, lmstudio.New(cli, procs, home)); !got.Running {
+		t.Fatal("backend with a relative argv[0] not recognised")
+	}
+}
+
+func TestHeadlessBackendUnderLMStudioHome(t *testing.T) {
+	home := lmHome(t, "500")
+	procs := lmTree(home)
+	llmster := filepath.Join(home, ".lmstudio", "bin", "llmster")
+	procs.procs[0].Exec, procs.procs[0].Args = llmster, []string{llmster}
+	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": "ps-empty.json"}}
+	if got := collect(t, lmstudio.New(cli, procs, home)); !got.Running {
+		t.Fatal("headless llmster backend not recognised")
+	}
+}
+
+func TestRelativeHOMEMeansNotInstalled(t *testing.T) {
+	got := collect(t, lmstudio.New(fakeCLI{t: t}, fakeProcs{}, ".lmstudio-home"))
+	if got.Installed {
+		t.Fatalf("got %+v, want not installed for a relative HOME", got)
+	}
+}
+
+func TestUnreadableFootprintIsUnknown(t *testing.T) {
+	home := lmHome(t, "500")
+	procs := lmTree(home)
+	procs.footprintErr = errors.New("footprint: exit status 1")
+	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": "ps-empty.json"}}
+	got := collect(t, lmstudio.New(cli, procs, home))
+	if got.FootprintBytes != nil || got.FootprintError == "" {
+		t.Fatalf("footprint=%v error=%q, want unknown with an error", got.FootprintBytes, got.FootprintError)
+	}
+}
+
+func TestNeverUsedModelHasNoLastUse(t *testing.T) {
+	home := lmHome(t, "500")
+	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": "ps-unused.json"}}
+	got := collect(t, lmstudio.New(cli, lmTree(home), home))
+	if m := got.Models[0]; m.LastUsedAt != nil {
+		t.Fatalf("last used = %v, want absent", *m.LastUsedAt)
 	}
 }

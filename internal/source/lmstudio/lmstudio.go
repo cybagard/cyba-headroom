@@ -2,11 +2,12 @@
 // host (R1).
 //
 // LM Studio reports only a model's file size. The real cost is the
-// footprint of its per-model worker processes, which is read from the
-// process table. The lms CLI wakes LM Studio when it is not running, so it is
-// only called once the backend is known to be running: the pid in
-// ~/.lmstudio/.internal/llmster-pid.lock must be alive and be the app's
-// executable from app-install-location.json.
+// footprint of its process tree, where each loaded model has a worker. The
+// lms CLI wakes LM Studio when it is not running, so it is only called once
+// the backend is known to be running: the pid in
+// ~/.lmstudio/.internal/llmster-pid.lock must be alive and run the app's
+// executable from app-install-location.json. LM Studio quitting between that
+// check and the lms call (milliseconds) can still wake it.
 package lmstudio
 
 import (
@@ -31,20 +32,26 @@ type CLI interface {
 
 // Procs is the process access the source needs; vmproc.Host implements it.
 type Procs interface {
-	ProcessesNamed(comm string) ([]vmproc.Process, error)
-	Footprint(ctx context.Context, pid int) (uint64, error)
+	Tree(root int) ([]vmproc.Process, error)
+	Footprints(ctx context.Context, pids ...int) (uint64, error)
 }
 
 // Source is the LM Studio source.
 type Source struct {
-	cli      CLI
-	procs    Procs
-	internal string // ~/.lmstudio/.internal
+	cli   CLI
+	procs Procs
+	// dir is ~/.lmstudio; empty when HOME is unset or relative, which would
+	// resolve against the daemon's cwd.
+	dir string
 }
 
 // New returns a source. A nil cli means lms was not found.
 func New(cli CLI, procs Procs, home string) *Source {
-	return &Source{cli: cli, procs: procs, internal: filepath.Join(home, ".lmstudio", ".internal")}
+	s := &Source{cli: cli, procs: procs}
+	if filepath.IsAbs(home) {
+		s.dir = filepath.Join(home, ".lmstudio")
+	}
+	return s
 }
 
 // Name implements daemon.Source.
@@ -54,11 +61,11 @@ func (s *Source) Name() string { return "lmstudio" }
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	l := protocol.LMStudio{Models: []protocol.LoadedModel{}}
 	app, installed := s.appExec()
-	if s.cli == nil || !installed {
+	if s.cli == nil || s.dir == "" || !installed {
 		return reading{l}, nil
 	}
 	l.Installed = true
-	backend, ok := s.backend(app)
+	tree, ok := s.backend(app)
 	if !ok {
 		return reading{l}, nil
 	}
@@ -75,28 +82,18 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	for _, m := range models {
 		l.Models = append(l.Models, m.toProtocol())
 	}
-	l.FootprintBytes = s.footprint(ctx, backend)
+	// The whole tree under the backend: Electron helpers, model workers and
+	// any engine processes they start, in one footprint run.
+	pids := make([]int, len(tree))
+	for i, p := range tree {
+		pids[i] = p.PID
+	}
+	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
+		l.FootprintError = err.Error()
+	} else {
+		l.FootprintBytes = &fp
+	}
 	return reading{l}, nil
-}
-
-// footprint sums the backend and its worker processes: node children
-// running from ~/.lmstudio/.internal. A process that exits meanwhile is
-// left out.
-func (s *Source) footprint(ctx context.Context, backend vmproc.Process) uint64 {
-	total, _ := s.procs.Footprint(ctx, backend.PID)
-	workers, err := s.procs.ProcessesNamed("node")
-	if err != nil {
-		return total
-	}
-	for _, w := range workers {
-		if w.PPID != backend.PID || len(w.Args) == 0 || !strings.HasPrefix(w.Args[0], s.internal+"/") {
-			continue
-		}
-		if fp, err := s.procs.Footprint(ctx, w.PID); err == nil {
-			total += fp
-		}
-	}
-	return total
 }
 
 // apiModel is the part of an lms ps entry headroom reads.
@@ -121,7 +118,8 @@ func (m apiModel) toProtocol() protocol.LoadedModel {
 		Status:        m.Status,
 	}
 	if m.LastUsedTime > 0 {
-		out.LastUsedAt = time.UnixMilli(m.LastUsedTime)
+		t := time.UnixMilli(m.LastUsedTime)
+		out.LastUsedAt = &t
 	}
 	if m.TTLMs != nil {
 		ttl := time.Duration(*m.TTLMs) * time.Millisecond
@@ -132,7 +130,10 @@ func (m apiModel) toProtocol() protocol.LoadedModel {
 
 // appExec reads the app's executable path from app-install-location.json.
 func (s *Source) appExec() (string, bool) {
-	b, err := os.ReadFile(filepath.Join(s.internal, "app-install-location.json"))
+	if s.dir == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(filepath.Join(s.dir, ".internal", "app-install-location.json"))
 	if err != nil {
 		return "", false
 	}
@@ -143,37 +144,26 @@ func (s *Source) appExec() (string, bool) {
 	return loc.Path, true
 }
 
-// backend finds the running backend: the pid in llmster-pid.lock, alive and
-// running the app's executable (not a reused pid).
-func (s *Source) backend(app string) (vmproc.Process, bool) {
-	b, err := os.ReadFile(filepath.Join(s.internal, "llmster-pid.lock"))
+// backend finds the running backend and its process tree: the pid in
+// llmster-pid.lock must be alive and run the app's executable, or one under
+// ~/.lmstudio (the headless llmster daemon); a reused pid fails this.
+func (s *Source) backend(app string) ([]vmproc.Process, bool) {
+	b, err := os.ReadFile(filepath.Join(s.dir, ".internal", "llmster-pid.lock"))
 	if err != nil {
-		return vmproc.Process{}, false
+		return nil, false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
-		return vmproc.Process{}, false
+		return nil, false
 	}
-	procs, err := s.procs.ProcessesNamed(comm(app))
-	if err != nil {
-		return vmproc.Process{}, false
+	tree, err := s.procs.Tree(pid)
+	if err != nil || len(tree) == 0 {
+		return nil, false
 	}
-	for _, p := range procs {
-		if p.PID == pid && len(p.Args) > 0 && p.Args[0] == app {
-			return p, true
-		}
+	if exec := tree[0].Exec; exec != app && !strings.HasPrefix(exec, s.dir+"/") {
+		return nil, false
 	}
-	return vmproc.Process{}, false
-}
-
-// comm is the kernel's short process name for an executable: its base name,
-// cut to MAXCOMLEN (16) bytes.
-func comm(exec string) string {
-	c := filepath.Base(exec)
-	if len(c) > 16 {
-		c = c[:16]
-	}
-	return c
+	return tree, true
 }
 
 type reading struct{ l protocol.LMStudio }

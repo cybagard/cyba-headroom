@@ -90,3 +90,36 @@ func TestHostProcessesNamedAndCwd(t *testing.T) {
 		t.Fatalf("Cwd = %q, %v; want %q", cwd, err, wd)
 	}
 }
+
+func TestHostTreeAndFootprints(t *testing.T) {
+	child := exec.Command("/bin/sleep", "5")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+
+	self := os.Getpid()
+	tree, err := vmproc.Host{}.Tree(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _ := os.Executable()
+	exe, _ = filepath.EvalSymlinks(exe)
+	if tree[0].PID != self || tree[0].Exec != exe {
+		t.Fatalf("root = %+v, want pid %d exec %q", tree[0], self, exe)
+	}
+	i := slices.IndexFunc(tree, func(p vmproc.Process) bool { return p.PID == child.Process.Pid })
+	if i < 0 || tree[i].Exec != "/bin/sleep" || tree[i].PPID != self {
+		t.Fatalf("child %d not in tree %+v", child.Process.Pid, tree)
+	}
+
+	// One footprint call for both equals the two read one by one.
+	both, err := vmproc.Host{}.Footprints(context.Background(), self, child.Process.Pid)
+	if err != nil || both == 0 {
+		t.Fatalf("Footprints = %d, %v", both, err)
+	}
+	one, _ := vmproc.Host{}.Footprint(context.Background(), child.Process.Pid)
+	if one == 0 || one >= both {
+		t.Fatalf("child footprint %d not part of total %d", one, both)
+	}
+}

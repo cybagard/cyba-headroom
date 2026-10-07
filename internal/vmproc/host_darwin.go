@@ -61,11 +61,11 @@ func (Host) ProcessesNamed(comm string) ([]Process, error) {
 			continue
 		}
 		pid := int(p.Proc.P_pid)
-		_, args, err := procArgs(pid)
+		exec, args, err := procArgs(pid)
 		if err != nil {
 			continue
 		}
-		out = append(out, Process{PID: pid, PPID: int(p.Eproc.Ppid), Comm: comm, Args: args})
+		out = append(out, Process{PID: pid, PPID: int(p.Eproc.Ppid), Comm: comm, Exec: exec, Args: args})
 	}
 	return out, nil
 }
@@ -109,6 +109,51 @@ func procArgs(pid int) (exec string, args []string, err error) {
 		args = append(args, string(a))
 	}
 	return string(path), args, nil
+}
+
+// Tree returns the process root and all its descendants, root first, with
+// executables and arguments, from one process-table scan. Descendants whose
+// arguments cannot be read (other users') are left out.
+func (Host) Tree(root int) ([]Process, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, err
+	}
+	children := map[int][]int{}
+	found := false
+	for _, p := range procs {
+		pid := int(p.Proc.P_pid)
+		children[int(p.Eproc.Ppid)] = append(children[int(p.Eproc.Ppid)], pid)
+		found = found || pid == root
+	}
+	if !found {
+		return nil, fmt.Errorf("vmproc: no process %d", root)
+	}
+	var out []Process
+	queue := []struct{ pid, ppid int }{{root, 0}}
+	for len(queue) > 0 {
+		q := queue[0]
+		queue = queue[1:]
+		exec, args, err := procArgs(q.pid)
+		if err != nil {
+			if q.pid == root {
+				return nil, err
+			}
+			continue
+		}
+		out = append(out, Process{PID: q.pid, PPID: q.ppid, Exec: exec, Args: args})
+		for _, c := range children[q.pid] {
+			if c != q.pid { // pid 0's parent is itself
+				queue = append(queue, struct{ pid, ppid int }{c, q.pid})
+			}
+		}
+	}
+	return out, nil
+}
+
+// Footprints returns the summed phys_footprint of pids in one footprint run.
+func (h Host) Footprints(ctx context.Context, pids ...int) (uint64, error) {
+	return ReadFootprints(ctx, h, pids...)
 }
 
 // Footprint returns a process's phys_footprint.

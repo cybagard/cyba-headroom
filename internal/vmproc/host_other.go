@@ -27,3 +27,9 @@ func (Host) Cwd(context.Context, int) (string, error) { return "", errUnsupporte
 
 // Footprint implements lmstudio.Procs.
 func (Host) Footprint(context.Context, int) (uint64, error) { return 0, errUnsupported }
+
+// Tree implements lmstudio.Procs.
+func (Host) Tree(int) ([]Process, error) { return nil, errUnsupported }
+
+// Footprints implements lmstudio.Procs.
+func (Host) Footprints(context.Context, ...int) (uint64, error) { return 0, errUnsupported }

@@ -54,11 +54,12 @@ type LMStudio struct {
 	// never starts it: the lms CLI would wake it.
 	Running bool          `json:"running"`
 	Models  []LoadedModel `json:"models"`
-	// FootprintBytes is what LM Studio's backend and its worker processes
+	// FootprintBytes is what LM Studio's backend and every process under it
 	// cost the host (phys_footprint). A loaded model's worker costs about its
 	// file size plus context and runtime: the real figure, which LM Studio
-	// itself does not report.
-	FootprintBytes uint64 `json:"footprint_bytes"`
+	// itself does not report. Absent when it could not be read.
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	FootprintError string  `json:"footprint_error,omitempty"`
 }
 
 // LoadedModel is one model loaded in LM Studio, as lms ps reports it.
@@ -69,10 +70,10 @@ type LoadedModel struct {
 	Format string `json:"format"`
 	// SizeBytes is the model's file size; it stays reserved while loaded,
 	// even when idle (R2).
-	SizeBytes     uint64    `json:"size_bytes"`
-	ContextLength int       `json:"context_length"`
-	Status        string    `json:"status"`
-	LastUsedAt    time.Time `json:"last_used_at"`
+	SizeBytes     uint64     `json:"size_bytes"`
+	ContextLength int        `json:"context_length"`
+	Status        string     `json:"status"`
+	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
 	// TTL is the idle time after which LM Studio unloads the model; absent
 	// when it stays loaded until unloaded by hand.
 	TTL *time.Duration `json:"ttl_ns,omitempty"`

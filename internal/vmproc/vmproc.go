@@ -39,11 +39,13 @@ type VM struct {
 	FootprintBytes uint64
 }
 
-// Process is a process with its full argument list.
+// Process is a process with its executable and full argument list.
 type Process struct {
 	PID, PPID int
 	// Comm is the kernel's short name (at most 16 bytes).
 	Comm string
+	// Exec is the executable's path; argv[0] (Args[0]) may differ.
+	Exec string
 	Args []string
 }
 
@@ -179,22 +181,39 @@ type Runner interface {
 // ReadFootprint returns a process's phys_footprint via footprint(1): what it
 // costs the host, as Activity Monitor shows it. No sudo for own processes.
 func ReadFootprint(ctx context.Context, r Runner, pid int) (uint64, error) {
-	out, err := r.Run(ctx, footprintPath, "-p", strconv.Itoa(pid), "-f", "bytes", "--noCategories")
+	return ReadFootprints(ctx, r, pid)
+}
+
+// ReadFootprints returns the summed phys_footprint of pids in one footprint(1)
+// run. A pid that has exited is skipped (footprint only warns); it is an
+// error only if none could be read.
+func ReadFootprints(ctx context.Context, r Runner, pids ...int) (uint64, error) {
+	args := make([]string, 0, 2*len(pids)+3)
+	for _, pid := range pids {
+		args = append(args, "-p", strconv.Itoa(pid))
+	}
+	out, err := r.Run(ctx, footprintPath, append(args, "-f", "bytes", "--noCategories")...)
 	if err != nil {
 		return 0, err
 	}
+	var total uint64
+	found := false
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
-		// "    phys_footprint: 1709280520 B"
+		// "    phys_footprint: 1709280520 B", one per process
 		v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "phys_footprint:")
 		if !ok {
 			continue
 		}
 		n, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimSpace(v), " B"), 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("vmproc: footprint %d: %w", pid, err)
+			return 0, fmt.Errorf("vmproc: footprint %v: %w", pids, err)
 		}
-		return n, nil
+		total += n
+		found = true
 	}
-	return 0, fmt.Errorf("vmproc: footprint %d: no phys_footprint line", pid)
+	if !found {
+		return 0, fmt.Errorf("vmproc: footprint %v: no phys_footprint line", pids)
+	}
+	return total, nil
 }

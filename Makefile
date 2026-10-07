@@ -16,13 +16,23 @@ endif
 # The host is darwin/arm64; build for it wherever the build runs.
 BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-.PHONY: build test lint fmt tidy clean dc-image dc-shell
+.PHONY: build test test-host test-tart darwin-tests lint fmt tidy clean dc-image dc-shell
 
 build: $(DC_DEP)
 	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
 
 test: $(DC_DEP)
 	$(RUN) go test -race ./...
+
+# darwin test binaries, compiled in the devcontainer and run on a Mac.
+darwin-tests: $(DC_DEP)
+	$(RUN) scripts/darwin-tests.sh build
+
+test-host: darwin-tests
+	scripts/darwin-tests.sh run
+
+test-tart: darwin-tests
+	scripts/tart-test.sh
 
 lint: $(DC_DEP)
 	$(RUN) go vet ./...

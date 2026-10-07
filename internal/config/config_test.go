@@ -89,6 +89,7 @@ func TestLoadErrors(t *testing.T) {
 		{"negative threshold", "[policy]\nmin_headroom_gb = -1\n", "min_headroom_gb must be >= 0"},
 		{"bad duration", "[policy]\nlease_timeout = \"soon\"\n", "lease_timeout"},
 		{"source timeout not below interval", "[daemon]\ninterval = \"2s\"\nsource_timeout = \"2s\"\n", "daemon.source_timeout must be > 0 and < daemon.interval"},
+		{"trend window too short", "[daemon]\ninterval = \"1m\"\nsource_timeout = \"3s\"\ntrend_window = \"2m\"\n", "daemon.trend_window must be at least 3 x daemon.interval"},
 		{"socket too long", "socket = \"/" + strings.Repeat("s", 110) + "\"\n", "socket path is"},
 		{"malformed toml", "socket = \n", "config:"},
 	}

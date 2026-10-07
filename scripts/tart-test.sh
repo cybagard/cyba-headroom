@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run the darwin test binaries in a clean macOS Tart VM.
+# Run the darwin test binaries in a clean macOS Tart VM, or, with arguments,
+# run that command in the VM instead (the repo is at "$share", read-only;
+# run `make build` or `make darwin-tests` first for fresh binaries).
 # The VM is a clone of $TART_BASE (APFS clone, no extra disk), sized small,
 # and stopped afterwards: it takes one of the two macOS VM slots while it runs.
 set -euo pipefail
@@ -14,16 +16,21 @@ if ! tart get "$vm" >/dev/null 2>&1; then
 	tart set "$vm" --cpu 4 --memory 4096
 fi
 
-started=0
-if [[ $(tart get "$vm" --format json | sed -n 's/.*"State" *: *"\([a-z]*\)".*/\1/p') != running ]]; then
-	tart run --no-graphics --dir="src:$root:ro" "$vm" >/dev/null 2>&1 &
-	started=1
+# A running VM may share another worktree's sources; never reuse it.
+if [[ $(tart get "$vm" --format json | sed -n 's/.*"State" *: *"\([a-z]*\)".*/\1/p') == running ]]; then
+	echo "tart-test: $vm is already running (maybe from another worktree); stop it with: tart stop $vm" >&2
+	exit 1
 fi
-stop() { [[ $started == 1 ]] && tart stop "$vm" >/dev/null 2>&1 || true; }
+tart run --no-graphics --dir="src:$root:ro" "$vm" >/dev/null 2>&1 &
+stop() { tart stop "$vm" >/dev/null 2>&1 || true; }
 trap stop EXIT
 
 for _ in $(seq 60); do
 	tart exec "$vm" test -d "$share" >/dev/null 2>&1 && break
 	sleep 2
 done
-tart exec "$vm" bash "$share/scripts/darwin-tests.sh" run "$share"
+if [[ $# -gt 0 ]]; then
+	tart exec "$vm" "$@"
+else
+	tart exec "$vm" bash "$share/scripts/darwin-tests.sh" run "$share"
+fi

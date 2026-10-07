@@ -10,7 +10,7 @@ Run every build, test, lint, fmt and tidy through `make`. Each target runs insid
 - `make lint` runs `go vet` and `golangci-lint`, which CI enforces. Run it before every commit.
 - `make build` cross-compiles `bin/headroom` for darwin/arm64. Run that binary on the host for smoke tests.
 - `make test-host` runs the tests as darwin test binaries on the host. They are compiled in the container and need no Go on the host.
-- `make test-tart` runs the same test binaries in a clean macOS Tart VM (`headroom-mac`, a 4 GB clone of `macos-xcode`). The VM holds one of the two macOS VM slots while it runs, so the script stops it afterwards.
+- `make test-tart` runs the same test binaries in a clean macOS Tart VM (`headroom-mac`, a 4 GB clone of `macos-xcode`). The VM holds one of the two macOS VM slots while it runs, so the script stops it afterwards. `scripts/tart-test.sh <cmd…>` runs any command in the VM instead; the repo is at `/Volumes/My Shared Files/src`. The VM runs macOS 15 and the host a newer release, so it catches sysctls and APIs that differ between versions.
 - `make dc-shell` opens a shell for one-off `go` commands.
 
 `NATIVE=1` bypasses the container. Only CI uses it, because its macOS runners have no Docker.

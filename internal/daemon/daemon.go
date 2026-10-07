@@ -152,10 +152,13 @@ func (d *Daemon) Tick(ctx context.Context) {
 			s.status.Stale = true
 			d.log.Debug("source skipped", "source", s.src.Name(), "err", errStillRunning)
 		case res.err != nil:
+			// Warn when a source starts failing or its error changes, not every tick.
+			if !s.status.Stale || s.status.Err != res.err.Error() {
+				d.log.Warn("source failed", "source", s.src.Name(), "err", res.err, "took", res.took)
+			}
 			s.status.Took = res.took
 			s.status.Err = res.err.Error()
 			s.status.Stale = true
-			d.log.Warn("source failed", "source", s.src.Name(), "err", res.err, "took", res.took)
 		default:
 			s.last = res.r
 			s.status = protocol.SourceStatus{At: d.now(), Took: res.took}

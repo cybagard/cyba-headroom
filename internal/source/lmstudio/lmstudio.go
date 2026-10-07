@@ -162,7 +162,9 @@ func (s *Source) backend(app string) ([]vmproc.Process, bool) {
 	}
 	// The kernel keeps the path as invoked, so compare resolved paths too.
 	exec := tree[0].Exec
-	if exec != app && resolve(exec) != resolve(app) && !strings.HasPrefix(resolve(exec), resolve(s.dir)+"/") {
+	isApp := exec == app || resolve(exec) == resolve(app)
+	underHome := strings.HasPrefix(exec, s.dir+"/") || strings.HasPrefix(resolve(exec), resolve(s.dir)+"/")
+	if !isApp && !underHome {
 		return nil, false
 	}
 	return tree, true

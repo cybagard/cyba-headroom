@@ -124,7 +124,7 @@ func TestSkipsArchivedAndRemoteWorktrees(t *testing.T) {
 	}
 }
 
-const orchestrator = "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-2"
+const otherWorktree = "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-2"
 
 func TestAgentsMemoryCPUAndSessionPIDs(t *testing.T) {
 	got := collect(t, orca.New(runningCLI()))
@@ -138,7 +138,7 @@ func TestAgentsMemoryCPUAndSessionPIDs(t *testing.T) {
 		pids []int
 	}{
 		{thisWorktree, 852475904, 15.8, []int{69132}},
-		{orchestrator, 381140992, 0.2, []int{1557}},
+		{otherWorktree, 381140992, 0.2, []int{1557}},
 	}
 	for _, tc := range cases {
 		w := find(t, got, tc.id)
@@ -148,7 +148,7 @@ func TestAgentsMemoryCPUAndSessionPIDs(t *testing.T) {
 	}
 	// No live terminals, no diagnostics entry: nothing running there.
 	for _, w := range got.Worktrees {
-		if w.ID != thisWorktree && w.ID != orchestrator && (w.MemoryBytes != 0 || len(w.SessionPIDs) != 0) {
+		if w.ID != thisWorktree && w.ID != otherWorktree && (w.MemoryBytes != 0 || len(w.SessionPIDs) != 0) {
 			t.Errorf("%s: mem=%d pids=%v, want none", w.Name, w.MemoryBytes, w.SessionPIDs)
 		}
 	}

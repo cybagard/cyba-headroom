@@ -25,7 +25,7 @@
   "worktrees": [
    {
     "worktreeId": "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-2",
-    "worktreeName": "Orchestrator",
+    "worktreeName": "Feature Two",
     "repoId": "00000000-0000-4000-8000-00000000000b",
     "repoName": "project-a",
     "cpu": 0.2,

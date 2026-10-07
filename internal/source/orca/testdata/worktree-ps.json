@@ -95,7 +95,7 @@
     "childWorktreeIds": [
      "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-1"
     ],
-    "displayName": "Orchestrator",
+    "displayName": "Feature Two",
     "workspaceStatus": "in-progress",
     "sortOrder": 1791387738060,
     "lastActivityAt": 1791316278963,

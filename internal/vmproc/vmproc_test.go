@@ -6,6 +6,8 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
@@ -16,6 +18,8 @@ type fakeSystem struct {
 	pids  []int
 	files map[string]string // "lsof <pid>" or "footprint <pid>" -> testdata file
 	calls map[string]int
+	// toolBroken makes a missing file a tool failure rather than an exit.
+	toolBroken bool
 }
 
 func (f *fakeSystem) VMPIDs() ([]int, error) { return f.pids, nil }
@@ -31,6 +35,10 @@ func (f *fakeSystem) Run(_ context.Context, name string, args ...string) ([]byte
 	f.calls[key]++
 	file, ok := f.files[key]
 	if !ok {
+		if f.toolBroken {
+			return nil, errors.New("exit status 1") // tool failed, process still there
+		}
+		f.pids = slices.DeleteFunc(f.pids, func(p int) bool { return strconv.Itoa(p) == pid })
 		return nil, errors.New("exit status 1") // process gone
 	}
 	return os.ReadFile("testdata/" + file)
@@ -121,5 +129,33 @@ func TestUnrecognisedVMIsUnknown(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Kind != vmproc.Unknown {
 		t.Fatalf("got %+v, want one unknown VM", got)
+	}
+}
+
+func TestFootprintFailureForLiveVMIsAnError(t *testing.T) {
+	sys := newFake()
+	sys.toolBroken = true
+	delete(sys.files, "footprint 1234")
+	// Dropping the VM would report Docker's VM as not running while it holds GBs.
+	if _, err := vmproc.New(sys).List(context.Background()); err == nil {
+		t.Fatal("want error when footprint fails for a VM that is still running")
+	}
+}
+
+func TestUnknownIsRetriedOnTheNextList(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{1234}
+	sys.files["lsof 1234"] = "lsof-other.txt" // VM still booting: no image open yet
+	f := vmproc.New(sys)
+	if _, err := f.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.files["lsof 1234"] = "lsof-docker.txt"
+	got, err := f.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Kind != vmproc.Docker {
+		t.Fatalf("kind = %s, want docker once the VM has its image open", got[0].Kind)
 	}
 }

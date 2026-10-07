@@ -110,7 +110,7 @@ func runDaemon(e Env) int {
 	vms := vmproc.New(vmproc.Host{})
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
-		docker.New(cfg.Docker.Socket, vms, time.Now),
+		docker.New(cfg.Docker.Socket, vms),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

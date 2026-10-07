@@ -56,8 +56,11 @@ type Docker struct {
 	VMRunning bool `json:"vm_running"`
 	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
 	// overhead plus the guest's high-water mark, which it does not give back.
-	VMFootprintBytes uint64      `json:"vm_footprint_bytes"`
-	Containers       []Container `json:"containers"`
+	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
+	// VMError is set when the VM process could not be read; VMRunning and
+	// VMFootprintBytes are then unknown, not zero.
+	VMError    string      `json:"vm_error,omitempty"`
+	Containers []Container `json:"containers"`
 }
 
 // Container is one running container.

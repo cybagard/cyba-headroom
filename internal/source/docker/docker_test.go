@@ -2,14 +2,17 @@ package docker_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +25,13 @@ import (
 type fakeVMs []vmproc.VM
 
 func (f fakeVMs) List(context.Context) ([]vmproc.VM, error) { return f, nil }
+
+// brokenVMs fails to list VMs.
+type brokenVMs struct{}
+
+func (brokenVMs) List(context.Context) ([]vmproc.VM, error) {
+	return nil, errors.New("kern.proc.all: operation not permitted")
+}
 
 // shortDir is a temp dir short enough for a Unix socket path on macOS.
 func shortDir(t *testing.T) string {
@@ -51,6 +61,11 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 		mu.Unlock()
 		if !ok {
 			http.Error(w, `{"message":"no route"}`, http.StatusNotFound)
+			return
+		}
+		if code, ok := strings.CutPrefix(body, "!"); ok { // "!409": reply with that status
+			status, _ := strconv.Atoi(code)
+			http.Error(w, `{"message":"container is marked for removal"}`, status)
 			return
 		}
 		if !strings.HasPrefix(body, "{") && !strings.HasPrefix(body, "[") {
@@ -89,9 +104,9 @@ func collect(t *testing.T, src *docker.Source) protocol.Docker {
 
 func TestDockerNotRunningIsAReading(t *testing.T) {
 	sock := filepath.Join(shortDir(t), "docker.sock") // nothing listens here
-	d := collect(t, docker.New(sock, fakeVMs{}, time.Now))
-	if d.Running || len(d.Containers) != 0 {
-		t.Fatalf("got %+v, want not running", d)
+	d := collect(t, docker.New(sock, fakeVMs{}))
+	if d.Running || d.Containers == nil || len(d.Containers) != 0 {
+		t.Fatalf("got %+v, want not running with an empty (not null) container list", d)
 	}
 }
 
@@ -112,7 +127,7 @@ func TestReportsContainersAndVMCost(t *testing.T) {
 		{PID: 1, Kind: vmproc.Tart, Name: "macos-a", FootprintBytes: 4 << 30},
 		{PID: 2, Kind: vmproc.Docker, FootprintBytes: 1709280520},
 	}
-	d := collect(t, docker.New(runningEngine(t), vms, time.Now))
+	d := collect(t, docker.New(runningEngine(t), vms))
 
 	if !d.Running || d.VMLimitBytes != 33333952512 || !d.VMRunning || d.VMFootprintBytes != 1709280520 {
 		t.Fatalf("got running=%v limit=%d vm=%v footprint=%d", d.Running, d.VMLimitBytes, d.VMRunning, d.VMFootprintBytes)
@@ -132,7 +147,7 @@ func TestReportsContainersAndVMCost(t *testing.T) {
 
 func TestDockerVMAsleepCostsNothing(t *testing.T) {
 	// Resource Saver: the API answers but the VM process is gone.
-	d := collect(t, docker.New(runningEngine(t), fakeVMs{}, time.Now))
+	d := collect(t, docker.New(runningEngine(t), fakeVMs{}))
 	if !d.Running || d.VMRunning || d.VMFootprintBytes != 0 {
 		t.Fatalf("got %+v, want running API with no VM cost", d)
 	}
@@ -147,13 +162,13 @@ func TestBindMountsAreHostPaths(t *testing.T) {
 			"Mounts":[{"Type":"bind","Source":"/host_mnt/Users/dev/wt/fix-login"},{"Type":"volume","Source":"/var/lib/docker/volumes/x/_data"}]}]`,
 		"/containers/" + plain + "/stats?stream=false&one-shot=true": "stats.json",
 	})
-	d := collect(t, docker.New(sock, fakeVMs{}, time.Now))
+	d := collect(t, docker.New(sock, fakeVMs{}))
 	if got := d.Containers[0].Mounts; len(got) != 1 || got[0] != "/Users/dev/wt/fix-login" {
 		t.Fatalf("mounts = %v, want the bind's host path only", got)
 	}
 
 	// Docker Desktop records the path the user gave in a label; prefer it.
-	d = collect(t, docker.New(runningEngine(t), fakeVMs{}, time.Now))
+	d = collect(t, docker.New(runningEngine(t), fakeVMs{}))
 	if got := d.Containers[0].Mounts; len(got) != 1 || got[0] != "/tmp/hr-fixture" {
 		t.Fatalf("mounts = %v, want [/tmp/hr-fixture]", got)
 	}
@@ -172,7 +187,7 @@ func TestCPUPercentFromConsecutiveTicks(t *testing.T) {
 		"/containers/json": "containers.json",
 		stats:              cpuStats(5e9, 1000e9),
 	})
-	src := docker.New(sock, fakeVMs{}, time.Now)
+	src := docker.New(sock, fakeVMs{})
 
 	if c := collect(t, src).Containers[0]; c.CPUPercent != nil {
 		t.Fatalf("first tick cpu = %v, want none", *c.CPUPercent)
@@ -198,15 +213,91 @@ func TestContainerGoneBeforeStatsIsSkipped(t *testing.T) {
 		"/containers/json": withGone,
 		"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
 	})
-	d := collect(t, docker.New(sock, fakeVMs{}, time.Now))
+	d := collect(t, docker.New(sock, fakeVMs{}))
 	if len(d.Containers) != 1 || d.Containers[0].ID != fixtureID {
 		t.Fatalf("containers = %+v, want only the live one", d.Containers)
 	}
 }
 
+func TestUnsetSocketIsAnError(t *testing.T) {
+	_, err := docker.New("", fakeVMs{}).Collect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "[docker] socket") {
+		t.Fatalf("err = %v, want a hint to set [docker] socket", err)
+	}
+}
+
 func TestAPIFailureIsAnError(t *testing.T) {
 	sock, _ := engine(t, map[string]string{"/info": "info.json"}) // /containers/json 404s
-	if _, err := docker.New(sock, fakeVMs{}, time.Now).Collect(context.Background()); err == nil {
+	if _, err := docker.New(sock, fakeVMs{}).Collect(context.Background()); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestContainerStatsErrorSkipsOnlyThatContainer(t *testing.T) {
+	list, err := os.ReadFile("testdata/containers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDying := `[{"Id":"dying1","Names":["/dying"],"Image":"alpine"},` + strings.TrimPrefix(strings.TrimSpace(string(list)), "[")
+	sock, _ := engine(t, map[string]string{
+		"/info":            "info.json",
+		"/containers/json": withDying,
+		"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
+		"/containers/dying1/stats?stream=false&one-shot=true":            "!409",
+	})
+	d := collect(t, docker.New(sock, fakeVMs{}))
+	if len(d.Containers) != 1 || d.Containers[0].ID != fixtureID {
+		t.Fatalf("containers = %+v, want the healthy one", d.Containers)
+	}
+}
+
+func TestVMListingFailureKeepsContainers(t *testing.T) {
+	d := collect(t, docker.New(runningEngine(t), brokenVMs{}))
+	if len(d.Containers) != 1 || d.VMRunning || d.VMError == "" {
+		t.Fatalf("got %+v, want containers plus a VM error", d)
+	}
+}
+
+func TestStatsFetchedConcurrently(t *testing.T) {
+	const n = 10
+	var inFlight, peak atomic.Int32
+	sock := filepath.Join(shortDir(t), "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []string
+	for i := range n {
+		list = append(list, fmt.Sprintf(`{"Id":"c%d","Names":["/c%d"],"Image":"alpine"}`, i, i))
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/info":
+			_, _ = w.Write([]byte(`{"MemTotal":1}`))
+		case "/containers/json":
+			_, _ = w.Write([]byte("[" + strings.Join(list, ",") + "]"))
+		default: // stats: slow, as under memory pressure
+			cur := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if cur <= p || peak.CompareAndSwap(p, cur) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			inFlight.Add(-1)
+			_, _ = w.Write([]byte(cpuStats(1, 1)))
+		}
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	d := collect(t, docker.New(sock, fakeVMs{}))
+	if len(d.Containers) != n {
+		t.Fatalf("got %d containers, want %d", len(d.Containers), n)
+	}
+	if peak.Load() < 2 {
+		t.Fatalf("stats requests were sequential (peak %d in flight)", peak.Load())
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,7 +70,8 @@ type identity struct {
 func New(sys System) *Finder { return &Finder{sys: sys, known: map[int]identity{}} }
 
 // List returns the running VMs, in PID order of the system listing. A process
-// that exits while being read is left out rather than failing the list.
+// that exits while being read is left out; a VM that is still running but
+// cannot be read is an error, since dropping it would under-report its cost.
 func (f *Finder) List(ctx context.Context) ([]VM, error) {
 	pids, err := f.sys.VMPIDs()
 	if err != nil {
@@ -79,16 +81,25 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 	vms := make([]VM, 0, len(pids))
 	for _, pid := range pids {
 		id, err := f.identify(ctx, pid)
-		if err != nil {
-			continue
+		var fp uint64
+		if err == nil {
+			fp, err = f.footprint(ctx, pid)
 		}
-		fp, err := f.footprint(ctx, pid)
 		if err != nil {
-			continue
+			if f.exited(pid) {
+				continue
+			}
+			return nil, fmt.Errorf("vmproc: reading VM %d: %w", pid, err)
 		}
 		vms = append(vms, VM{PID: pid, Kind: id.kind, Name: id.name, FootprintBytes: fp})
 	}
 	return vms, nil
+}
+
+// exited reports whether pid is no longer a VM process.
+func (f *Finder) exited(pid int) bool {
+	pids, err := f.sys.VMPIDs()
+	return err == nil && !slices.Contains(pids, pid)
 }
 
 // forgetExited drops classifications of PIDs no longer listed, so a reused
@@ -119,9 +130,13 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 		return identity{}, err
 	}
 	id = classify(out)
-	f.mu.Lock()
-	f.known[pid] = id
-	f.mu.Unlock()
+	// Unknown is not cached: a VM caught while booting has not opened its
+	// image yet and is classified once it has.
+	if id.kind != Unknown {
+		f.mu.Lock()
+		f.known[pid] = id
+		f.mu.Unlock()
+	}
 	return id, nil
 }
 

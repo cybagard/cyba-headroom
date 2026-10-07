@@ -10,9 +10,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -24,11 +25,15 @@ type VMLister interface {
 	List(ctx context.Context) ([]vmproc.VM, error)
 }
 
+// statsWorkers bounds concurrent stats requests: sequential round trips for
+// a large compose project would overrun the source timeout under pressure.
+const statsWorkers = 8
+
 // Source is the Docker source.
 type Source struct {
-	http *http.Client
-	vms  VMLister
-	now  func() time.Time
+	socket string
+	http   *http.Client
+	vms    VMLister
 
 	// prevCPU holds each container's CPU counters from the previous tick.
 	// Collect is never called concurrently (daemon.Tick), so no lock.
@@ -38,14 +43,14 @@ type Source struct {
 type cpuCounters struct{ container, system uint64 }
 
 // New returns a source for the Engine API at socket.
-func New(socket string, vms VMLister, now func() time.Time) *Source {
+func New(socket string, vms VMLister) *Source {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
-	return &Source{http: &http.Client{Transport: tr}, vms: vms, now: now, prevCPU: map[string]cpuCounters{}}
+	return &Source{socket: socket, http: &http.Client{Transport: tr}, vms: vms, prevCPU: map[string]cpuCounters{}}
 }
 
 // Name implements daemon.Source.
@@ -53,10 +58,13 @@ func (s *Source) Name() string { return "docker" }
 
 // Collect implements daemon.Source.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
+	if s.socket == "" {
+		return nil, errors.New("docker: socket unknown (no DOCKER_HOST or HOME); set [docker] socket")
+	}
 	var info struct{ MemTotal uint64 }
 	if err := s.get(ctx, "/info", &info); err != nil {
 		if notRunning(err) {
-			return reading{protocol.Docker{}}, nil
+			return reading{protocol.Docker{Containers: []protocol.Container{}}}, nil
 		}
 		return nil, err
 	}
@@ -66,15 +74,15 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	if err := s.get(ctx, "/containers/json", &list); err != nil {
 		return nil, err
 	}
+	stats, err := s.allStats(ctx, list)
+	if err != nil {
+		return nil, err
+	}
 	cpu := make(map[string]cpuCounters, len(list))
-	for _, c := range list {
-		var st apiStats
-		err := s.get(ctx, "/containers/"+c.ID+"/stats?stream=false&one-shot=true", &st)
-		if errors.Is(err, errNotFound) {
-			continue // exited since the list call
-		}
-		if err != nil {
-			return nil, err
+	for i, c := range list {
+		st := stats[i]
+		if st == nil {
+			continue // exited or being removed since the list call
 		}
 		cur := cpuCounters{st.CPUStats.CPUUsage.TotalUsage, st.CPUStats.SystemCPUUsage}
 		cpu[c.ID] = cur
@@ -94,9 +102,10 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	}
 	s.prevCPU = cpu // containers that are gone drop out
 
+	// A VM read failure leaves the containers valid; report it alongside.
 	vms, err := s.vms.List(ctx)
 	if err != nil {
-		return nil, err
+		d.VMError = err.Error()
 	}
 	for _, vm := range vms {
 		if vm.Kind == vmproc.Docker {
@@ -105,6 +114,32 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		}
 	}
 	return reading{d}, nil
+}
+
+// allStats fetches each container's one-shot stats concurrently. A container
+// whose stats fail (exited, being removed, restarting) gets nil and is left
+// out; only when every one fails is that an error, since the engine itself is
+// then likely broken.
+func (s *Source) allStats(ctx context.Context, list []apiContainer) ([]*apiStats, error) {
+	out := make([]*apiStats, len(list))
+	errs := make([]error, len(list))
+	sem := make(chan struct{}, statsWorkers)
+	var wg sync.WaitGroup
+	for i, c := range list {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var st apiStats
+			if errs[i] = s.get(ctx, "/containers/"+c.ID+"/stats?stream=false&one-shot=true", &st); errs[i] == nil {
+				out[i] = &st
+			}
+		})
+	}
+	wg.Wait()
+	if len(list) > 0 && !slices.ContainsFunc(out, func(st *apiStats) bool { return st != nil }) {
+		return nil, fmt.Errorf("docker: stats for all %d containers failed: %w", len(list), errs[0])
+	}
+	return out, nil
 }
 
 // apiContainer is the part of GET /containers/json headroom reads.
@@ -186,8 +221,6 @@ func firstOr(xs []string, def string) string {
 	return xs[0]
 }
 
-var errNotFound = errors.New("not found")
-
 // notRunning reports a socket that is missing or not accepting: Docker
 // Desktop is quit, which is a state to report, not a failure.
 func notRunning(err error) bool {
@@ -204,9 +237,6 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("docker: GET %s: %w", path, errNotFound)
-	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET %s: %s", path, resp.Status)
 	}

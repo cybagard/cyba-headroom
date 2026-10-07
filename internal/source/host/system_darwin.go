@@ -1,3 +1,5 @@
+//go:build darwin
+
 package host
 
 import "golang.org/x/sys/unix"

@@ -31,6 +31,6 @@ func TestRealLMStudio(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.Models) != len(loaded) || got.FootprintBytes == nil {
-		t.Fatalf("%d models, footprint %d; lms ps lists %d", len(got.Models), got.FootprintBytes, len(loaded))
+		t.Fatalf("%d models, footprint %v; lms ps lists %d", len(got.Models), got.FootprintBytes, len(loaded))
 	}
 }

@@ -20,11 +20,6 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
-// VMLister lists VM processes; vmproc.Finder implements it.
-type VMLister interface {
-	List(ctx context.Context) ([]vmproc.VM, error)
-}
-
 // statsWorkers bounds concurrent stats requests: sequential round trips for
 // a large compose project would overrun the source timeout under pressure.
 const statsWorkers = 8
@@ -33,7 +28,7 @@ const statsWorkers = 8
 type Source struct {
 	socket string
 	http   *http.Client
-	vms    VMLister
+	vms    vmproc.Lister
 
 	// prevCPU holds each container's CPU counters from the previous tick.
 	// Collect is never called concurrently (daemon.Tick), so no lock.
@@ -43,7 +38,7 @@ type Source struct {
 type cpuCounters struct{ container, system uint64 }
 
 // New returns a source for the Engine API at socket.
-func New(socket string, vms VMLister) *Source {
+func New(socket string, vms vmproc.Lister) *Source {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer

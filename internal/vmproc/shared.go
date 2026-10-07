@@ -22,7 +22,6 @@ type Shared struct {
 	mu  sync.Mutex
 	at  time.Time
 	vms []VM
-	err error
 }
 
 // NewShared wraps inner; ttl should be well under the collection interval.
@@ -32,13 +31,17 @@ func NewShared(inner Lister, ttl time.Duration, now func() time.Time) *Shared {
 
 // List returns the cached listing if it is younger than ttl, else lists anew.
 // Holding the lock while listing makes concurrent callers wait and share.
+// Errors are not cached: one caller's timeout must not become everyone's.
 func (s *Shared) List(ctx context.Context) ([]VM, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.at.IsZero() && s.now().Sub(s.at) < s.ttl {
-		return s.vms, s.err
+		return s.vms, nil
 	}
-	s.vms, s.err = s.inner.List(ctx)
-	s.at = s.now()
-	return s.vms, s.err
+	vms, err := s.inner.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.vms, s.at = vms, s.now()
+	return vms, nil
 }

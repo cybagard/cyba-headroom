@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
@@ -25,21 +26,28 @@ type Procs interface {
 	Cwd(ctx context.Context, pid int) (string, error)
 }
 
-// VMLister lists VM processes; vmproc.Finder implements it.
-type VMLister interface {
-	List(ctx context.Context) ([]vmproc.VM, error)
-}
-
 // Source is the Tart source.
 type Source struct {
 	cli   CLI
 	procs Procs
-	vms   VMLister
+	vms   vmproc.Lister
+	home  string
+
+	// configs caches tart get per running VM: a running VM's config cannot
+	// change. Collect is never called concurrently (daemon.Tick).
+	configs map[string]vmConfig
 }
 
-// New returns a source. A nil cli means tart is not installed.
-func New(cli CLI, procs Procs, vms VMLister) *Source {
-	return &Source{cli: cli, procs: procs, vms: vms}
+type vmConfig struct {
+	OS     string
+	CPU    int
+	Memory uint64 // MiB
+}
+
+// New returns a source. A nil cli means tart is not installed; home expands
+// ~ in --dir shares.
+func New(cli CLI, procs Procs, vms vmproc.Lister, home string) *Source {
+	return &Source{cli: cli, procs: procs, vms: vms, home: home, configs: map[string]vmConfig{}}
 }
 
 // Name implements daemon.Source.
@@ -60,6 +68,18 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	if err := s.tartJSON(ctx, &list, "list", "--format", "json"); err != nil {
 		return nil, err
 	}
+	running := map[string]bool{}
+	for _, v := range list {
+		running[v.Name] = v.Running
+	}
+	for name := range s.configs {
+		if !running[name] {
+			delete(s.configs, name) // stopped: re-read if it starts again
+		}
+	}
+
+	// VM processes and launch details are optional: on failure, report the
+	// VMs without them rather than failing the reading.
 	footprint := map[string]uint64{}
 	procs, err := s.vms.List(ctx)
 	if err != nil {
@@ -70,34 +90,25 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			footprint[p.Name] = p.FootprintBytes
 		}
 	}
-
-	running := map[string]bool{}
-	for _, v := range list {
-		running[v.Name] = v.Running
-	}
 	launches, err := s.launches(ctx, running)
 	if err != nil {
-		return nil, err
+		t.LaunchError = err.Error()
 	}
 
 	for _, v := range list {
 		if !v.Running {
 			continue
 		}
-		var cfg struct {
-			OS     string
-			CPU    int
-			Memory uint64 // MiB
+		cfg, ok := s.configs[v.Name]
+		if !ok {
+			if err := s.tartJSON(ctx, &cfg, "get", v.Name, "--format", "json"); err != nil {
+				continue // stopped or deleted since tart list
+			}
+			s.configs[v.Name] = cfg
 		}
-		if err := s.tartJSON(ctx, &cfg, "get", v.Name, "--format", "json"); err != nil {
-			return nil, err
-		}
-		vm := protocol.TartVM{
-			Name:           v.Name,
-			OS:             cfg.OS,
-			CPUs:           cfg.CPU,
-			MemoryBytes:    cfg.Memory << 20,
-			FootprintBytes: footprint[v.Name],
+		vm := protocol.TartVM{Name: v.Name, OS: cfg.OS, CPUs: cfg.CPU, MemoryBytes: cfg.Memory << 20}
+		if fp, ok := footprint[v.Name]; ok {
+			vm.FootprintBytes = &fp
 		}
 		if l, ok := launches[v.Name]; ok {
 			vm.RunPID, vm.LaunchCwd, vm.SharedDirs = l.pid, l.cwd, l.dirs
@@ -127,51 +138,85 @@ func (s *Source) launches(ctx context.Context, running map[string]bool) (map[str
 		if len(p.Args) < 2 || p.Args[1] != "run" {
 			continue
 		}
-		name, dirs := parseRun(p.Args[2:], running)
-		if name == "" {
+		name, dirs := parseRun(p.Args[2:])
+		if !running[name] {
 			continue
 		}
-		l := launch{pid: p.PID, dirs: dirs}
+		l := launch{pid: p.PID}
 		if p.PPID > 1 { // reparented to launchd: the launcher is gone
 			l.cwd, _ = s.procs.Cwd(ctx, p.PPID)
+		}
+		for _, d := range dirs {
+			if hp := hostPath(d, s.home, l.cwd); hp != "" {
+				l.dirs = append(l.dirs, hp)
+			}
 		}
 		out[name] = l
 	}
 	return out, nil
 }
 
-// parseRun reads tart run's arguments: the VM is the argument naming a
-// running VM (options may follow it), and each --dir value is
-// [name:]path[:options].
-func parseRun(args []string, running map[string]bool) (name string, dirs []string) {
+// valueFlags are the tart run options that take a value (tart 2.40 --help),
+// so their values are not mistaken for the VM name.
+var valueFlags = map[string]bool{
+	"--serial-path": true, "--disk": true, "--rosetta": true, "--dir": true,
+	"--net-bridged": true, "--net-softnet-allow": true, "--net-softnet-block": true,
+	"--net-softnet-control-fd": true, "--net-softnet-expose": true,
+	"--root-disk-opts": true, "--provisioning-opts": true,
+}
+
+// parseRun reads tart run's arguments: the VM name is the one positional
+// argument, and --dir values are collected raw.
+func parseRun(args []string) (name string, dirs []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		var dir string
-		switch {
-		case strings.HasPrefix(a, "--dir="):
-			dir = strings.TrimPrefix(a, "--dir=")
-		case a == "--dir" && i+1 < len(args):
-			i++
-			dir = args[i]
-		case running[a]:
-			name = a
+		if !strings.HasPrefix(a, "-") {
+			if name == "" {
+				name = a
+			}
+			continue
 		}
-		if p := hostPath(dir); p != "" {
-			dirs = append(dirs, p)
+		flag, value, hasValue := strings.Cut(a, "=")
+		if !valueFlags[flag] {
+			continue
+		}
+		if !hasValue && i+1 < len(args) {
+			i++
+			value = args[i]
+		}
+		if flag == "--dir" {
+			dirs = append(dirs, value)
 		}
 	}
 	return name, dirs
 }
 
-// hostPath extracts the absolute host path from a --dir value.
-func hostPath(dir string) string {
-	i := strings.Index(dir, "/")
-	if i < 0 {
+// hostPath resolves a --dir value, [name:]path[:options], to an absolute host
+// path: ~ expands to home, as tart does, and a relative path is relative to
+// where tart run was started (cwd). Unresolvable paths give "".
+func hostPath(dir, home, cwd string) string {
+	parts := strings.Split(dir, ":")
+	path := parts[0]
+	if len(parts) > 1 && !looksLikePath(parts[0]) && looksLikePath(parts[1]) {
+		path = parts[1] // named share
+	}
+	switch {
+	case path == "~" || strings.HasPrefix(path, "~/"):
+		if home == "" {
+			return ""
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+	case filepath.IsAbs(path):
+	case cwd != "":
+		path = filepath.Join(cwd, path)
+	default:
 		return ""
 	}
-	p, _, _ := strings.Cut(dir[i:], ":")
-	return p
+	return filepath.Clean(path)
 }
+
+// looksLikePath tells a share's path from its name: names are plain words.
+func looksLikePath(s string) bool { return strings.ContainsAny(s, "/~.") }
 
 func (s *Source) tartJSON(ctx context.Context, v any, args ...string) error {
 	out, err := s.cli.Run(ctx, args...)

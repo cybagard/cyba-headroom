@@ -1,0 +1,18 @@
+version: "2"
+linters:
+  enable:
+    - errorlint
+    - gocritic
+    - misspell
+    - revive
+    - unconvert
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+formatters:
+  enable:
+    - gofmt
+    - goimports

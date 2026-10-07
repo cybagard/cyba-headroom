@@ -16,7 +16,7 @@ endif
 # The host is darwin/arm64; build for it wherever the build runs.
 BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-.PHONY: build test test-host test-tart darwin-tests lint fmt tidy clean dc-image dc-shell
+.PHONY: build test test-host test-tart darwin-tests test-hooks hooks lint fmt tidy clean dc-image dc-shell
 
 build: $(DC_DEP)
 	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
@@ -33,6 +33,19 @@ test-host: darwin-tests
 
 test-tart: darwin-tests
 	scripts/tart-test.sh
+
+# Git hooks run on the host (they read Orca and the local scrub list). The
+# hook is copied, not linked or set via core.hooksPath, so a checked-out
+# branch cannot change what runs; re-run after changing scripts/hooks.
+hooks:
+	@d=$$(git rev-parse --git-common-dir)/hooks; mkdir -p $$d; \
+	install -m 0755 scripts/hooks/pre-commit $$d/pre-commit; \
+	install -m 0755 scripts/hooks/pre-commit $$d/commit-msg; \
+	git config --unset core.hooksPath || true; \
+	echo "installed pre-commit and commit-msg into $$d"
+
+test-hooks:
+	scripts/hooks/pre-commit_test.sh
 
 lint: $(DC_DEP)
 	$(RUN) go vet ./...

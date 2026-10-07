@@ -147,7 +147,7 @@ func (d *Daemon) answer(c net.Conn) protocol.Reply {
 	}
 	switch req.Op {
 	case protocol.OpPing:
-		return protocol.Reply{OK: true}
+		return protocol.Reply{OK: true, PID: os.Getpid()}
 	case protocol.OpStatus:
 		return protocol.Reply{OK: true, Snapshot: d.Snapshot()}
 	default:

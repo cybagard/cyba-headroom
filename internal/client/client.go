@@ -63,3 +63,12 @@ func Status(ctx context.Context, socket string, timeout time.Duration) (*protoco
 	}
 	return rep.Snapshot, nil
 }
+
+// Ping checks that a daemon answers on socket and returns its process ID.
+func Ping(ctx context.Context, socket string, timeout time.Duration) (int, error) {
+	rep, err := Do(ctx, socket, timeout, protocol.Request{Op: protocol.OpPing})
+	if err != nil {
+		return 0, err
+	}
+	return rep.PID, nil
+}

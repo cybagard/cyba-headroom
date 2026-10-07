@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const launchctl = "/bin/launchctl"
@@ -130,6 +132,24 @@ type Agent struct {
 	Label string
 	UID   int
 	Run   Runner
+	// Poll is how often Load checks launchd while it settles; 0 means 100ms.
+	Poll time.Duration
+}
+
+func (a Agent) poll() time.Duration {
+	if a.Poll > 0 {
+		return a.Poll
+	}
+	return 100 * time.Millisecond
+}
+
+func (a Agent) sleep(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(a.poll()):
+		return nil
+	}
 }
 
 func (a Agent) domain() string  { return fmt.Sprintf("gui/%d", a.UID) }
@@ -150,24 +170,96 @@ func notLoaded(err error) bool {
 }
 
 // Load (re)loads the agent from plist: an old instance is booted out first,
-// so a reinstall picks up a new binary and plist.
+// so a reinstall picks up a new binary and plist. The service is enabled
+// before it is bootstrapped, because launchd refuses to bootstrap a disabled
+// one. A bootstrap that races launchd's teardown fails with 5 (I/O error) and
+// is retried.
 func (a Agent) Load(ctx context.Context, plist string) error {
 	if err := a.Unload(ctx); err != nil {
 		return err
 	}
-	if err := a.launchctl(ctx, "bootstrap", a.domain(), plist); err != nil {
+	if err := a.launchctl(ctx, "enable", a.service()); err != nil {
 		return err
 	}
-	return a.launchctl(ctx, "enable", a.service())
+	var err error
+	for range 5 {
+		var e *Exit
+		if err = a.launchctl(ctx, "bootstrap", a.domain(), plist); err == nil || !errors.As(err, &e) || e.Code != 5 {
+			return err
+		}
+		if serr := a.sleep(ctx); serr != nil {
+			return err
+		}
+	}
+	return err
 }
 
-// Unload stops the agent and removes it from the domain. An agent that is
-// not loaded is fine.
+// Unload stops the agent and removes it from the domain, waiting until
+// launchd no longer lists it (bootout returns before the teardown ends). An
+// agent that is not loaded is fine.
 func (a Agent) Unload(ctx context.Context) error {
-	if err := a.launchctl(ctx, "bootout", a.service()); err != nil && !notLoaded(err) {
+	err := a.launchctl(ctx, "bootout", a.service())
+	switch {
+	case notLoaded(err):
+		return nil
+	case err != nil:
 		return err
 	}
-	return nil
+	for range 50 {
+		if loaded, err := a.Loaded(ctx); err != nil || !loaded {
+			return err
+		}
+		if err := a.sleep(ctx); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("launchctl bootout: %s is still loaded after %s", a.service(), 50*a.poll())
+}
+
+// PID returns the agent's running process, or 0 if it is not loaded or not
+// running.
+func (a Agent) PID(ctx context.Context) (int, error) {
+	out, err := a.Run.Run(ctx, launchctl, "print", a.service())
+	switch {
+	case notLoaded(err):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("launchctl print: %w", err)
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "pid = "); ok {
+			return strconv.Atoi(v)
+		}
+	}
+	return 0, nil
+}
+
+// ProgramPath returns the program (ProgramArguments[0]) of a plist that Plist
+// wrote: the binary an installed agent runs.
+func ProgramPath(plist []byte) (string, error) {
+	d := xml.NewDecoder(bytes.NewReader(plist))
+	d.Strict = false
+	var text string
+	afterKey := false
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return "", errors.New("plist has no ProgramArguments")
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			text += string(t)
+		case xml.StartElement:
+			text = ""
+		case xml.EndElement:
+			switch {
+			case t.Name.Local == "key":
+				afterKey = text == "ProgramArguments"
+			case t.Name.Local == "string" && afterKey:
+				return text, nil
+			}
+		}
+	}
 }
 
 // Loaded reports whether the agent is in the domain.

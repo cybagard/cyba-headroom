@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -27,11 +26,8 @@ func runLogs(e Env) int {
 		fmt.Fprintln(e.Stderr, "headroom: HOME is not set")
 		return 1
 	}
-	dir := filepath.Join(home, "Library", "Logs", "headroom")
-	logPath, crashPath := filepath.Join(dir, "daemon.log"), filepath.Join(dir, "daemon.stderr.log")
-	_, logErr := os.Stat(logPath)
-	_, crashErr := os.Stat(crashPath)
-	if logErr != nil && crashErr != nil && !follow {
+	dir, logPath, crashPath := logPaths(home)
+	if empty(logPath) && empty(crashPath) && !follow {
 		fmt.Fprintf(e.Stdout, "no logs yet in %s (is the daemon installed? `headroom install`)\n", dir)
 		return 0
 	}
@@ -109,4 +105,10 @@ func (fl *follower) close() {
 		_ = fl.f.Close()
 		fl.f = nil
 	}
+}
+
+// empty reports whether path is missing or has nothing in it.
+func empty(path string) bool {
+	fi, err := os.Stat(path)
+	return err != nil || fi.Size() == 0
 }

@@ -99,3 +99,26 @@ func TestStartsOverWhenTheExistingFileIsFull(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestOpenSurvivesAFailedRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// daemon.log.1 is a non-empty directory: the rename fails.
+	if err := os.MkdirAll(filepath.Join(path+".1", "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := logfile.Open(path, 10)
+	if err != nil {
+		t.Fatalf("a failed rotation stopped the log: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write([]byte("still logging\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(t, path), "still logging") {
+		t.Fatal("line lost")
+	}
+}

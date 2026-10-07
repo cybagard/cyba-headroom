@@ -140,11 +140,8 @@ func runDaemon(e Env) int {
 		}
 		logPath, a = a[1], a[1:]
 	}
-	cfg, err := config.Load(e.Getenv)
-	if err != nil {
-		fmt.Fprintln(e.Stderr, "headroom:", err)
-		return 1
-	}
+	// Open the log first, so a startup failure under launchd is in the log
+	// that `headroom logs` shows, not only in the crash log.
 	logOut := e.Stderr
 	if logPath != "" {
 		// Size-capped, so weeks under launchd cannot fill the disk.
@@ -155,8 +152,23 @@ func runDaemon(e Env) int {
 		}
 		defer func() { _ = f.Close() }()
 		logOut = f
+		// launchd's crash log has no cap; a crash loop must not grow it forever.
+		if crash, ok := e.Stderr.(*os.File); ok {
+			trimCrashLog(crash, 1<<20)
+		}
 	}
 	log := slog.New(slog.NewTextHandler(logOut, nil))
+	fail := func(err error) int {
+		if logPath != "" {
+			log.Error("daemon failed to start", "err", err)
+		}
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	cfg, err := config.Load(e.Getenv)
+	if err != nil {
+		return fail(err)
+	}
 	// Collectors register here as they land (#49). Docker and Tart
 	// share one VM process listing per tick.
 	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
@@ -181,8 +193,7 @@ func runDaemon(e Env) int {
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {
-		fmt.Fprintln(e.Stderr, "headroom:", err)
-		return 1
+		return fail(err)
 	}
 	params := cfg.Budget.Params()
 	d.SetDerive(func(s *protocol.Snapshot) {
@@ -193,8 +204,7 @@ func runDaemon(e Env) int {
 	})
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
-		fmt.Fprintln(e.Stderr, "headroom:", err)
-		return 1
+		return fail(err)
 	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()

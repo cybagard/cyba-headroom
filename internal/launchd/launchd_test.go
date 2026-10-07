@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/launchd"
 )
@@ -69,31 +70,41 @@ func TestPlistWithoutEnv(t *testing.T) {
 	}
 }
 
-// fakeLaunchctl records calls and answers from a table keyed by subcommand.
+// fakeLaunchctl records calls and answers from a table keyed by subcommand;
+// queued answers (next) are used first, one per call.
 type fakeLaunchctl struct {
 	calls  []string
 	answer map[string]error
+	next   map[string][]error
+	out    map[string]string
 }
 
 func (f *fakeLaunchctl) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := strings.Join(append([]string{name}, args...), " ")
 	f.calls = append(f.calls, call)
-	return nil, f.answer[args[0]]
+	if q := f.next[args[0]]; len(q) > 0 {
+		f.next[args[0]] = q[1:]
+		return []byte(f.out[args[0]]), q[0]
+	}
+	return []byte(f.out[args[0]]), f.answer[args[0]]
 }
 
 func agent(f *fakeLaunchctl) launchd.Agent {
-	return launchd.Agent{Label: "io.example.agent", UID: 501, Run: f}
+	return launchd.Agent{Label: "io.example.agent", UID: 501, Run: f, Poll: time.Millisecond}
 }
 
-func TestLoadBootsOutThenBootstrapsAndEnables(t *testing.T) {
+var gone = launchd.ExitError(113, "Could not find service")
+
+func TestLoadEnablesBeforeBootstrapping(t *testing.T) {
+	// enable first: launchd refuses to bootstrap a disabled service.
 	f := &fakeLaunchctl{answer: map[string]error{"bootout": launchd.ExitError(3, "Boot-out failed: 3: No such process")}}
 	if err := agent(f).Load(context.Background(), "/Users/dev/Library/LaunchAgents/io.example.agent.plist"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		"/bin/launchctl bootout gui/501/io.example.agent",
-		"/bin/launchctl bootstrap gui/501 /Users/dev/Library/LaunchAgents/io.example.agent.plist",
 		"/bin/launchctl enable gui/501/io.example.agent",
+		"/bin/launchctl bootstrap gui/501 /Users/dev/Library/LaunchAgents/io.example.agent.plist",
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s", strings.Join(f.calls, "\n"))
@@ -109,8 +120,55 @@ func TestUnloadIgnoresNotLoaded(t *testing.T) {
 	}
 }
 
+func TestReloadWaitsForTheOldInstanceToGo(t *testing.T) {
+	// bootout returns while launchd is still tearing the service down; print
+	// still finds it twice before it is gone.
+	f := &fakeLaunchctl{answer: map[string]error{"print": gone},
+		next: map[string][]error{"print": {nil, nil}}}
+	if err := agent(f).Load(context.Background(), "/p.plist"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.calls, "\n")
+	if strings.Count(got, " print ") != 3 || strings.Index(got, "print") > strings.Index(got, "bootstrap") {
+		t.Fatalf("calls:\n%s", got)
+	}
+}
+
+func TestBootstrapRetriesWhileLaunchdIsBusy(t *testing.T) {
+	busy := launchd.ExitError(5, "Bootstrap failed: 5: Input/output error")
+	f := &fakeLaunchctl{answer: map[string]error{"print": gone}, next: map[string][]error{"bootstrap": {busy, busy}}}
+	if err := agent(f).Load(context.Background(), "/p.plist"); err != nil {
+		t.Fatalf("err = %v after %d bootstraps", err, strings.Count(strings.Join(f.calls, "\n"), "bootstrap"))
+	}
+}
+
+func TestPID(t *testing.T) {
+	f := &fakeLaunchctl{answer: map[string]error{}, out: map[string]string{"print": "gui/501/io.example.agent = {\n\tstate = running\n\tpid = 4242\n}"}}
+	if pid, err := agent(f).PID(context.Background()); pid != 4242 || err != nil {
+		t.Fatalf("pid = %d, %v", pid, err)
+	}
+	f.out["print"] = "gui/501/io.example.agent = {\n\tstate = not running\n}"
+	if pid, err := agent(f).PID(context.Background()); pid != 0 || err != nil {
+		t.Fatalf("not running: pid = %d, %v", pid, err)
+	}
+	f.answer["print"] = gone
+	if pid, err := agent(f).PID(context.Background()); pid != 0 || err != nil {
+		t.Fatalf("not loaded: pid = %d, %v", pid, err)
+	}
+}
+
+func TestProgramPath(t *testing.T) {
+	p := launchd.Plist(launchd.Spec{Label: "l", Args: []string{"/opt/tools/a & b", "daemon"}, Stderr: "/e"})
+	if got, err := launchd.ProgramPath(p); got != "/opt/tools/a & b" || err != nil {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := launchd.ProgramPath([]byte("<plist><dict></dict></plist>")); err == nil {
+		t.Fatal("no ProgramArguments: want an error")
+	}
+}
+
 func TestFailuresCarryLaunchctlsMessage(t *testing.T) {
-	f := &fakeLaunchctl{answer: map[string]error{"bootstrap": launchd.ExitError(5, "Bootstrap failed: 5: Input/output error")}}
+	f := &fakeLaunchctl{answer: map[string]error{"print": gone, "bootstrap": launchd.ExitError(5, "Bootstrap failed: 5: Input/output error")}}
 	err := agent(f).Load(context.Background(), "/p.plist")
 	if err == nil || !strings.Contains(err.Error(), "Input/output error") || !strings.Contains(err.Error(), "bootstrap") {
 		t.Fatalf("err = %v", err)
@@ -122,7 +180,7 @@ func TestFailuresCarryLaunchctlsMessage(t *testing.T) {
 }
 
 func TestLoaded(t *testing.T) {
-	f := &fakeLaunchctl{answer: map[string]error{}}
+	f := &fakeLaunchctl{answer: map[string]error{}, next: map[string][]error{}}
 	if ok, err := agent(f).Loaded(context.Background()); !ok || err != nil {
 		t.Fatalf("loaded = %v, %v", ok, err)
 	}

@@ -4,8 +4,6 @@
 package logfile
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -55,18 +53,14 @@ func (l *File) open() error {
 	return nil
 }
 
-// rotate moves the current file to path.1, replacing an older one. The log
-// is reopened even if the move fails, so logging goes on in the old file.
+// rotate moves the current file to path.1, replacing an older one, and
+// opens a new one. If the move fails, the old file is reopened and logging
+// goes on there: a log that cannot rotate must not stop the daemon. Only a
+// failure to reopen is an error.
 func (l *File) rotate() error {
 	_ = l.f.Close()
-	moveErr := os.Rename(l.path, l.path+".1")
-	if errors.Is(moveErr, fs.ErrNotExist) {
-		moveErr = nil
-	}
-	if err := l.open(); err != nil {
-		return err
-	}
-	return moveErr
+	_ = os.Rename(l.path, l.path+".1")
+	return l.open()
 }
 
 // Write appends p, rotating first if p would take the file past the cap, so
@@ -75,8 +69,9 @@ func (l *File) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.size > 0 && l.size+int64(len(p)) > l.max {
-		// If the move failed, the line still goes to the reopened file.
-		_ = l.rotate()
+		if err := l.rotate(); err != nil {
+			return 0, err
+		}
 	}
 	n, err := l.f.Write(p)
 	l.size += int64(n)

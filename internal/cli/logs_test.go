@@ -124,3 +124,69 @@ func TestLogsFollowAcrossRotation(t *testing.T) {
 		t.Errorf("repeated lines:\n%s", out.String())
 	}
 }
+
+func TestDaemonStartupErrorsReachTheLog(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	_ = os.WriteFile(dir+"/config.toml", []byte("[polcy]\n"), 0o600) // typo: an unknown key
+	logPath := filepath.Join(dir, "logs", "daemon.log")
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": dir}, "headroom", "daemon", "--log", logPath)
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	b, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(b), "unknown keys") || !strings.Contains(stderr, "unknown keys") {
+		t.Fatalf("log %q, stderr %q: want the error in both", b, stderr)
+	}
+}
+
+func TestTrimCrashLog(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = f.WriteString(strings.Repeat("x", 100))
+	trimCrashLog(f, 50)
+	if fi, _ := f.Stat(); fi.Size() != 0 {
+		t.Fatalf("size %d after trim", fi.Size())
+	}
+	_, _ = f.WriteString("small")
+	trimCrashLog(f, 50)
+	if fi, _ := f.Stat(); fi.Size() != 5 {
+		t.Fatalf("trimmed a small log: %d", fi.Size())
+	}
+}
+
+func TestLogsHintWhenInstalledButEmpty(t *testing.T) {
+	home := t.TempDir()
+	_, logPath, crash := logPaths(home)
+	_ = os.MkdirAll(filepath.Dir(crash), 0o700)
+	_ = os.WriteFile(crash, nil, 0o600) // what install leaves
+	_ = logPath
+	code, out, _ := run(t, map[string]string{"HOME": home}, "headroom", "logs")
+	if code != 0 || !strings.Contains(out, "no logs yet") {
+		t.Fatalf("exit %d out %q", code, out)
+	}
+}
+
+func TestTailReadsOnlyTheEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.log")
+	var b strings.Builder
+	for i := 0; i < 100000; i++ {
+		b.WriteString("line ")
+		b.WriteString(strings.Repeat("y", 40))
+		b.WriteString("\n")
+	}
+	b.WriteString("last line\n")
+	_ = os.WriteFile(path, []byte(b.String()), 0o600)
+	var out strings.Builder
+	tail(&out, path, 3)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 4 || lines[3] != "last line" {
+		t.Fatalf("got %q", out.String())
+	}
+}

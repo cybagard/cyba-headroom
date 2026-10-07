@@ -30,6 +30,9 @@ type Reply struct {
 	OK       bool      `json:"ok"`
 	Error    string    `json:"error,omitempty"`
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	// PID is the daemon's process ID, on ping: install uses it to tell the
+	// launchd daemon from one started in a terminal.
+	PID int `json:"pid,omitempty"`
 }
 
 // Snapshot is the daemon's current view of every source. It is immutable once

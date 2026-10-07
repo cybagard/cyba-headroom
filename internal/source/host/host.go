@@ -108,6 +108,7 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 		FreePercent:    int(free),
 		SwapTotalBytes: swapTotal,
 		SwapUsedBytes:  swapUsed,
+		UsedBytes:      s.memoryUsed(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,6 +193,45 @@ func (s *Source) freeSlope() float64 {
 		return 0
 	}
 	return sxy / sxx
+}
+
+// memoryUsed is Activity Monitor's "Memory Used": app memory (anonymous pages
+// less purgeable ones), wired pages, and what the compressor occupies. It is
+// optional: nil if any counter is missing, so the rest of the reading stands.
+func (s *Source) memoryUsed() *uint64 {
+	var v [5]uint64
+	for i, name := range []string{
+		"vm.page_pageable_internal_count",
+		"vm.page_purgeable_count",
+		"vm.page_wired_count",
+		"hw.pagesize",
+		"vm.compressor_bytes_used",
+	} {
+		var err error
+		if v[i], err = s.uint(name); err != nil {
+			return nil
+		}
+	}
+	internal, purgeable, wired, pagesize, compressed := v[0], v[1], v[2], v[3], v[4]
+	app := internal - min(purgeable, internal)
+	used := (app+wired)*pagesize + compressed
+	return &used
+}
+
+// uint reads an integer sysctl of either width. The page counters mix 32 and
+// 64 bits, and their widths have changed between macOS releases.
+func (s *Source) uint(name string) (uint64, error) {
+	b, err := s.sys.Raw(name)
+	if err != nil {
+		return 0, err
+	}
+	switch len(b) {
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(b)), nil
+	case 8:
+		return binary.LittleEndian.Uint64(b), nil
+	}
+	return 0, fmt.Errorf("%s: %d bytes, want 4 or 8", name, len(b))
 }
 
 // rate is the per-second increase of a cumulative counter; a counter that went

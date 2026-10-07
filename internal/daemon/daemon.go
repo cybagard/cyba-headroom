@@ -46,6 +46,7 @@ type Daemon struct {
 	timeout time.Duration
 	log     *slog.Logger
 	now     func() time.Time
+	derive  func(*protocol.Snapshot)
 
 	tickMu sync.Mutex
 	seq    uint64
@@ -69,6 +70,11 @@ func New(sources []Source, sourceTimeout time.Duration, log *slog.Logger) (*Daem
 	d.snap.Store(&protocol.Snapshot{Sources: map[string]protocol.SourceStatus{}})
 	return d, nil
 }
+
+// SetDerive sets f to run on each new snapshot after every source's reading
+// is applied and before it is published, to fill sections computed from the
+// others (the budget, R2). Call it before Run or Tick.
+func (d *Daemon) SetDerive(f func(*protocol.Snapshot)) { d.derive = f }
 
 // Snapshot returns the latest published snapshot. Callers must not modify it.
 func (d *Daemon) Snapshot() *protocol.Snapshot { return d.snap.Load() }
@@ -167,6 +173,9 @@ func (d *Daemon) Tick(ctx context.Context) {
 			s.last.Apply(next)
 		}
 		next.Sources[s.src.Name()] = s.status
+	}
+	if d.derive != nil {
+		d.derive(next)
 	}
 	d.seq++
 	next.Seq = d.seq

@@ -130,6 +130,8 @@ func TestLoadErrors(t *testing.T) {
 		{"source timeout not below interval", "[daemon]\ninterval = \"2s\"\nsource_timeout = \"2s\"\n", "daemon.source_timeout must be > 0 and < daemon.interval"},
 		{"trend window too short", "[daemon]\ninterval = \"1m\"\nsource_timeout = \"3s\"\ntrend_window = \"2m\"\n", "daemon.trend_window must be at least 3 x daemon.interval"},
 		{"socket too long", "socket = \"/" + strings.Repeat("s", 110) + "\"\n", "socket path is"},
+		{"negative docker overhead", "[budget]\ndocker_overhead_gb = -1\n", "budget.docker_overhead_gb must be >= 0"},
+		{"negative lmstudio idle", "[budget]\nlmstudio_idle_gb = -0.5\n", "budget.lmstudio_idle_gb must be >= 0"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {
@@ -169,5 +171,16 @@ func write(t *testing.T, dir, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBudgetParams(t *testing.T) {
+	d := Defaults("/x").Budget
+	if d.DockerOverheadGB != 1.6 || d.LMStudioIdleGB != 0.6 || d.HostBaselineGB != 0 {
+		t.Fatalf("defaults = %+v, want docker 1.6, lmstudio 0.6, baseline 0 (set by #23)", d)
+	}
+	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, LMStudioIdleGB: 0.25}.Params()
+	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.LMStudioIdleBytes != 1<<28 {
+		t.Fatalf("params = %+v; GB means GiB, as macOS reports memory", p)
 	}
 }

@@ -20,7 +20,7 @@ make lint    # go vet + golangci-lint
 bin/headroom config   # effective config and its path
 ```
 
-Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds default to 0 (unset) until the observe baseline (#23).
+Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds and the host baseline default to 0 (unset) until the observe baseline (#23); the Docker and LM Studio overheads default to the spike measurements. GB means GiB.
 
 ```toml
 [policy]
@@ -29,7 +29,9 @@ per_worktree_cap_gb = 12
 lease_timeout = "2m"
 
 [budget]
-host_baseline_gb = 10
+host_baseline_gb = 10      # macOS, Orca, agents
+docker_overhead_gb = 1.6   # Docker VM beyond its containers
+lmstudio_idle_gb = 0.6     # LM Studio with no model loaded
 ```
 
 License: MIT

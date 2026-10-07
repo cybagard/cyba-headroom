@@ -23,14 +23,15 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #14 **R1: Docker/Podman collector**
 - [ ] #49 **R1: Podman collector and Docker+Podman both-running warning**
 - [x] #15 **R1: Tart collector**
-- [ ] #16 **R1: LM Studio collector**
+- [x] #16 **R1: LM Studio collector**
 - [x] #17 **R1: Orca collector**
 - [x] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
 - [ ] #19 **R2: budget model (reserved vs used vs headroom)**
 - [ ] #20 **R3: worktree attribution**
 - [ ] #21 **R4: observe view — `headroom` and `headroom --watch`**
 - [ ] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**
-- [ ] #23 **Baseline: two-week observe run, set default thresholds**
+- [ ] #55 **R1: record samples to disk for baseline and suggest**
+- [ ] #23 **Baseline: `headroom suggest` learns thresholds from recorded samples; two-week run**
 
 ## [#3](https://github.com/cybagard/cyba-headroom/issues/3) Phase 3: Gate — launch env, shims, leases, slot gate, fail-open, policy (R5–R10)
 

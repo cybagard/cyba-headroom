@@ -10,8 +10,9 @@ Issue: #18 · macOS 27 (host, 64 GB) and macOS 15.7.7 (Tart VM, 4 GB) · 2026-10
 | Free % | `kern.memorystatus_level` | ✅ | ✅ |
 | Swap used/total | `vm.swapusage` (`struct xsw_usage`) | ✅ | ✅ |
 | Swap-in/out totals | `vm.compressor.swapper.swap{ins,outs}_total` | ❌ absent | ✅ |
+| Memory used (#19): anonymous − purgeable + wired pages, + compressor | `vm.page_pageable_internal_count`, `vm.page_purgeable_count`, `vm.page_wired_count`, `hw.pagesize`, `vm.compressor_bytes_used` | ❌ no `vm.page_wired_count` | ✅ |
 
-On macOS 15 the swap totals exist only through `host_statistics64`, which `vm_stat` uses and which needs cgo. headroom leaves the swap rates out there; swap used and the pressure level still work. One collection takes ~0.13 ms.
+On macOS 15 the swap totals and the wired page count exist only through `host_statistics64`, which `vm_stat` uses and which needs cgo. headroom leaves the swap rates and memory used out there; swap used and the pressure level still work. One collection takes ~0.13 ms. The page counters mix 32- and 64-bit widths (`vm.page_purgeable_count` is 64-bit on macOS 27, the others 32), so headroom reads either width.
 
 ## Real-load check (Tart VM, 4 GB)
 

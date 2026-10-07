@@ -73,6 +73,9 @@ type Budget struct {
 	// Unknown names sources with no reading yet. They count as 0, so headroom
 	// is then an upper bound.
 	Unknown []string `json:"unknown,omitempty"`
+	// Stale names budget inputs whose latest read failed; their last good
+	// reading is used, so the budget may lag what is running now.
+	Stale []string `json:"stale,omitempty"`
 }
 
 // BudgetComponent is one part of the reservation.

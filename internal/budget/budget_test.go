@@ -244,3 +244,20 @@ func TestUnaccounted(t *testing.T) {
 		})
 	}
 }
+
+func TestStaleSourcesAreFlagged(t *testing.T) {
+	s := busyMac()
+	s.Sources = map[string]protocol.SourceStatus{
+		"host":   {},
+		"docker": {Stale: true, Err: "timed out"},
+		"tart":   {Stale: true},
+		"orca":   {Stale: true}, // not a budget input
+	}
+	b := budget.Compute(s, budget.Params{})
+	if want := []string{"docker", "tart"}; !slices.Equal(b.Stale, want) {
+		t.Fatalf("stale = %v, want %v", b.Stale, want)
+	}
+	if b.ReservedBytes == 0 {
+		t.Error("stale readings must still count")
+	}
+}

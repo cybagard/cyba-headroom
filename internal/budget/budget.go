@@ -18,7 +18,8 @@ type Params struct {
 }
 
 // Compute returns the budget for s. A source with no reading yet is listed
-// in Unknown and counts as 0; a stale source's last good reading is used.
+// in Unknown and counts as 0; a stale source's last good reading is used and
+// the source is listed in Stale.
 func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	var b protocol.Budget
 	// Each component's host cost is removed from host used to leave the
@@ -65,6 +66,12 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	}
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
+
+	for _, name := range []string{"host", "docker", "tart", "lmstudio"} {
+		if s.Sources[name].Stale {
+			b.Stale = append(b.Stale, name)
+		}
+	}
 
 	// Without the host's total there is nothing to subtract from: headroom is
 	// unknown, not -reserved.

@@ -1,0 +1,65 @@
+[
+  {
+    "Name": "base-a",
+    "Running": false,
+    "Accessed": "2026-10-04T21:42:42Z",
+    "Source": "local",
+    "Size": 88,
+    "State": "stopped",
+    "Disk": 140
+  },
+  {
+    "Name": "base-b",
+    "Running": false,
+    "Accessed": "2026-10-05T05:20:01Z",
+    "Source": "local",
+    "Size": 88,
+    "State": "stopped",
+    "Disk": 140
+  },
+  {
+    "Name": "base-c",
+    "Running": false,
+    "Accessed": "2026-10-05T05:17:18Z",
+    "Source": "local",
+    "Size": 90,
+    "State": "stopped",
+    "Disk": 140
+  },
+  {
+    "Name": "headroom-mac",
+    "Running": true,
+    "Accessed": "2026-10-07T17:27:17Z",
+    "Source": "local",
+    "Size": 86,
+    "State": "running",
+    "Disk": 140
+  },
+  {
+    "Name": "macos-xcode",
+    "Running": false,
+    "Accessed": "2026-10-07T17:26:22Z",
+    "Source": "local",
+    "Size": 88,
+    "State": "stopped",
+    "Disk": 140
+  },
+  {
+    "Name": "ghcr.io/cirruslabs/macos-sequoia-xcode:latest",
+    "Running": false,
+    "Accessed": "2026-10-04T08:22:21Z",
+    "Source": "OCI",
+    "Size": 88,
+    "State": "stopped",
+    "Disk": 140
+  },
+  {
+    "Name": "ghcr.io/cirruslabs/macos-sequoia-xcode@sha256:d25b1ba480166790c90326c33f9add68c745f38bad443db0bf803ddb50931f72",
+    "Running": false,
+    "Accessed": "2026-10-04T08:22:21Z",
+    "Source": "OCI",
+    "Size": 88,
+    "State": "stopped",
+    "Disk": 140
+  }
+]

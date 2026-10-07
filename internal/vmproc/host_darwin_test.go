@@ -4,7 +4,9 @@ package vmproc_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -59,5 +61,32 @@ func TestHostListsTheRealVMs(t *testing.T) {
 		if vm.Kind == vmproc.Unknown || vm.FootprintBytes == 0 {
 			t.Errorf("VM %+v not classified or no footprint", vm)
 		}
+	}
+}
+
+func TestHostProcessesNamedAndCwd(t *testing.T) {
+	self := os.Getpid()
+	comm := filepath.Base(os.Args[0])
+	if len(comm) > 16 {
+		comm = comm[:16] // the kernel keeps MAXCOMLEN bytes
+	}
+	procs, err := vmproc.Host{}.ProcessesNamed(comm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(procs, func(p vmproc.Process) bool { return p.PID == self })
+	if i < 0 {
+		t.Fatalf("own process %d (%q) not in %+v", self, comm, procs)
+	}
+	p := procs[i]
+	if p.PPID != os.Getppid() || !slices.Equal(p.Args, os.Args) {
+		t.Fatalf("got ppid=%d args=%q, want %d %q", p.PPID, p.Args, os.Getppid(), os.Args)
+	}
+
+	wd, _ := os.Getwd()
+	wd, _ = filepath.EvalSymlinks(wd)
+	cwd, err := vmproc.Host{}.Cwd(context.Background(), self)
+	if err != nil || cwd != wd {
+		t.Fatalf("Cwd = %q, %v; want %q", cwd, err, wd)
 	}
 }

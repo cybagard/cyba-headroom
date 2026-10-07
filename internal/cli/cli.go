@@ -4,13 +4,22 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"sync"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
+	"github.com/cybagard/cyba-headroom/internal/daemon"
 )
 
 // Version is set at build time with -ldflags "-X .../internal/cli.Version=...".
@@ -52,7 +61,9 @@ func Run(e Env) int {
 	case "", "--watch":
 		return notYet(e, "observe view", 21)
 	case "daemon":
-		return notYet(e, "daemon", 13)
+		return runDaemon(e)
+	case "status":
+		return runStatus(e)
 	case "install", "uninstall":
 		return notYet(e, cmd, 22)
 	case "run":
@@ -80,6 +91,67 @@ func runConfig(e Env) int {
 	return 0
 }
 
+// runDaemon runs the collector daemon until SIGINT or SIGTERM.
+func runDaemon(e Env) int {
+	cfg, err := config.Load(e.Getenv)
+	if err != nil {
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
+	// Collectors register here as they land (#14–#18).
+	d, err := daemon.New(nil, cfg.Daemon.SourceTimeout.Duration, log)
+	if err != nil {
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	ln, err := daemon.Listen(cfg.Socket)
+	if err != nil {
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration)
+
+	var wg sync.WaitGroup
+	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
+	err = d.Serve(ctx, ln)
+	stop()
+	wg.Wait()
+	if err != nil {
+		log.Error("daemon stopped", "err", err)
+		return 1
+	}
+	log.Info("daemon stopped")
+	return 0
+}
+
+// runStatus prints the daemon's raw snapshot as JSON. The human view is #21.
+func runStatus(e Env) int {
+	if len(e.Args) > 2 && e.Args[2] != "--json" {
+		fmt.Fprintf(e.Stderr, "headroom: status: unknown flag %q\n", e.Args[2])
+		return 2
+	}
+	cfg, err := config.Load(e.Getenv)
+	if err != nil {
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	snap, err := client.Status(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
+	if err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom daemon`)\n", cfg.Socket, err)
+		return 1
+	}
+	enc := json.NewEncoder(e.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(snap); err != nil {
+		fmt.Fprintln(e.Stderr, "headroom:", err)
+		return 1
+	}
+	return 0
+}
+
 // runShim is the gate shim placeholder; the real passthrough lands in #26.
 func runShim(e Env, name string) int {
 	fmt.Fprintf(e.Stderr, "headroom: %s shim is not implemented yet (#26); remove the shim dir from PATH\n", name)
@@ -98,6 +170,8 @@ func usage(w io.Writer) {
   headroom --watch    observe view, refreshing
   headroom config     print the effective config and its path
   headroom daemon     run the collector daemon
+  headroom status [--json]
+                      print the daemon's raw snapshot as JSON
   headroom run -- <agent> [args]
                       launch an agent with the shim dir first on PATH
   headroom doctor     check PATH order and identity in this shell

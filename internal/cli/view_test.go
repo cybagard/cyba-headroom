@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -104,9 +105,6 @@ func (s *syncBuffer) String() string {
 // watch runs `headroom --watch` until stop is closed, with a fast poll.
 func watch(t *testing.T, env map[string]string, tty bool, stop <-chan struct{}) (*syncBuffer, <-chan int) {
 	t.Helper()
-	old := watchInterval
-	watchInterval = 10 * time.Millisecond
-	t.Cleanup(func() { watchInterval = old })
 	var out syncBuffer
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { <-stop; cancel() }()
@@ -114,7 +112,7 @@ func watch(t *testing.T, env map[string]string, tty bool, stop <-chan struct{}) 
 	go func() {
 		code <- Run(Env{Args: []string{"headroom", "--watch"}, Stdout: &out, Stderr: io.Discard,
 			Getenv: func(k string) string { return env[k] }, Context: ctx,
-			Terminal: func() (bool, int) { return tty, 80 }})
+			Terminal: func() (bool, int) { return tty, 80 }, watchEvery: 10 * time.Millisecond})
 	}()
 	return &out, code
 }
@@ -177,8 +175,9 @@ func TestWatchKeepsRetryingWhileTheDaemonIsDown(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(out.String(), "not reachable") })
 	time.Sleep(30 * time.Millisecond)
 	close(stop)
-	if c := <-code; c != 0 || strings.Count(out.String(), "not reachable") != 1 {
-		t.Fatalf("exit %d, out %q: want one notice and a clean exit", c, out.String())
+	// Never reached the daemon: exit 1, as the one-shot view does.
+	if c := <-code; c != 1 || strings.Count(out.String(), "not reachable") != 1 {
+		t.Fatalf("exit %d, out %q: want one notice and exit 1", c, out.String())
 	}
 }
 
@@ -189,5 +188,41 @@ func TestTerminalOfUnknownSizeIsStillATerminal(t *testing.T) {
 	}
 	if got := terminalWidth(132); got != 132 {
 		t.Fatalf("width = %d, want 132", got)
+	}
+}
+
+func TestHelpListsViewFlags(t *testing.T) {
+	_, out, _ := run(t, nil, "headroom", "help")
+	for _, want := range []string{"--watch", "--all"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help lacks %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestSuspendRestoresTheTerminal(t *testing.T) {
+	env, _ := serveDaemon(t)
+	var out syncBuffer
+	suspend := make(chan os.Signal, 1)
+	stopped := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	code := make(chan int, 1)
+	go func() {
+		code <- Run(Env{Args: []string{"headroom", "--watch"}, Stdout: &out, Stderr: io.Discard,
+			Getenv: func(k string) string { return env[k] }, Context: ctx,
+			Terminal:   func() (bool, int) { return true, 80 },
+			watchEvery: 10 * time.Millisecond, suspend: suspend,
+			stopSelf: func() { stopped <- struct{}{} }})
+	}()
+	waitFor(t, func() bool { return strings.Count(out.String(), clearScreen) >= 1 })
+	suspend <- syscall.SIGTSTP
+	<-stopped
+	waitFor(t, func() bool { return strings.Count(out.String(), enterScreen) == 2 })
+	cancel()
+	<-code
+	s := out.String()
+	i, j := strings.Index(s, leaveScreen), strings.LastIndex(s, enterScreen)
+	if i < 0 || j < i {
+		t.Fatalf("want leave before the stop and enter after it: %q", s)
 	}
 }

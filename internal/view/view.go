@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -94,7 +95,7 @@ func (r *renderer) reserved(b *protocol.Budget) {
 			continue
 		}
 		if c.ReservedBytes > 0 {
-			parts = append(parts, c.Name+" "+num(c.ReservedBytes))
+			parts = append(parts, clean(c.Name)+" "+num(c.ReservedBytes))
 		}
 	}
 	r.add("  reserved: %s", strings.Join(parts, " · "))
@@ -129,17 +130,17 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 			mark = "⚑" // holds resources while no agent works (R4, #24)
 		}
 		r.add(rowFormat, short(name(w), 18), agentSummary(ag), mark,
-			containers(w.Usage), vms(w.Usage), cpu(w.Usage), gbOrUnknown(w.AgentMemoryBytes))
+			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true), gbOrUnknown(w.AgentMemoryBytes))
 	}
 	u := a.Unattributed
 	if len(u.Containers)+len(u.TartVMs) > 0 {
-		r.add(rowFormat, "unattributed", "", "", containers(u), vms(u), cpu(u), "")
+		r.add(rowFormat, "unattributed", "", "", containers(u), vms(u), cpu(u, nil, false), "")
 		var items []string
 		for _, c := range u.Containers {
-			items = append(items, fmt.Sprintf("%s (%s)", c.Name, c.Reason))
+			items = append(items, fmt.Sprintf("%s (%s)", clean(c.Name), clean(c.Reason)))
 		}
 		for _, vm := range u.TartVMs {
-			items = append(items, fmt.Sprintf("%s (%s)", vm.Name, vm.Reason))
+			items = append(items, fmt.Sprintf("%s (%s)", clean(vm.Name), clean(vm.Reason)))
 		}
 		r.add("  %s", strings.Join(items, ", "))
 	}
@@ -172,29 +173,54 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 		if !st.Stale {
 			continue
 		}
-		msg := st.Err
+		msg := clean(st.Err)
 		if n == "orca" && s.Attribution != nil && s.Attribution.OrcaStale {
 			msg = "worktree list may be out of date"
 		}
-		parts = append(parts, r.paint(yellow, n+" stale: "+msg))
+		parts = append(parts, r.paint(yellow, clean(n)+" stale: "+msg))
 	}
 	r.add("%s", strings.Join(parts, " · "))
 }
 
 func name(w protocol.WorktreeUsage) string {
 	if w.Name != "" {
-		return w.Name
+		return clean(w.Name)
 	}
-	return filepath.Base(w.Path)
+	return clean(filepath.Base(w.Path))
+}
+
+// clean makes text from outside headroom (names, errors) safe to print:
+// control characters, which could move the cursor, set the title or write
+// the clipboard, and Unicode bidi overrides become "?". After this, the only
+// escapes in a line are the view's own colours.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// durationLabel names the trend window: 5m, 30s, 1m30s, 1h.
+func durationLabel(d time.Duration) string {
+	s := d.String() // 5m0s, 30s, 1m30s, 1h0m0s
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // short cuts s to n columns, marking the cut with an ellipsis.
 func short(s string, n int) string {
 	rs := []rune(s)
-	if len(rs) < n {
+	if len(rs) <= n {
 		return s
 	}
-	return string(rs[:n-2]) + "…"
+	return string(rs[:n-1]) + "…"
 }
 
 // stateRank orders agent states for the summary: the busiest comes first.
@@ -213,7 +239,7 @@ func agentSummary(ag []protocol.Agent) string {
 		return "–"
 	}
 	first := slices.MinFunc(ag, func(a, b protocol.Agent) int { return rank(a.State) - rank(b.State) })
-	s := first.Type + " " + first.State
+	s := clean(first.Type) + " " + clean(first.State)
 	if len(ag) > 1 {
 		s += fmt.Sprintf(" +%d", len(ag)-1)
 	}
@@ -239,14 +265,25 @@ func vms(u protocol.Usage) string {
 	return fmt.Sprintf("%-3d %s GB", len(u.TartVMs), num(u.TartMemoryBytes))
 }
 
-func cpu(u protocol.Usage) string {
-	switch {
-	case len(u.Containers) == 0:
-		return "–"
-	case u.ContainerCPUPercent == nil:
-		return "?"
+// cpu is the containers' CPU plus, for a worktree, its agents' own; "?" if
+// a part is unknown. Tart VMs' CPU is not measured yet.
+func cpu(u protocol.Usage, agents *float64, withAgents bool) string {
+	total := 0.0
+	if len(u.Containers) > 0 {
+		if u.ContainerCPUPercent == nil {
+			return "?"
+		}
+		total += *u.ContainerCPUPercent
 	}
-	return fmt.Sprintf("%.0f%%", *u.ContainerCPUPercent)
+	if withAgents {
+		if agents == nil {
+			return "?"
+		}
+		total += *agents
+	} else if len(u.Containers) == 0 {
+		return "–"
+	}
+	return fmt.Sprintf("%.0f%%", total)
 }
 
 func gbOrUnknown(b *uint64) string {
@@ -257,15 +294,19 @@ func gbOrUnknown(b *uint64) string {
 }
 
 func (r *renderer) trend(t protocol.Trend) string {
-	label := fmt.Sprintf("%dm", int(r.o.TrendWindow.Minutes()))
+	label := durationLabel(r.o.TrendWindow)
+	dir := clean(t.Direction)
+	if dir == "" {
+		dir = "?"
+	}
 	if t.Worst == "" || t.Worst == "normal" {
-		return fmt.Sprintf("(%s: %s)", label, t.Direction)
+		return fmt.Sprintf("(%s: %s)", label, dir)
 	}
 	secs := t.WarnSeconds
 	if t.Worst == "critical" {
 		secs = t.CriticalSeconds
 	}
-	return fmt.Sprintf("(%s: %s, worst %s %.0fs)", label, t.Direction, t.Worst, secs)
+	return fmt.Sprintf("(%s: %s, worst %s %.0fs)", label, dir, clean(t.Worst), secs)
 }
 
 // ANSI colours.
@@ -285,8 +326,10 @@ func (r *renderer) pressure(level string) string {
 		return r.paint(yellow, level)
 	case "normal":
 		return r.paint(green, level)
+	case "":
+		return "?"
 	}
-	return level
+	return clean(level)
 }
 
 func (r *renderer) paint(color, s string) string {

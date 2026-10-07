@@ -162,7 +162,8 @@ func TestWorktreeRows(t *testing.T) {
 	lines := render(t, busy(), view.Options{})
 	line(t, lines, "WORKTREE")
 	r := line(t, lines, "Fix login")
-	for _, want := range []string{"claude working", "2   3.0 GB", "15%", "1.0 GB"} {
+	// CPU is the containers' 15% plus the agents' 30%.
+	for _, want := range []string{"claude working", "2   3.0 GB", "45%", "1.0 GB"} {
 		has(t, r, want)
 	}
 	if strings.Contains(r, "⚑") {
@@ -265,4 +266,50 @@ func visible(s string) int {
 		}
 	}
 	return n
+}
+
+func TestNamesUseTheirColumn(t *testing.T) {
+	s := busy()
+	s.Attribution.Worktrees[0].Name = "exactly-eighteen-c" // 18 runes: fits
+	s.Attribution.Worktrees[1].Name = "nineteen-characters"
+	lines := render(t, s, view.Options{})
+	line(t, lines, "exactly-eighteen-c ")
+	line(t, lines, "nineteen-characte… ")
+}
+
+func TestUnknownPressureShowsQuestionMark(t *testing.T) {
+	s := busy()
+	s.Host.Pressure, s.Host.Trend = "", protocol.Trend{}
+	has(t, render(t, s, view.Options{})[0], "pressure ? (5m: ?)")
+}
+
+func TestTrendLabelKeepsSeconds(t *testing.T) {
+	has(t, render(t, busy(), view.Options{TrendWindow: 90 * time.Second})[0], "(1m30s: steady")
+	has(t, render(t, busy(), view.Options{TrendWindow: 30 * time.Second})[0], "(30s: steady")
+	has(t, render(t, busy(), view.Options{TrendWindow: time.Hour})[0], "(1h: steady")
+}
+
+func TestOutsideTextCannotControlTheTerminal(t *testing.T) {
+	s := busy()
+	s.Attribution.Worktrees[0].Name = "evil\x1b]52;c;aGk=\x07name"
+	s.Orca.Worktrees[0].Agents[0].Type = "cl\x1b[2Jaude"
+	s.Attribution.Unattributed.Containers[0].Name = "db\nfake row"
+	s.Sources["docker"] = protocol.SourceStatus{Stale: true, Err: "boom\r\x9b2J"}
+	out := strings.Join(render(t, s, view.Options{Color: true}), "\n")
+	for _, bad := range []string{"\x1b]", "\x1b[2J", "\x07", "\r", "\x9b"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output carries %q", bad)
+		}
+	}
+	line(t, strings.Split(out, "\n"), "db?fake row (no_match)")
+	if n := strings.Count(out, "\x1b["); n != strings.Count(out, "\x1b[0m")*2 {
+		t.Errorf("escapes other than the view's own colours: %d", n)
+	}
+}
+
+func TestCPUUnknownWhenAgentsUnknown(t *testing.T) {
+	s := busy()
+	s.Attribution.Worktrees[0].AgentCPUPercent = nil
+	r := line(t, render(t, s, view.Options{}), "Fix login")
+	has(t, r, "?")
 }

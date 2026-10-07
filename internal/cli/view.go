@@ -20,7 +20,7 @@ import (
 
 // watchInterval is how often --watch polls the daemon. A snapshot changes
 // once per daemon tick; polling faster keeps its age current.
-var watchInterval = time.Second
+const watchInterval = time.Second
 
 // Terminal escapes for --watch: the alternate screen keeps the user's
 // scrollback, and the cursor is hidden while frames redraw.
@@ -68,57 +68,93 @@ func runView(e Env) int {
 	if !watch {
 		snap, err := fetch(context.Background())
 		if err != nil {
-			fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom daemon`)\n", cfg.Socket, err)
+			unreachable(e, cfg.Socket, err)
 			return 1
 		}
 		view.Render(e.Stdout, snap, opts())
 		return 0
 	}
 
-	base := e.Context
-	if base == nil {
-		base = context.Background()
-	}
-	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
+	// SIGHUP too: a closed terminal window should still restore and exit.
+	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
+	w := watcher{out: e.Stdout, fetch: fetch, opts: opts, socket: cfg.Socket,
+		every: e.watchEvery, suspend: e.suspend, stopSelf: e.stopSelf}
+	if w.every == 0 {
+		w.every = watchInterval
+	}
+	var reached bool
 	if tty, _ := terminal(); tty {
-		watchTerminal(ctx, e.Stdout, fetch, opts, cfg.Socket)
+		if w.suspend == nil {
+			ch := make(chan os.Signal, 1)
+			signal.Notify(ch, syscall.SIGTSTP)
+			defer signal.Stop(ch)
+			w.suspend = ch
+		}
+		if w.stopSelf == nil {
+			w.stopSelf = func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGSTOP) }
+		}
+		reached = w.terminal(ctx)
 	} else {
-		watchPlain(ctx, e.Stdout, fetch, opts, cfg.Socket)
+		reached = w.plain(ctx)
+	}
+	if !reached {
+		return 1 // never got a snapshot, as the one-shot view would say
 	}
 	return 0
 }
 
+// watcher runs --watch.
+type watcher struct {
+	out      io.Writer
+	fetch    fetchFunc
+	opts     func() view.Options
+	socket   string
+	every    time.Duration
+	suspend  <-chan os.Signal
+	stopSelf func()
+}
+
 type fetchFunc func(context.Context) (*protocol.Snapshot, error)
 
-// watchTerminal redraws the whole view every interval on the alternate
-// screen, and restores the terminal when ctx ends.
-func watchTerminal(ctx context.Context, w io.Writer, fetch fetchFunc, opts func() view.Options, socket string) {
-	fmt.Fprint(w, enterScreen)
-	defer fmt.Fprint(w, leaveScreen)
-	tick := time.NewTicker(watchInterval)
+// terminal redraws the whole view every interval on the alternate screen,
+// and restores the terminal when ctx ends or before Ctrl-Z suspends the
+// process. It reports whether any snapshot arrived.
+func (w watcher) terminal(ctx context.Context) (reached bool) {
+	fmt.Fprint(w.out, enterScreen)
+	defer fmt.Fprint(w.out, leaveScreen)
+	tick := time.NewTicker(w.every)
 	defer tick.Stop()
 	for {
 		var frame bytes.Buffer
 		frame.WriteString(clearScreen)
-		if snap, err := fetch(ctx); err != nil {
-			fmt.Fprintf(&frame, "headroom: daemon not reachable at %s, retrying (%v)\n", socket, err)
+		if snap, err := w.fetch(ctx); err != nil {
+			fmt.Fprintf(&frame, "headroom: daemon not reachable at %s, retrying (%v)\n", w.socket, err)
 		} else {
-			view.Render(&frame, snap, opts())
+			reached = true
+			view.Render(&frame, snap, w.opts())
 		}
-		_, _ = w.Write(frame.Bytes()) // one write, so a frame never shows half drawn
+		_, _ = w.out.Write(frame.Bytes()) // one write, so a frame never shows half drawn
 		select {
 		case <-ctx.Done():
-			return
+			return reached
+		case <-w.suspend:
+			// Give the shell its screen back, stop, and take it again on
+			// resume (SIGCONT).
+			fmt.Fprint(w.out, leaveScreen)
+			w.stopSelf()
+			fmt.Fprint(w.out, enterScreen)
 		case <-tick.C:
 		}
 	}
 }
 
-// watchPlain prints a frame only when there is a new snapshot, or when the
-// daemon becomes unreachable, so a pipe or log gets no repeats.
-func watchPlain(ctx context.Context, w io.Writer, fetch fetchFunc, opts func() view.Options, socket string) {
-	tick := time.NewTicker(watchInterval)
+// plain prints a frame only when there is a new snapshot, or when the
+// daemon becomes unreachable, so a pipe or log gets no repeats. It reports
+// whether any snapshot arrived.
+func (w watcher) plain(ctx context.Context) (reached bool) {
+	out, fetch, opts, socket := w.out, w.fetch, w.opts, w.socket
+	tick := time.NewTicker(w.every)
 	defer tick.Stop()
 	var lastSeq uint64
 	down, first := false, true
@@ -126,18 +162,18 @@ func watchPlain(ctx context.Context, w io.Writer, fetch fetchFunc, opts func() v
 		snap, err := fetch(ctx)
 		switch {
 		case err != nil && !down && ctx.Err() == nil:
-			fmt.Fprintf(w, "headroom: daemon not reachable at %s, retrying (%v)\n", socket, err)
+			fmt.Fprintf(out, "headroom: daemon not reachable at %s, retrying (%v)\n", socket, err)
 			down = true
 		case err == nil && (down || first || snap.Seq != lastSeq):
 			if !first {
-				fmt.Fprintln(w)
+				fmt.Fprintln(out)
 			}
-			view.Render(w, snap, opts())
-			lastSeq, down, first = snap.Seq, false, false
+			view.Render(out, snap, opts())
+			lastSeq, down, first, reached = snap.Seq, false, false, true
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return reached
 		case <-tick.C:
 		}
 	}

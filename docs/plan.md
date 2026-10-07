@@ -21,7 +21,8 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #12 **Scaffold project (build, CI, lint, tests, config dir)**
 - [x] #13 **R1: daemon core — collection loop and in-memory budget state**
 - [x] #14 **R1: Docker/Podman collector**
-- [ ] #49 **R1: Podman collector and Docker+Podman both-running warning**
+- [ ] #49 **R1: runtime autodiscovery — Docker Desktop, Podman, every VM process** (parked: needs a LuLu rule for Podman)
+- [ ] #59 **R1: Ollama collector**
 - [x] #15 **R1: Tart collector**
 - [x] #16 **R1: LM Studio collector**
 - [x] #17 **R1: Orca collector**
@@ -30,7 +31,7 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [ ] #20 **R3: worktree attribution**
 - [ ] #21 **R4: observe view — `headroom` and `headroom --watch`**
 - [ ] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**
-- [ ] #55 **R1: record samples to disk for baseline and suggest**
+- [x] #55 **R1: record samples to disk for baseline and suggest**
 - [ ] #23 **Baseline: `headroom suggest` learns thresholds from recorded samples; two-week run**
 
 ## [#3](https://github.com/cybagard/cyba-headroom/issues/3) Phase 3: Gate — launch env, shims, leases, slot gate, fail-open, policy (R5–R10)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
@@ -143,6 +144,8 @@ func runDaemon(e Env) int {
 	d.SetDerive(func(s *protocol.Snapshot) {
 		b := budget.Compute(s, params)
 		s.Budget = &b
+		at := attribution.Attribute(s)
+		s.Attribution = &at
 	})
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {

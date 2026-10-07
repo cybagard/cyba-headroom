@@ -48,6 +48,72 @@ type Snapshot struct {
 
 	// Budget is derived from the sections above once per tick (R2).
 	Budget *Budget `json:"budget,omitempty"`
+	// Attribution assigns containers and Tart VMs to worktrees, derived once
+	// per tick (R3).
+	Attribution *Attribution `json:"attribution,omitempty"`
+}
+
+// Attribution is what each worktree runs (R3).
+type Attribution struct {
+	// Worktrees are Orca's live worktrees, in Orca's order, including those
+	// that run nothing.
+	Worktrees []WorktreeUsage `json:"worktrees"`
+	// Unattributed holds what matched no live worktree, or several.
+	Unattributed Usage `json:"unattributed"`
+	// OrcaStale means Orca's latest read failed: worktrees are the last
+	// ones seen, and may have changed since.
+	OrcaStale bool `json:"orca_stale,omitempty"`
+}
+
+// ComposeWorkingDirLabel is the label Docker Compose sets on a container to
+// its project directory.
+const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
+
+// WorktreeUsage is one worktree and what it runs.
+type WorktreeUsage struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+	Usage
+	// The agents' own processes, from Orca (RSS); absent when Orca's memory
+	// diagnostics failed.
+	AgentMemoryBytes *uint64  `json:"agent_memory_bytes,omitempty"`
+	AgentCPUPercent  *float64 `json:"agent_cpu_percent,omitempty"`
+}
+
+// Usage is a set of containers and Tart VMs, with totals.
+type Usage struct {
+	Containers           []AttributedContainer `json:"containers"`
+	ContainerMemoryBytes uint64                `json:"container_memory_bytes"`
+	// ContainerCPUPercent is absent while any container's CPU is unknown
+	// (its first tick).
+	ContainerCPUPercent *float64       `json:"container_cpu_percent,omitempty"`
+	TartVMs             []AttributedVM `json:"tart_vms"`
+	// TartMemoryBytes is the VMs' configured memory, what they reserve.
+	TartMemoryBytes uint64 `json:"tart_memory_bytes"`
+	// TartFootprintBytes is absent when a VM's footprint is unknown.
+	TartFootprintBytes *uint64 `json:"tart_footprint_bytes,omitempty"`
+}
+
+// AttributedContainer is a container and how it was matched (By), or why it
+// was not (Reason).
+type AttributedContainer struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	MemoryBytes uint64   `json:"memory_bytes"`
+	CPUPercent  *float64 `json:"cpu_percent,omitempty"`
+	By          string   `json:"by,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+// AttributedVM is a Tart VM and how it was matched (By), or why it was not
+// (Reason).
+type AttributedVM struct {
+	Name           string  `json:"name"`
+	MemoryBytes    uint64  `json:"memory_bytes"`
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	By             string  `json:"by,omitempty"`
+	Reason         string  `json:"reason,omitempty"`
 }
 
 // Budget is reserved vs. used vs. headroom (R2). Reserved is what running

@@ -104,7 +104,7 @@ func TestDaemonServesAllSources(t *testing.T) {
 	for {
 		code, out, _ := run(t, env, "headroom", "status", "--json")
 		// Off macOS the source is registered but stale; on macOS it must serve data.
-		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) && strings.Contains(out, `"tart": {`) && strings.Contains(out, `"orca": {`) && strings.Contains(out, `"lmstudio": {`) && strings.Contains(out, `"budget": {`) &&
+		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) && strings.Contains(out, `"tart": {`) && strings.Contains(out, `"orca": {`) && strings.Contains(out, `"lmstudio": {`) && strings.Contains(out, `"budget": {`) && strings.Contains(out, `"attribution": {`) &&
 			(runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
 			break
 		}

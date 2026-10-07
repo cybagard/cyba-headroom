@@ -15,6 +15,9 @@
 # Install with `make hooks`, which copies this file into .git/hooks as both
 # hooks; re-run it after changing this file. Bypass with --no-verify.
 set -euo pipefail
+# Bytes, not characters: under a UTF-8 locale macOS cut, grep and awk stop
+# at the first invalid byte, and the rest would go unchecked.
+export LC_ALL=C
 
 top=$(git rev-parse --show-toplevel)
 common=$(git rev-parse --git-common-dir)
@@ -77,27 +80,39 @@ fi
 
 sort -u -o "$terms" "$terms"
 
-# lines: "<where>\t<added text>", one per added line.
+# lines: "<where>\t<added text>", one per line to scan for secrets.
+# text: what is scanned for internal names.
 if [[ $# -ge 1 ]]; then
-	# commit-msg: git strips # lines from the message after this hook runs.
-	lines=$(grep -v '^#' "$1" | sed 's/^/the commit message\t/' || true)
-	names=""
+	# commit-msg: drop the diff that `commit -v` adds below the scissors.
+	msg=$(sed -E '/^[^ ] -+ >8 -+$/,$d' "$1")
+	# Every line is scanned for secrets: with --cleanup=verbatim or another
+	# core.commentChar, git keeps lines that start with #.
+	lines=$(printf '%s\n' "$msg" | awk '{ print "the commit message\t" $0 }')
+	# Names: git strips # lines from the message after this hook runs.
+	text=$(printf '%s\n' "$msg" | grep -v '^#' || true)
 	what="the commit message"
 else
-	# Added lines only: a "+++" line is a header only right after "---".
-	# Deleted files are skipped so a leak can be removed. --text, no textconv
-	# and no external diff, so attributes cannot hide content.
-	lines=$(
-		git diff --cached -U0 --no-color --no-ext-diff --no-textconv --text |
-			awk '/^--- / { hdr = 1; next }
-				hdr && /^\+\+\+ / { hdr = 0; f = substr($0, 5); sub(/^b\//, "", f); next }
-				{ hdr = 0 }
-				/^\+/ { print f "\t" substr($0, 2) }'
+	# Added lines only, tracked by hunk: inside a hunk every line starts with
+	# +, - or \, so a content line can never pass for a header. Deleted files
+	# are skipped so a leak can be removed. --text, no textconv and no
+	# external diff, so attributes cannot hide content.
+	added=$(
+		git -c core.quotePath=false diff --cached -U0 --no-color --no-ext-diff --no-textconv --text |
+			awk '/^diff --git / { hunk = 0; next }
+				!hunk && /^\+\+\+ / { f = substr($0, 5); sub(/^"/, "", f); sub(/"$/, "", f); sub(/^b\//, "", f); next }
+				/^@@ / { hunk = 1; next }
+				hunk && /^\+/ { print f "\t" substr($0, 2) }'
 	)
 	names=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=d)
+	# A file name is published too; report it as "a file name", since the
+	# name itself would be the secret.
+	lines=$(
+		printf '%s\n' "$names" | awk 'NF { print "a file name\t" $0 }'
+		printf '%s\n' "$added"
+	)
+	text=$(printf '%s\n%s\n' "$names" "$(printf '%s\n' "$added" | cut -f2-)")
 	what="staged changes"
 fi
-text=$(printf '%s\n%s\n' "$names" "$(printf '%s\n' "$lines" | cut -f2-)")
 fail=0
 
 if [[ -s $terms ]]; then
@@ -111,24 +126,31 @@ if [[ -s $terms ]]; then
 fi
 
 # Secret rules, "name|extended regex". Kept to formats with a fixed prefix
-# so ordinary code does not trip them. No \b: BSD grep on macOS lacks it.
-rules='AWS access key|(^|[^A-Z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Z0-9]|$)
-GitHub token|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}
-Anthropic API key|sk-ant-[A-Za-z0-9_-]{20,}
-OpenAI API key|sk-(proj-|svcacct-|admin-)?[A-Za-z0-9_]{20,}
-Slack token|xox[abposr]-[A-Za-z0-9-]{10,}
-Google API key|AIza[A-Za-z0-9_-]{35}
-Stripe live key|[rs]k_live_[A-Za-z0-9]{20,}
+# so ordinary code does not trip them, and anchored on the left (L) so a
+# prefix inside a longer word (risk-..., base64...AIza) does not count.
+# No \b: BSD grep on macOS lacks it.
+L='(^|[^A-Za-z0-9_-])'
+rules="AWS access key|(^|[^A-Z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Z0-9]|\$)
+GitHub token|${L}(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})
+Anthropic API key|${L}sk-ant-[A-Za-z0-9_-]{20,}
+OpenAI API key|${L}sk-(proj-|svcacct-|admin-)?[A-Za-z0-9_]{20,}
+Slack token|${L}xox[abposr]-[A-Za-z0-9-]{10,}
+Google API key|${L}AIza[A-Za-z0-9_-]{35}
+Stripe live key|${L}[rs]k_live_[A-Za-z0-9]{20,}
 Private key|-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----
-JSON web token|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
-Password in a URL|[A-Za-z][A-Za-z0-9+.-]*://[^/:@[:space:]]+:[^/@[:space:]$<{%][^/@[:space:]]*@'
+JSON web token|${L}eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}
+Password in a URL|[A-Za-z][A-Za-z0-9+.-]*://[^/:@[:space:]]+:[^/@[:space:]\$<{%][^/@[:space:]]*@"
+content=$(printf '%s\n' "$lines" | cut -f2-)
+labels=$(printf '%s\n' "$lines" | cut -f1)
 found=""
 while IFS='|' read -r rule re; do
+	# Matching line numbers; grep's 1 means no match, anything above fails.
+	nums=$(printf '%s\n' "$content" | { grep -n -E -- "$re" || [[ $? == 1 ]]; } | cut -d: -f1)
+	[[ -z $nums ]] && continue
 	# Report the rule and where it matched, never the value.
-	where=$(printf '%s\n' "$lines" | cut -f2- | grep -n -E -- "$re" | cut -d: -f1 || true)
-	for n in $where; do
-		found+="  - $rule in $(printf '%s\n' "$lines" | sed -n "${n}p" | cut -f1)"$'\n'
-	done
+	found+=$(printf '%s\n' "$labels" | awk -v rule="$rule" -v nums="$nums" '
+		BEGIN { n = split(nums, a, "\n"); for (i = 1; i <= n; i++) want[a[i]] }
+		NR in want { print "  - " rule " in " $0 }')$'\n'
 done <<<"$rules"
 if [[ -n $found ]]; then
 	echo "pre-commit: $what contain possible secrets:" >&2

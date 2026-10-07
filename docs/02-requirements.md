@@ -21,10 +21,10 @@
 
 **R3 — Worktree attribution.** The worktree path is the join key.
 
-- [ ] Containers attributed by compose project label, bind-mount path or launching process cwd
-- [ ] Tart VMs attributed by naming convention (VM name contains the worktree name), by the cwd of the process that launched `tart run`, or by its `--dir` host paths. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
-- [ ] Anything that matches no live worktree appears under **unattributed**
-- [ ] Given a container started from worktree `fix-login`, when the view refreshes, then it appears under `fix-login`
+- [x] Containers attributed by compose project label or bind-mount path (#20). Launching process cwd needs the shim's labels or leases (#26, #28, #25)
+- [x] Tart VMs attributed by naming convention (VM name contains the worktree's directory name as whole words, and no other live worktree has that name), by the cwd of the process that launched `tart run`, or by its `--dir` host paths. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
+- [x] Anything that matches no live worktree, or more than one, appears under **unattributed**, with the reason
+- [x] Given a container started from worktree `fix-login`, when the view refreshes, then it appears under `fix-login` (attribution, #20; view, #21)
 
 **R4 — Observe view.** `headroom` prints once; `headroom --watch` refreshes in place.
 

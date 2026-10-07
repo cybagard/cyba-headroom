@@ -12,8 +12,8 @@ import (
 )
 
 // Find returns configured if set, else name on PATH, else the first
-// executable fallback. A fallback starting with "~/" is under HOME. Empty
-// means not installed.
+// executable fallback. A fallback starting with "~/" is under HOME; only
+// absolute results are used. Empty means not installed.
 func Find(configured, name string, getenv func(string) string, fallbacks ...string) string {
 	if configured != "" {
 		return configured
@@ -26,12 +26,10 @@ func Find(configured, name string, getenv func(string) string, fallbacks ...stri
 	home := getenv("HOME")
 	for _, p := range fallbacks {
 		if rest, ok := strings.CutPrefix(p, "~/"); ok {
-			if home == "" {
-				continue
-			}
 			p = filepath.Join(home, rest)
 		}
-		if executable(p) {
+		// A relative HOME would resolve against the daemon's cwd.
+		if filepath.IsAbs(p) && executable(p) {
 			return p
 		}
 	}

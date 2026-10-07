@@ -178,3 +178,62 @@ func TestOtherCLIFailuresAreErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestOrcaQuittingBetweenCallsLeavesMemoryUnknown(t *testing.T) {
+	cli := runningCLI()
+	cli["diagnostics memory --json"] = "not-running.json"
+	got := collect(t, orca.New(cli))
+	if got.MemoryError == "" || got.AppMemoryBytes != 0 {
+		t.Fatalf("memory_error=%q app=%d, want memory marked unknown", got.MemoryError, got.AppMemoryBytes)
+	}
+}
+
+func TestHalfDecodedMemoryIsNotUsed(t *testing.T) {
+	cli := runningCLI()
+	// A newer Orca changes a field's type after app memory was decoded.
+	cli["diagnostics memory --json"] = `{"ok": true, "result": {"app": {"memory": 123},
+		"worktrees": [{"worktreeId": "` + thisWorktree + `", "memory": 5, "cpu": 1, "sessions": [{"pid": "x"}]}]}}`
+	got := collect(t, orca.New(cli))
+	w := find(t, got, thisWorktree)
+	if got.MemoryError == "" || got.AppMemoryBytes != 0 || w.MemoryBytes != 0 {
+		t.Fatalf("memory_error=%q app=%d worktree=%d, want error and no partial figures", got.MemoryError, got.AppMemoryBytes, w.MemoryBytes)
+	}
+}
+
+func TestRowWithoutHostIDIsLocal(t *testing.T) {
+	cli := fakeCLI{
+		"worktree ps --json":        `{"ok": true, "result": {"worktrees": [{"worktreeId": "r::/a", "path": "/a", "agents": []}]}}`,
+		"diagnostics memory --json": `{"ok": true, "result": {"app": {"memory": 0}, "worktrees": []}}`,
+	}
+	if got := collect(t, orca.New(cli)); len(got.Worktrees) != 1 {
+		t.Fatalf("worktrees = %+v, want the row without hostId kept as local", got.Worktrees)
+	}
+}
+
+func TestErrorsCarryTheCodeNotOrcasMessage(t *testing.T) {
+	cli := runningCLI()
+	cli["diagnostics memory --json"] = `{"ok": false, "error": {"code": "internal", "message": "failed reading /Users/alice/secret-project"}}`
+	got := collect(t, orca.New(cli))
+	if !strings.Contains(got.MemoryError, "internal") || strings.Contains(got.MemoryError, "alice") {
+		t.Fatalf("memory_error = %q, want the code without Orca's free text", got.MemoryError)
+	}
+}
+
+// slowCLI delays every call, like CLI start-up on a loaded machine.
+type slowCLI struct {
+	fakeCLI
+	delay time.Duration
+}
+
+func (s slowCLI) Run(ctx context.Context, args ...string) ([]byte, error) {
+	time.Sleep(s.delay)
+	return s.fakeCLI.Run(ctx, args...)
+}
+
+func TestBothCallsRunConcurrently(t *testing.T) {
+	start := time.Now()
+	collect(t, orca.New(slowCLI{runningCLI(), 200 * time.Millisecond}))
+	if el := time.Since(start); el >= 400*time.Millisecond {
+		t.Fatalf("collect took %s, want the two 200 ms calls overlapped", el)
+	}
+}

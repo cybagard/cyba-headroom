@@ -30,8 +30,17 @@ type Config struct {
 	// ShimDir holds the docker/podman/tart symlinks that agents get first on PATH.
 	ShimDir string `toml:"shim_dir"`
 
+	Daemon Daemon `toml:"daemon"`
 	Policy Policy `toml:"policy"`
 	Budget Budget `toml:"budget"`
+}
+
+// Daemon holds collection loop settings (R1).
+type Daemon struct {
+	// Interval is how often every source is read.
+	Interval Duration `toml:"interval"`
+	// SourceTimeout bounds one source's read; a slow source goes stale.
+	SourceTimeout Duration `toml:"source_timeout"`
 }
 
 // Policy is the fixed-threshold policy (R8) and lease settings (R10).
@@ -72,6 +81,10 @@ func Defaults(dir string) Config {
 		Dir:     dir,
 		Socket:  filepath.Join(dir, "d.sock"),
 		ShimDir: filepath.Join(dir, "shims"),
+		Daemon: Daemon{
+			Interval:      Duration{5 * time.Second},
+			SourceTimeout: Duration{3 * time.Second},
+		},
 		Policy: Policy{
 			LeaseTimeout:  Duration{2 * time.Minute},
 			DaemonTimeout: Duration{500 * time.Millisecond},
@@ -136,6 +149,12 @@ func (c Config) Validate() error {
 	var errs []error
 	if len(c.Socket) > maxSocketPath {
 		errs = append(errs, fmt.Errorf("socket path is %d bytes, macOS allows %d: %s", len(c.Socket), maxSocketPath, c.Socket))
+	}
+	if c.Daemon.Interval.Duration <= 0 {
+		errs = append(errs, errors.New("daemon.interval must be > 0"))
+	}
+	if t := c.Daemon.SourceTimeout.Duration; t <= 0 || t >= c.Daemon.Interval.Duration {
+		errs = append(errs, errors.New("daemon.source_timeout must be > 0 and < daemon.interval"))
 	}
 	if c.Policy.MinHeadroomGB < 0 {
 		errs = append(errs, errors.New("policy.min_headroom_gb must be >= 0"))

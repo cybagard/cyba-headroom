@@ -88,6 +88,7 @@ func TestLoadErrors(t *testing.T) {
 		{"typo in key", "[policy]\nmin_headroom = 6\n", "unknown keys: policy.min_headroom"},
 		{"negative threshold", "[policy]\nmin_headroom_gb = -1\n", "min_headroom_gb must be >= 0"},
 		{"bad duration", "[policy]\nlease_timeout = \"soon\"\n", "lease_timeout"},
+		{"source timeout not below interval", "[daemon]\ninterval = \"2s\"\nsource_timeout = \"2s\"\n", "daemon.source_timeout must be > 0 and < daemon.interval"},
 		{"socket too long", "socket = \"/" + strings.Repeat("s", 110) + "\"\n", "socket path is"},
 		{"malformed toml", "socket = \n", "config:"},
 	}

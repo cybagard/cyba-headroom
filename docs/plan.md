@@ -26,7 +26,7 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #16 **R1: LM Studio collector**
 - [x] #17 **R1: Orca collector**
 - [x] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
-- [ ] #19 **R2: budget model (reserved vs used vs headroom)**
+- [x] #19 **R2: budget model (reserved vs used vs headroom)**
 - [ ] #20 **R3: worktree attribution**
 - [ ] #21 **R4: observe view — `headroom` and `headroom --watch`**
 - [ ] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**

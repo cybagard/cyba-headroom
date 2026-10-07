@@ -47,6 +47,7 @@ type Daemon struct {
 	log     *slog.Logger
 	now     func() time.Time
 	derive  func(*protocol.Snapshot)
+	publish func(*protocol.Snapshot)
 
 	tickMu sync.Mutex
 	seq    uint64
@@ -72,9 +73,15 @@ func New(sources []Source, sourceTimeout time.Duration, log *slog.Logger) (*Daem
 }
 
 // SetDerive sets f to run on each new snapshot after every source's reading
-// is applied and before it is published, to fill sections computed from the
-// others (the budget, R2). Call it before Run or Tick.
+// is applied and before it is published, to add sections computed from the
+// others (the budget, R2). f may set sections but must not modify the
+// readings it is given. Call it before Run or Tick.
 func (d *Daemon) SetDerive(f func(*protocol.Snapshot)) { d.derive = f }
+
+// OnPublish sets f to receive each snapshot right after it is published,
+// e.g. to record it. f runs on the tick's goroutine, so it must not block,
+// and must not modify the snapshot. Call it before Run or Tick.
+func (d *Daemon) OnPublish(f func(*protocol.Snapshot)) { d.publish = f }
 
 // Snapshot returns the latest published snapshot. Callers must not modify it.
 func (d *Daemon) Snapshot() *protocol.Snapshot { return d.snap.Load() }
@@ -175,25 +182,31 @@ func (d *Daemon) Tick(ctx context.Context) {
 		next.Sources[s.src.Name()] = s.status
 	}
 	if d.derive != nil {
-		d.safeDerive(next)
+		next = d.safeDerive(next)
 	}
 	d.seq++
 	next.Seq = d.seq
 	next.CollectedAt = d.now()
 	d.snap.Store(next)
+	if d.publish != nil {
+		d.publish(next)
+	}
 }
 
-// safeDerive runs derive, logging a panic instead of crashing the daemon: the
-// snapshot is then published with the sources' readings but without the
-// derived sections.
-func (d *Daemon) safeDerive(s *protocol.Snapshot) {
+// safeDerive runs derive on a copy of s and returns the copy, or s itself if
+// derive panicked: then the snapshot is published with the sources' readings
+// but none of the derived sections, never half of them. derive only adds
+// sections, so a shallow copy keeps the readings it was given intact.
+func (d *Daemon) safeDerive(s *protocol.Snapshot) (out *protocol.Snapshot) {
+	derived := *s
 	defer func() {
 		if p := recover(); p != nil {
 			d.log.Error("derive failed", "panic", fmt.Sprint(p))
-			s.Budget = nil
+			out = s
 		}
 	}()
-	d.derive(s)
+	d.derive(&derived)
+	return &derived
 }
 
 // safeCollect turns a panic or a nil reading into an error.

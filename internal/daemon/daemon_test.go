@@ -280,3 +280,32 @@ func TestDerivePanicKeepsTheDaemonRunning(t *testing.T) {
 		t.Errorf("panic not logged: %s", buf.String())
 	}
 }
+
+func TestOnPublishSeesEachPublishedSnapshot(t *testing.T) {
+	src := fakeSource{name: "host", collect: func(context.Context) (Reading, error) {
+		return sectionReading{total: 64}, nil
+	}}
+	d := newDaemon(t, time.Second, src)
+	var got []*protocol.Snapshot
+	d.OnPublish(func(s *protocol.Snapshot) { got = append(got, s) })
+	d.Tick(context.Background())
+	d.Tick(context.Background())
+	if len(got) != 2 || got[1] != d.Snapshot() || got[0].Seq != 1 || got[1].Host == nil {
+		t.Fatalf("got %d snapshots, last %+v", len(got), got[len(got)-1])
+	}
+}
+
+func TestDerivePanicPublishesNoHalfDerivedSections(t *testing.T) {
+	src := fakeSource{name: "host", collect: func(context.Context) (Reading, error) {
+		return sectionReading{total: 64}, nil
+	}}
+	d := newDaemon(t, time.Second, src)
+	d.SetDerive(func(s *protocol.Snapshot) {
+		s.Budget = &protocol.Budget{TotalBytes: 1}
+		panic("half way")
+	})
+	d.Tick(context.Background())
+	if s := d.Snapshot(); s.Budget != nil || s.Host == nil {
+		t.Fatalf("published %+v", s)
+	}
+}

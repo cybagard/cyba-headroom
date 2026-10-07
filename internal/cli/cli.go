@@ -23,6 +23,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/samples"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
@@ -154,9 +155,14 @@ func runDaemon(e Env) int {
 	}
 	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration)
+	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration, "samples", cfg.Samples.Enabled)
 
 	var wg sync.WaitGroup
+	if cfg.Samples.Enabled {
+		w := samples.NewWriter(cfg.SamplesDir(), cfg.Samples.Retention.Duration, log)
+		d.OnPublish(w.Offer)
+		wg.Go(func() { w.Run(ctx) })
+	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
 	err = d.Serve(ctx, ln)
 	stop()

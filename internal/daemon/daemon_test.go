@@ -146,10 +146,12 @@ func TestSlowSourceTimesOutWithoutDelayingOthers(t *testing.T) {
 		t.Fatalf("fast reading=%v status=%+v", got, s.Sources["fast"])
 	}
 
-	// The hung call is still running: the next tick skips it instead of stacking another.
+	// The hung call is still running: the next tick skips it instead of
+	// stacking another, and keeps reporting how long it has been slow.
 	d.Tick(context.Background())
-	if st := d.Snapshot().Sources["hung"]; st.Err != errStillRunning.Error() {
-		t.Fatalf("second tick err = %q, want %q", st.Err, errStillRunning)
+	st := d.Snapshot().Sources["hung"]
+	if st.Err != errStillRunning.Error() || st.Took < 50*time.Millisecond {
+		t.Fatalf("second tick status = %+v, want err %q and Took >= timeout", st, errStillRunning)
 	}
 }
 
@@ -190,4 +192,28 @@ func TestRunTicksImmediatelyAndStops(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestCancelledTickPublishesNothing(t *testing.T) {
+	// Blocks until its context ends, as a well-behaved source does.
+	waits := fakeSource{name: "waits", collect: func(ctx context.Context) (Reading, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	d := newDaemon(t, time.Second, waits)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.Tick(ctx)
+	if d.Snapshot().Seq != 0 {
+		t.Fatal("tick with an already-cancelled context published a snapshot")
+	}
+
+	// Cancelled mid-tick (shutdown): no snapshot of sources falsely "timed out".
+	ctx, cancel = context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	d.Tick(ctx)
+	if s := d.Snapshot(); s.Seq != 0 {
+		t.Fatalf("tick cancelled mid-way published %+v", s)
+	}
 }

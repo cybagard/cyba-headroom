@@ -90,38 +90,73 @@ func (d *Daemon) Run(ctx context.Context, interval time.Duration) {
 
 // Tick collects every source concurrently and publishes a new snapshot. A
 // source that fails, times out or panics keeps its last good reading and is
-// marked stale; it never delays the others beyond the source timeout.
+// marked stale; it never delays the others beyond the source timeout. A tick
+// whose ctx ends (shutdown) publishes nothing.
 func (d *Daemon) Tick(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	d.tickMu.Lock()
 	defer d.tickMu.Unlock()
+
+	tctx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
+	start := d.now()
 
 	type result struct {
 		r    Reading
 		err  error
 		took time.Duration
 	}
-	results := make([]result, len(d.sources))
-	var wg sync.WaitGroup
+	// A nil channel marks a source skipped because its last call is still running.
+	pending := make([]chan result, len(d.sources))
 	for i, s := range d.sources {
-		wg.Add(1)
+		if !s.busy.CompareAndSwap(false, true) {
+			continue
+		}
+		ch := make(chan result, 1)
+		pending[i] = ch
 		go func() {
-			defer wg.Done()
-			start := d.now()
-			r, err := d.collect(ctx, s)
-			results[i] = result{r, err, d.now().Sub(start)}
+			defer s.busy.Store(false)
+			r, err := safeCollect(tctx, s.src)
+			ch <- result{r, err, d.now().Sub(start)}
 		}()
 	}
-	wg.Wait()
+
+	results := make([]result, len(d.sources))
+	for i, ch := range pending {
+		if ch == nil {
+			continue
+		}
+		select {
+		case results[i] = <-ch:
+		case <-tctx.Done():
+			select {
+			case results[i] = <-ch: // finished right at the deadline
+			default:
+				results[i] = result{err: fmt.Errorf("timed out after %s", d.timeout), took: d.now().Sub(start)}
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	next := &protocol.Snapshot{Sources: make(map[string]protocol.SourceStatus, len(d.sources))}
 	for i, s := range d.sources {
 		res := results[i]
-		s.status.Took = res.took
-		if res.err != nil {
+		switch {
+		case pending[i] == nil:
+			// Keep Took from the call still running, so slowness stays visible.
+			s.status.Err = errStillRunning.Error()
+			s.status.Stale = true
+			d.log.Debug("source skipped", "source", s.src.Name(), "err", errStillRunning)
+		case res.err != nil:
+			s.status.Took = res.took
 			s.status.Err = res.err.Error()
 			s.status.Stale = true
 			d.log.Warn("source failed", "source", s.src.Name(), "err", res.err, "took", res.took)
-		} else {
+		default:
 			s.last = res.r
 			s.status = protocol.SourceStatus{At: d.now(), Took: res.took}
 		}
@@ -136,38 +171,16 @@ func (d *Daemon) Tick(ctx context.Context) {
 	d.snap.Store(next)
 }
 
-// collect runs one source under the source timeout. If the source ignores its
-// context, collect stops waiting at the deadline; the source is skipped on
-// later ticks until that call returns.
-func (d *Daemon) collect(ctx context.Context, s *sourceState) (Reading, error) {
-	if !s.busy.CompareAndSwap(false, true) {
-		return nil, errStillRunning
-	}
-	ctx, cancel := context.WithTimeout(ctx, d.timeout)
-	defer cancel()
-
-	type out struct {
-		r   Reading
-		err error
-	}
-	done := make(chan out, 1)
-	go func() {
-		defer s.busy.Store(false)
-		defer func() {
-			if p := recover(); p != nil {
-				done <- out{err: fmt.Errorf("panic: %v", p)}
-			}
-		}()
-		r, err := s.src.Collect(ctx)
-		if err == nil && r == nil {
-			err = errors.New("returned no reading")
+// safeCollect turns a panic or a nil reading into an error.
+func safeCollect(ctx context.Context, src Source) (r Reading, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			r, err = nil, fmt.Errorf("panic: %v", p)
 		}
-		done <- out{r, err}
 	}()
-	select {
-	case o := <-done:
-		return o.r, o.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("timed out after %s", d.timeout)
+	r, err = src.Collect(ctx)
+	if err == nil && r == nil {
+		err = errors.New("returned no reading")
 	}
+	return r, err
 }

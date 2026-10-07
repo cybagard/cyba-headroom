@@ -129,9 +129,11 @@ func runDaemon(e Env) int {
 
 // runStatus prints the daemon's raw snapshot as JSON. The human view is #21.
 func runStatus(e Env) int {
-	if len(e.Args) > 2 && e.Args[2] != "--json" {
-		fmt.Fprintf(e.Stderr, "headroom: status: unknown flag %q\n", e.Args[2])
-		return 2
+	for _, a := range e.Args[2:] {
+		if a != "--json" {
+			fmt.Fprintf(e.Stderr, "headroom: status: unknown argument %q\n", a)
+			return 2
+		}
 	}
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {

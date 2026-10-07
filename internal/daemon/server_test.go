@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -136,8 +137,72 @@ func TestConcurrentStatusDuringTicks(t *testing.T) {
 func TestListenRefusesLiveDaemon(t *testing.T) {
 	path := sockPath(t)
 	serve(t, path)
-	if _, err := daemon.Listen(path); err == nil || !strings.Contains(err.Error(), "already listening") {
+	if _, err := daemon.Listen(path); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestListenRefusesWhileDaemonHoldsLock(t *testing.T) {
+	path := sockPath(t)
+	ln, err := daemon.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// Even with the live daemon's socket file gone (or its dial timing out),
+	// a second daemon must not start.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if ln2, err := daemon.Listen(path); err == nil {
+		_ = ln2.Close()
+		t.Fatal("second Listen succeeded while the first daemon is running")
+	}
+
+	// Once the first daemon stops, the lock is free again.
+	_ = ln.Close()
+	ln3, err := daemon.Listen(path)
+	if err != nil {
+		t.Fatalf("Listen after the first daemon stopped: %v", err)
+	}
+	_ = ln3.Close()
+}
+
+// flakyListener fails its first Accept with EMFILE, as under fd exhaustion.
+type flakyListener struct {
+	net.Listener
+	failed bool
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if !l.failed {
+		l.failed = true
+		return nil, &net.OpError{Op: "accept", Net: "unix", Err: syscall.EMFILE}
+	}
+	return l.Listener.Accept()
+}
+
+func TestServeSurvivesTemporaryAcceptError(t *testing.T) {
+	path := sockPath(t)
+	d, err := daemon.New(nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := daemon.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx, &flakyListener{Listener: ln}) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	if _, err := client.Do(context.Background(), path, 2*time.Second, protocol.Request{Op: protocol.OpPing}); err != nil {
+		t.Fatalf("ping after EMFILE: %v", err)
 	}
 }
 

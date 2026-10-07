@@ -43,6 +43,9 @@ func Do(ctx context.Context, socket string, timeout time.Duration, req protocol.
 	if err := json.Unmarshal(sc.Bytes(), &rep); err != nil {
 		return protocol.Reply{}, fmt.Errorf("bad reply: %w", err)
 	}
+	if rep.V != protocol.Version {
+		return protocol.Reply{}, fmt.Errorf("daemon speaks protocol version %d, this client speaks %d; restart the daemon after upgrading", rep.V, protocol.Version)
+	}
 	if !rep.OK {
 		return rep, fmt.Errorf("daemon: %s", rep.Error)
 	}

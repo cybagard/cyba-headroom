@@ -5,8 +5,10 @@ package vmproc
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -37,26 +39,76 @@ func (Host) VMPIDs() ([]int, error) {
 			continue
 		}
 		pid := int(p.Proc.P_pid)
-		if path, err := execPath(pid); err == nil && strings.HasSuffix(path, vmExec) {
+		if path, _, err := procArgs(pid); err == nil && strings.HasSuffix(path, vmExec) {
 			pids = append(pids, pid)
 		}
 	}
 	return pids, nil
 }
 
-// execPath reads a process's executable path from kern.procargs2: a 4-byte
-// argc, then the NUL-terminated path. It fails for other users' processes,
-// which cannot be our VMs anyway.
-func execPath(pid int) (string, error) {
-	b, err := unix.SysctlRaw("kern.procargs2", pid)
+// ProcessesNamed lists processes whose kernel name is comm, with their
+// arguments. Processes whose arguments cannot be read (other users') are
+// left out.
+func (Host) ProcessesNamed(comm string) ([]Process, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, err
+	}
+	var out []Process
+	for _, p := range procs {
+		c, _, _ := bytes.Cut(p.Proc.P_comm[:], []byte{0})
+		if string(c) != comm {
+			continue
+		}
+		pid := int(p.Proc.P_pid)
+		_, args, err := procArgs(pid)
+		if err != nil {
+			continue
+		}
+		out = append(out, Process{PID: pid, PPID: int(p.Eproc.Ppid), Comm: comm, Args: args})
+	}
+	return out, nil
+}
+
+// Cwd returns a process's working directory via lsof (no sudo for the
+// user's own processes).
+func (h Host) Cwd(ctx context.Context, pid int) (string, error) {
+	out, err := h.Run(ctx, lsofPath, "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")
 	if err != nil {
 		return "", err
 	}
-	if len(b) < 4 {
-		return "", fmt.Errorf("kern.procargs2 %d: %d bytes", pid, len(b))
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if p, ok := strings.CutPrefix(line, "n"); ok {
+			return p, nil
+		}
 	}
-	path, _, _ := bytes.Cut(b[4:], []byte{0})
-	return string(path), nil
+	return "", fmt.Errorf("lsof: no cwd for %d", pid)
+}
+
+// procArgs reads kern.procargs2: a 4-byte argc, the NUL-terminated exec
+// path, NUL padding, then argc NUL-terminated arguments (then the
+// environment, ignored). It fails for other users' processes.
+func procArgs(pid int) (exec string, args []string, err error) {
+	b, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(b) < 4 {
+		return "", nil, fmt.Errorf("kern.procargs2 %d: %d bytes", pid, len(b))
+	}
+	argc := int(binary.LittleEndian.Uint32(b))
+	rest := b[4:]
+	path, rest, _ := bytes.Cut(rest, []byte{0})
+	rest = bytes.TrimLeft(rest, "\x00")
+	for range argc {
+		var a []byte
+		var ok bool
+		if a, rest, ok = bytes.Cut(rest, []byte{0}); !ok {
+			break
+		}
+		args = append(args, string(a))
+	}
+	return string(path), args, nil
 }
 
 // Run implements System.

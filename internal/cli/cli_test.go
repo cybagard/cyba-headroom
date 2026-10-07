@@ -74,7 +74,7 @@ func TestConfigPrintsEffectiveConfig(t *testing.T) {
 	}
 }
 
-func TestDaemonServesHostAndDockerSources(t *testing.T) {
+func TestDaemonServesAllSources(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
 		t.Fatal(err)
@@ -103,12 +103,12 @@ func TestDaemonServesHostAndDockerSources(t *testing.T) {
 	for {
 		code, out, _ := run(t, env, "headroom", "status", "--json")
 		// Off macOS the source is registered but stale; on macOS it must serve data.
-		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) &&
+		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) && strings.Contains(out, `"tart": {`) &&
 			(runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status never served the host and docker sources; last code=%d out=%s", code, out)
+			t.Fatalf("status never served the host, docker and tart sources; last code=%d out=%s", code, out)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

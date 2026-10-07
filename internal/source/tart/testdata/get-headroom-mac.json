@@ -1,0 +1,11 @@
+{
+  "Running" : true,
+  "Memory" : 4096,
+  "State" : "running",
+  "DiskFormat" : "raw",
+  "Size" : "86.384",
+  "CPU" : 4,
+  "OS" : "darwin",
+  "Display" : "1024x768",
+  "Disk" : 140
+}

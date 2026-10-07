@@ -42,6 +42,45 @@ type Snapshot struct {
 
 	Host   *Host   `json:"host,omitempty"`
 	Docker *Docker `json:"docker,omitempty"`
+	Tart   *Tart   `json:"tart,omitempty"`
+}
+
+// Tart is the state of Tart VMs (R1).
+type Tart struct {
+	// Installed is false when no tart binary was found.
+	Installed bool `json:"installed"`
+	// VMs are the running VMs.
+	VMs []TartVM `json:"vms"`
+	// MacOSRunning counts running macOS VMs: Apple's licence allows two (R6).
+	MacOSRunning int `json:"macos_running"`
+	// VMError is set when VM processes could not be read; footprints are
+	// then unknown, not zero.
+	VMError string `json:"vm_error,omitempty"`
+	// LaunchError is set when tart run processes could not be read; launch
+	// details (attribution only) are then missing.
+	LaunchError string `json:"launch_error,omitempty"`
+}
+
+// TartVM is one running Tart VM.
+type TartVM struct {
+	Name string `json:"name"`
+	// OS is darwin or linux.
+	OS   string `json:"os"`
+	CPUs int    `json:"cpus"`
+	// MemoryBytes is the configured memory: what the VM reserves (R2).
+	MemoryBytes uint64 `json:"memory_bytes"`
+	// FootprintBytes is what the VM process costs the host now
+	// (phys_footprint); absent if its process was not found (e.g. booting),
+	// which means unknown, not free.
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+
+	// How the VM was launched, for attribution (R3). tart run changes its own
+	// cwd to the VM bundle, so the launching shell is its parent.
+	RunPID int `json:"run_pid,omitempty"`
+	// LaunchCwd is the cwd of tart run's parent; empty if it has exited.
+	LaunchCwd string `json:"launch_cwd,omitempty"`
+	// SharedDirs are the host paths of --dir shares.
+	SharedDirs []string `json:"shared_dirs,omitempty"`
 }
 
 // Docker is Docker Desktop's state (R1).

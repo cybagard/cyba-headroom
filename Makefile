@@ -47,9 +47,13 @@ hooks:
 test-hooks:
 	scripts/hooks/pre-commit_test.sh
 
+# Lint as darwin too: CI runs on macOS, and darwin-only files are invisible
+# to a Linux lint.
 lint: $(DC_DEP)
 	$(RUN) go vet ./...
 	$(RUN) golangci-lint run
+	$(RUN) env GOOS=darwin go vet ./...
+	$(RUN) env GOOS=darwin golangci-lint run
 
 fmt: $(DC_DEP)
 	$(RUN) gofmt -s -w .

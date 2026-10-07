@@ -24,3 +24,12 @@ func (Host) ProcessesNamed(string) ([]Process, error) { return nil, errUnsupport
 
 // Cwd implements tart.Procs.
 func (Host) Cwd(context.Context, int) (string, error) { return "", errUnsupported }
+
+// Footprint implements lmstudio.Procs.
+func (Host) Footprint(context.Context, int) (uint64, error) { return 0, errUnsupported }
+
+// Tree implements lmstudio.Procs.
+func (Host) Tree(int) ([]Process, error) { return nil, errUnsupported }
+
+// Footprints implements lmstudio.Procs.
+func (Host) Footprints(context.Context, ...int) (uint64, error) { return 0, errUnsupported }

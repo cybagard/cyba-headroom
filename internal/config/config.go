@@ -30,12 +30,13 @@ type Config struct {
 	// ShimDir holds the docker/podman/tart symlinks that agents get first on PATH.
 	ShimDir string `toml:"shim_dir"`
 
-	Daemon Daemon `toml:"daemon"`
-	Docker Docker `toml:"docker"`
-	Tart   Tart   `toml:"tart"`
-	Orca   Orca   `toml:"orca"`
-	Policy Policy `toml:"policy"`
-	Budget Budget `toml:"budget"`
+	Daemon   Daemon   `toml:"daemon"`
+	Docker   Docker   `toml:"docker"`
+	Tart     Tart     `toml:"tart"`
+	Orca     Orca     `toml:"orca"`
+	LMStudio LMStudio `toml:"lmstudio"`
+	Policy   Policy   `toml:"policy"`
+	Budget   Budget   `toml:"budget"`
 }
 
 // Daemon holds collection loop settings (R1).
@@ -65,6 +66,12 @@ type Tart struct {
 // Orca locates the orca CLI.
 type Orca struct {
 	// Path is the orca CLI. Empty means: PATH, then inside Orca.app.
+	Path string `toml:"path"`
+}
+
+// LMStudio locates the lms CLI.
+type LMStudio struct {
+	// Path is the lms CLI. Empty means: PATH, then ~/.lmstudio/bin/lms.
 	Path string `toml:"path"`
 }
 
@@ -193,6 +200,7 @@ func LoadDir(dir string) (Config, error) {
 	cfg.Docker.Socket = expandHome(cfg.Docker.Socket)
 	cfg.Tart.Path = expandHome(cfg.Tart.Path)
 	cfg.Orca.Path = expandHome(cfg.Orca.Path)
+	cfg.LMStudio.Path = expandHome(cfg.LMStudio.Path)
 	return cfg, cfg.Validate()
 }
 

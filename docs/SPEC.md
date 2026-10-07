@@ -204,7 +204,7 @@ Measure a two-week baseline with observe mode only, then two weeks with the gate
 
 - [ ] Default minimum headroom and per-worktree cap: set from the two-week baseline. *(data)*
 - [ ] Host baseline to reserve for macOS, Orca and the agents' own processes. *(data)*
-- [ ] Does LM Studio's API expose loaded model memory, or only the model file size? *(engineering)*
+- [x] Does LM Studio's API expose loaded model memory, or only the model file size? *(engineering)* → **Only the file size.** The real cost is the footprint of LM Studio's per-model worker process (≈ size + context + runtime; 15.1 GB for a 14.4 GiB MLX model). See #16.
 - [ ] Tart VM naming convention: enforce `<worktree>-<suffix>` via the shim, or attribute by process cwd only? *(engineering)*
 - [x] Language and packaging: Python for speed of build, or Go for a single static binary the shims call quickly? *(engineering)* → **Go**, see [ADR 0001](adr/0001-language.md)
 - [ ] Shim latency budget: the daemon check must not noticeably slow every `docker` call. *(engineering)*

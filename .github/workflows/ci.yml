@@ -21,7 +21,7 @@ jobs:
         run: go mod tidy && git diff --exit-code go.mod go.sum
       - run: go vet ./...
       - run: go test -race ./...
-      - run: make build && ./bin/headroom version
+      - run: make NATIVE=1 build && ./bin/headroom version
       - uses: golangci/golangci-lint-action@v8
         with:
           version: latest

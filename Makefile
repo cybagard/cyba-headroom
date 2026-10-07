@@ -1,23 +1,45 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/cybagard/cyba-headroom/internal/cli.Version=$(VERSION)
 
-.PHONY: build test lint fmt tidy clean
+# Every target runs inside the devcontainer (.devcontainer/). Inside it, or with
+# NATIVE=1 (CI on macOS runners), commands run directly.
+DC_IMAGE := headroom-dev
+ifneq ($(HEADROOM_DEVCONTAINER)$(NATIVE),)
+RUN :=
+DC_DEP :=
+else
+RUN := docker run --rm -i -v "$(CURDIR)":/src -w /src -v headroom-go:/go \
+	--user $(shell id -u):$(shell id -g) $(DC_IMAGE)
+DC_DEP := dc-image
+endif
 
-build:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
+# The host is darwin/arm64; build for it wherever the build runs.
+BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-test:
-	go test -race ./...
+.PHONY: build test lint fmt tidy clean dc-image dc-shell
 
-lint:
-	go vet ./...
-	golangci-lint run
+build: $(DC_DEP)
+	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
 
-fmt:
-	gofmt -s -w .
+test: $(DC_DEP)
+	$(RUN) go test -race ./...
 
-tidy:
-	go mod tidy
+lint: $(DC_DEP)
+	$(RUN) go vet ./...
+	$(RUN) golangci-lint run
+
+fmt: $(DC_DEP)
+	$(RUN) gofmt -s -w .
+
+tidy: $(DC_DEP)
+	$(RUN) go mod tidy
 
 clean:
 	rm -rf bin
+
+dc-image:
+	docker build -q -t $(DC_IMAGE) .devcontainer >/dev/null
+
+dc-shell: dc-image
+	docker run --rm -it -v "$(CURDIR)":/src -w /src -v headroom-go:/go \
+		--user $(shell id -u):$(shell id -g) $(DC_IMAGE) bash

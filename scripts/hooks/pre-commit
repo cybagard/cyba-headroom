@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Blocks commits that mention internal names from outside this public repo:
-# other projects, their worktrees and branches, and the home path.
+# Blocks commits that mention internal names from outside this public repo
+# (other projects, their worktrees and branches, and the home path) or that
+# contain likely secrets (API keys, tokens, private keys, URL passwords).
 #
 #   pre-commit            checks staged file names and added lines
 #   commit-msg <file>     checks the commit message
@@ -75,28 +76,65 @@ fi
 [[ ${#USER} -ge 6 ]] && echo "$USER" >>"$terms"
 
 sort -u -o "$terms" "$terms"
-[[ -s $terms ]] || exit 0
 
+# lines: "<where>\t<added text>", one per added line.
 if [[ $# -ge 1 ]]; then
 	# commit-msg: git strips # lines from the message after this hook runs.
-	text=$(grep -v '^#' "$1" || true)
+	lines=$(grep -v '^#' "$1" | sed 's/^/the commit message\t/' || true)
+	names=""
 	what="the commit message"
 else
 	# Added lines only: a "+++" line is a header only right after "---".
 	# Deleted files are skipped so a leak can be removed. --text, no textconv
 	# and no external diff, so attributes cannot hide content.
-	text=$(
-		git -c core.quotePath=false diff --cached --name-only --diff-filter=d
+	lines=$(
 		git diff --cached -U0 --no-color --no-ext-diff --no-textconv --text |
-			awk '/^--- / { hdr = 1; next } hdr && /^\+\+\+ / { hdr = 0; next } { hdr = 0 } /^\+/ { print substr($0, 2) }'
+			awk '/^--- / { hdr = 1; next }
+				hdr && /^\+\+\+ / { hdr = 0; f = substr($0, 5); sub(/^b\//, "", f); next }
+				{ hdr = 0 }
+				/^\+/ { print f "\t" substr($0, 2) }'
 	)
+	names=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=d)
 	what="staged changes"
 fi
+text=$(printf '%s\n%s\n' "$names" "$(printf '%s\n' "$lines" | cut -f2-)")
+fail=0
 
-hits=$(printf '%s\n' "$text" | grep -i -o -F -f "$terms" | sort -u || true)
-if [[ -n $hits ]]; then
-	echo "pre-commit: $what mention internal names from outside this public repo:" >&2
-	printf '%s\n' "$hits" | sed 's/^/  - /' >&2
-	echo "Replace them (e.g. project-a, /Users/dev) or bypass with --no-verify." >&2
-	exit 1
+if [[ -s $terms ]]; then
+	hits=$(printf '%s\n' "$text" | grep -i -o -F -f "$terms" | sort -u || true)
+	if [[ -n $hits ]]; then
+		echo "pre-commit: $what mention internal names from outside this public repo:" >&2
+		printf '%s\n' "$hits" | sed 's/^/  - /' >&2
+		echo "Replace them (e.g. project-a, /Users/dev) or bypass with --no-verify." >&2
+		fail=1
+	fi
 fi
+
+# Secret rules, "name|extended regex". Kept to formats with a fixed prefix
+# so ordinary code does not trip them. No \b: BSD grep on macOS lacks it.
+rules='AWS access key|(^|[^A-Z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Z0-9]|$)
+GitHub token|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}
+Anthropic API key|sk-ant-[A-Za-z0-9_-]{20,}
+OpenAI API key|sk-(proj-|svcacct-|admin-)?[A-Za-z0-9_]{20,}
+Slack token|xox[abposr]-[A-Za-z0-9-]{10,}
+Google API key|AIza[A-Za-z0-9_-]{35}
+Stripe live key|[rs]k_live_[A-Za-z0-9]{20,}
+Private key|-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----
+JSON web token|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+Password in a URL|[A-Za-z][A-Za-z0-9+.-]*://[^/:@[:space:]]+:[^/@[:space:]$<{%][^/@[:space:]]*@'
+found=""
+while IFS='|' read -r rule re; do
+	# Report the rule and where it matched, never the value.
+	where=$(printf '%s\n' "$lines" | cut -f2- | grep -n -E -- "$re" | cut -d: -f1 || true)
+	for n in $where; do
+		found+="  - $rule in $(printf '%s\n' "$lines" | sed -n "${n}p" | cut -f1)"$'\n'
+	done
+done <<<"$rules"
+if [[ -n $found ]]; then
+	echo "pre-commit: $what contain possible secrets:" >&2
+	printf '%s' "$found" | sort -u >&2
+	echo "Remove them and rotate any real credential, or bypass with --no-verify." >&2
+	fail=1
+fi
+
+exit $fail

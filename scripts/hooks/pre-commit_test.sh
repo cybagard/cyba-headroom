@@ -40,7 +40,7 @@ check() {
 		setup "$dir"
 		action=${action//@REPO@/$(basename "$dir")}
 		if [[ $action == msg:* ]]; then
-			printf '%s\n' "${action#msg:}" >"$dir/MSG"
+			eval "printf '%s\n' \"${action#msg:}\"" >"$dir/MSG"
 			PATH="$dir/bin:$PATH" HOME=/Users/tester USER=tester "$hook" "$dir/MSG" 2>&1
 		else
 			eval "$action"
@@ -55,6 +55,8 @@ check() {
 	allow) [[ $code == 0 ]] && ok=1 ;;
 	block) [[ $code == 1 && $out == *"internal names"* ]] && ok=1 ;;
 	warn) [[ $code == 0 && $out == *"warning"* ]] && ok=1 ;;
+	# Blocked as a secret, and the value itself is never echoed.
+	secret) [[ $code == 1 && $out == *"possible secrets"* && $out != *EXAMPLE* ]] && ok=1 ;;
 	esac
 	if [[ $ok == 1 ]]; then echo "ok   $name"; else
 		echo "FAIL $name (exit $code, want $want): $out"
@@ -87,5 +89,25 @@ check "commit message is checked"          block 'msg:Port fix from secret-proje
 check "clean commit message is allowed"    allow 'msg:Add the Orca collector'
 check "comment lines in the message are ignored" allow 'msg:Add it
 # On branch secret-project'
+# Fake secrets are split so this file holds none; each contains EXAMPLE.
+aws="AKIA""EXAMPLE234567ABC"
+ghp="ghp_""EXAMPLEaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ant="sk-ant-""api03-EXAMPLEaaaaaaaaaaaaaaaaaaaa"
+oai="sk-proj-""EXAMPLEaaaaaaaaaaaaaaaaaaaa"
+slack="xoxb-""1234567890-EXAMPLEabcdef"
+gapi="AIza""EXAMPLEaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+pkey="-----BEGIN ""OPENSSH PRIVATE KEY-----"
+creds="postgres:/""/admin:hunter2EXAMPLE@db.internal:5432/app"
+check "AWS access key is blocked"          secret 'stage "key = $aws"'
+check "GitHub token is blocked"            secret 'stage "token: $ghp"'
+check "Anthropic API key is blocked"       secret 'stage "ANTHROPIC_API_KEY=$ant"'
+check "OpenAI API key is blocked"          secret 'stage "OPENAI_API_KEY=$oai"'
+check "Slack token is blocked"             secret 'stage "$slack"'
+check "Google API key is blocked"          secret 'stage "$gapi"'
+check "private key is blocked"             secret 'stage "$pkey"'
+check "password in a URL is blocked"       secret 'stage "dsn: $creds"'
+check "secret in the commit message"       secret 'msg:Rotate $aws'
+check "removing a secret is allowed"       allow 'stage "$aws" && git commit -qm init --no-verify && stage "rotated"'
+check "look-alikes are allowed"            allow 'stage "AKIA task-ant sk-1 https://example.com/@user tcp://10.0.0.5:2375 -----BEGIN PUBLIC KEY-----"'
 check "unreadable Orca output warns"       warn 'export FAKE_ORCA_BROKEN=1 && stage "fine"'
 exit $fail

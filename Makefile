@@ -16,7 +16,7 @@ endif
 # The host is darwin/arm64; build for it wherever the build runs.
 BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-.PHONY: build test test-host test-tart darwin-tests lint fmt tidy clean dc-image dc-shell
+.PHONY: build test test-host test-tart darwin-tests test-hooks hooks lint fmt tidy clean dc-image dc-shell
 
 build: $(DC_DEP)
 	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
@@ -33,6 +33,13 @@ test-host: darwin-tests
 
 test-tart: darwin-tests
 	scripts/tart-test.sh
+
+# Git hooks run on the host (they read Orca and the local scrub list).
+hooks:
+	git config core.hooksPath scripts/hooks
+
+test-hooks:
+	scripts/hooks/pre-commit_test.sh
 
 lint: $(DC_DEP)
 	$(RUN) go vet ./...

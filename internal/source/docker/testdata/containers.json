@@ -1,0 +1,80 @@
+[
+    {
+        "Id": "585f8ebeefcc32175f161d005a37cf22651c0b9ee7e4d46496a19be28943e4e0",
+        "Names": [
+            "/hr-fixture"
+        ],
+        "Image": "alpine",
+        "ImageID": "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:260479a1cfaf304c4c20da7f8405d3ce313513dcd534bb743257bdd2fe0f3e2d",
+            "size": 1025,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "arm64v8",
+                "org.opencontainers.image.base.name": "scratch",
+                "org.opencontainers.image.created": "2026-09-17T20:36:42Z",
+                "org.opencontainers.image.revision": "1c744e2d49059e51b063a11a6e3e18c9ccf04ab8",
+                "org.opencontainers.image.source": "https://github.com/alpinelinux/docker-alpine.git#1c744e2d49059e51b063a11a6e3e18c9ccf04ab8:aarch64",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/alpine",
+                "org.opencontainers.image.version": "3.24.2"
+            },
+            "platform": {
+                "architecture": "arm64",
+                "os": "linux",
+                "variant": "v8"
+            }
+        },
+        "Command": "sh -c 'head -c 104857600 /dev/zero > /dev/shm/x; sleep 600'",
+        "Created": 1791392845,
+        "Ports": null,
+        "Labels": {
+            "com.docker.compose.project": "fix-login",
+            "com.docker.compose.project.working_dir": "/Users/dev/wt/fix-login",
+            "desktop.docker.io/binds/0/Source": "/tmp/hr-fixture",
+            "desktop.docker.io/binds/0/SourceKind": "hostFile",
+            "desktop.docker.io/binds/0/Target": "/work",
+            "desktop.docker.io/ports.scheme": "v2"
+        },
+        "State": "running",
+        "Status": "Up 3 seconds",
+        "HostConfig": {
+            "NetworkMode": "bridge"
+        },
+        "Health": {
+            "Status": "none",
+            "FailingStreak": 0
+        },
+        "NetworkSettings": {
+            "Networks": {
+                "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "65e8e209ca14b27d1152df2769ba5bf30c459dcab3912489b79e7402b1e8fad3",
+                    "EndpointID": "f732149d066373c52fb826a6f71b98937564f3f76b1e75d08e558db8e3908a7d",
+                    "Gateway": "172.17.0.1",
+                    "IPAddress": "172.17.0.2",
+                    "MacAddress": "32:88:0d:cc:34:d3",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/hr-fixture",
+                "Destination": "/work",
+                "Mode": "",
+                "RW": true,
+                "Propagation": "rprivate"
+            }
+        ]
+    }
+]

@@ -74,12 +74,16 @@ func TestConfigPrintsEffectiveConfig(t *testing.T) {
 	}
 }
 
-func TestDaemonServesHostSource(t *testing.T) {
+func TestDaemonServesHostAndDockerSources(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// Point Docker at an empty socket path: a not-running reading, on any OS.
+	if err := os.WriteFile(dir+"/config.toml", []byte("[docker]\nsocket = \""+dir+"/none.sock\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env := map[string]string{"HEADROOM_CONFIG_DIR": dir}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,11 +103,12 @@ func TestDaemonServesHostSource(t *testing.T) {
 	for {
 		code, out, _ := run(t, env, "headroom", "status", "--json")
 		// Off macOS the source is registered but stale; on macOS it must serve data.
-		if code == 0 && strings.Contains(out, `"host"`) && (runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
+		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) &&
+			(runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status never listed the host source; last code=%d out=%s", code, out)
+			t.Fatalf("status never served the host and docker sources; last code=%d out=%s", code, out)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

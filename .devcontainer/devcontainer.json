@@ -1,0 +1,9 @@
+{
+  "name": "headroom",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/src",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind",
+  "mounts": ["source=headroom-go,target=/go,type=volume"],
+  "postCreateCommand": "go mod download",
+  "customizations": { "vscode": { "extensions": ["golang.go"] } }
+}

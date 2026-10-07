@@ -26,3 +26,21 @@ func TestLocateFindsTheAppBundleWithoutPATH(t *testing.T) {
 		t.Fatalf("Locate = %q, want the configured path", got)
 	}
 }
+
+func TestAppBundleWinsOverAnotherOrcaOnPATH(t *testing.T) {
+	home := t.TempDir()
+	app := filepath.Join(home, "Applications/Orca.app/Contents/Resources/bin/orca")
+	other := filepath.Join(home, "node_modules/.bin/orca") // e.g. plotly's orca
+	for _, p := range []string{app, other} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := map[string]string{"HOME": home, "PATH": filepath.Dir(other)}
+	if got := orca.Locate("", func(k string) string { return env[k] }); got != app {
+		t.Fatalf("Locate = %q, want Orca's own CLI %q", got, app)
+	}
+}

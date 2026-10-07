@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
@@ -39,19 +40,34 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	}
 	o.Installed = true
 
-	var ps struct {
-		Worktrees []apiWorktree `json:"worktrees"`
-	}
-	running, err := s.call(ctx, &ps, "worktree", "ps", "--json")
-	if err != nil || !running {
-		return reading{o}, err
+	// Both calls start a CLI process; run them side by side to stay well
+	// inside the source timeout on a loaded machine.
+	var (
+		ps struct {
+			Worktrees []apiWorktree `json:"worktrees"`
+		}
+		mem                   apiMemory
+		psRunning, memRunning bool
+		psErr, memErr         error
+		wg                    sync.WaitGroup
+	)
+	wg.Go(func() { psRunning, psErr = s.call(ctx, &ps, "worktree", "ps", "--json") })
+	wg.Go(func() { memRunning, memErr = s.call(ctx, &mem, "diagnostics", "memory", "--json") })
+	wg.Wait()
+	if psErr != nil || !psRunning {
+		return reading{o}, psErr
 	}
 	o.Running = true
 
-	// Memory is optional: on failure keep the worktrees and say why.
-	var mem apiMemory
-	if _, err := s.call(ctx, &mem, "diagnostics", "memory", "--json"); err != nil {
-		o.MemoryError = err.Error()
+	// Memory is optional: on failure keep the worktrees, say why, and use
+	// none of a possibly half-decoded reply.
+	switch {
+	case memErr != nil:
+		o.MemoryError = memErr.Error()
+		mem = apiMemory{}
+	case !memRunning:
+		o.MemoryError = "orca diagnostics memory: Orca stopped running"
+		mem = apiMemory{}
 	}
 	o.AppMemoryBytes = mem.App.Memory
 	byID := map[string]apiMemoryWorktree{}
@@ -60,7 +76,8 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	}
 
 	for _, w := range ps.Worktrees {
-		if w.IsArchived || w.HostID != "local" {
+		// Rows without hostId (older or newer Orca) are local.
+		if w.IsArchived || (w.HostID != "" && w.HostID != "local") {
 			continue // remote runtimes are #43
 		}
 		pw := w.toProtocol()
@@ -148,39 +165,37 @@ type envelope struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result"`
 	Error  *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code string `json:"code"`
 	} `json:"error"`
 }
 
 // call runs an orca command and decodes its result into v. It reports
-// running=false, without error, when the Orca app is not running.
+// running=false, without error, when the Orca app is not running. Errors
+// carry Orca's error code, not its free-text message, which can hold user
+// paths.
 func (s *Source) call(ctx context.Context, v any, args ...string) (running bool, err error) {
+	cmd := "orca " + strings.Join(args, " ")
 	out, runErr := s.cli.Run(ctx, args...)
 	var env envelope
 	if err := json.Unmarshal(out, &env); err != nil {
 		if runErr != nil {
-			return false, fmt.Errorf("orca %s %s: %w", args[0], args[1], runErr)
+			return false, fmt.Errorf("%s: %w", cmd, runErr)
 		}
-		return false, fmt.Errorf("orca %s %s: %w", args[0], args[1], err)
+		return false, fmt.Errorf("%s: %w", cmd, err)
 	}
 	if !env.OK {
-		if env.Error != nil && env.Error.Code == "runtime_unavailable" {
+		if env.Error == nil {
+			return false, fmt.Errorf("%s: failed without an error code", cmd)
+		}
+		if env.Error.Code == "runtime_unavailable" {
 			return false, nil
 		}
-		return false, fmt.Errorf("orca %s %s: %s", args[0], args[1], errMessage(env))
+		return false, fmt.Errorf("%s: error %s", cmd, env.Error.Code)
 	}
 	if err := json.Unmarshal(env.Result, v); err != nil {
-		return false, fmt.Errorf("orca %s %s: %w", args[0], args[1], err)
+		return false, fmt.Errorf("%s: %w", cmd, err)
 	}
 	return true, nil
-}
-
-func errMessage(e envelope) string {
-	if e.Error == nil {
-		return "not ok"
-	}
-	return e.Error.Code + ": " + e.Error.Message
 }
 
 type reading struct{ o protocol.Orca }

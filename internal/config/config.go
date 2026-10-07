@@ -41,6 +41,8 @@ type Daemon struct {
 	Interval Duration `toml:"interval"`
 	// SourceTimeout bounds one source's read; a slow source goes stale.
 	SourceTimeout Duration `toml:"source_timeout"`
+	// TrendWindow is how much host pressure history the trend covers (R4).
+	TrendWindow Duration `toml:"trend_window"`
 }
 
 // Policy is the fixed-threshold policy (R8) and lease settings (R10).
@@ -84,6 +86,7 @@ func Defaults(dir string) Config {
 		Daemon: Daemon{
 			Interval:      Duration{5 * time.Second},
 			SourceTimeout: Duration{3 * time.Second},
+			TrendWindow:   Duration{5 * time.Minute},
 		},
 		Policy: Policy{
 			LeaseTimeout:  Duration{2 * time.Minute},
@@ -155,6 +158,9 @@ func (c Config) Validate() error {
 	}
 	if t := c.Daemon.SourceTimeout.Duration; t <= 0 || t >= c.Daemon.Interval.Duration {
 		errs = append(errs, errors.New("daemon.source_timeout must be > 0 and < daemon.interval"))
+	}
+	if c.Daemon.TrendWindow.Duration < 3*c.Daemon.Interval.Duration {
+		errs = append(errs, errors.New("daemon.trend_window must be at least 3 x daemon.interval"))
 	}
 	if c.Policy.MinHeadroomGB < 0 {
 		errs = append(errs, errors.New("policy.min_headroom_gb must be >= 0"))

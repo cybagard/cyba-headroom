@@ -33,6 +33,7 @@ type Config struct {
 	Daemon Daemon `toml:"daemon"`
 	Docker Docker `toml:"docker"`
 	Tart   Tart   `toml:"tart"`
+	Orca   Orca   `toml:"orca"`
 	Policy Policy `toml:"policy"`
 	Budget Budget `toml:"budget"`
 }
@@ -58,6 +59,12 @@ type Docker struct {
 type Tart struct {
 	// Path is the tart binary. Empty means: PATH, then tart.app and the usual
 	// install locations.
+	Path string `toml:"path"`
+}
+
+// Orca locates the orca CLI.
+type Orca struct {
+	// Path is the orca CLI. Empty means: PATH, then inside Orca.app.
 	Path string `toml:"path"`
 }
 
@@ -185,6 +192,7 @@ func LoadDir(dir string) (Config, error) {
 	cfg.ShimDir = expandHome(cfg.ShimDir)
 	cfg.Docker.Socket = expandHome(cfg.Docker.Socket)
 	cfg.Tart.Path = expandHome(cfg.Tart.Path)
+	cfg.Orca.Path = expandHome(cfg.Orca.Path)
 	return cfg, cfg.Validate()
 }
 

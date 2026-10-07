@@ -43,6 +43,52 @@ type Snapshot struct {
 	Host   *Host   `json:"host,omitempty"`
 	Docker *Docker `json:"docker,omitempty"`
 	Tart   *Tart   `json:"tart,omitempty"`
+	Orca   *Orca   `json:"orca,omitempty"`
+}
+
+// Orca is the state of Orca's worktrees and agents (R1).
+type Orca struct {
+	// Installed is false when no orca CLI was found.
+	Installed bool `json:"installed"`
+	// Running is false when the Orca app is not running.
+	Running bool `json:"running"`
+	// AppMemoryBytes is Orca's own memory (main, renderer, helpers), RSS.
+	AppMemoryBytes uint64     `json:"app_memory_bytes"`
+	Worktrees      []Worktree `json:"worktrees"`
+	// MemoryError is set when Orca's memory diagnostics could not be read;
+	// memory, CPU and session PIDs are then unknown, not zero.
+	MemoryError string `json:"memory_error,omitempty"`
+}
+
+// Worktree is one local, unarchived Orca worktree.
+type Worktree struct {
+	// ID is <repoId>::<path>, the same value as ORCA_WORKTREE_ID.
+	ID     string `json:"id"`
+	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+	// Status is Orca's worktree status: working, active or inactive.
+	Status         string    `json:"status"`
+	LiveTerminals  int       `json:"live_terminals"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+	Agents         []Agent   `json:"agents"`
+
+	// The agents' own processes in this worktree, from Orca's memory
+	// diagnostics. Memory is RSS, which overcounts shared pages.
+	MemoryBytes uint64  `json:"memory_bytes"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	// SessionPIDs are the root processes of the worktree's terminals, for
+	// attribution by process tree (R3).
+	SessionPIDs []int `json:"session_pids,omitempty"`
+}
+
+// Agent is one coding agent in a worktree. State is set by Orca's agent
+// status hooks: working, waiting, done, ...
+type Agent struct {
+	PaneKey    string    `json:"pane_key"`
+	Type       string    `json:"type"`
+	State      string    `json:"state"`
+	StateSince time.Time `json:"state_since"`
 }
 
 // Tart is the state of Tart VMs (R1).

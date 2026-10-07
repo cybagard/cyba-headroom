@@ -206,7 +206,7 @@ Measure a two-week baseline with observe mode only, then two weeks with the gate
 - [ ] Host baseline to reserve for macOS, Orca and the agents' own processes. *(data)*
 - [ ] Does LM Studio's API expose loaded model memory, or only the model file size? *(engineering)*
 - [ ] Tart VM naming convention: enforce `<worktree>-<suffix>` via the shim, or attribute by process cwd only? *(engineering)*
-- [ ] Language and packaging: Python for speed of build, or Go for a single static binary the shims call quickly? *(engineering)*
+- [x] Language and packaging: Python for speed of build, or Go for a single static binary the shims call quickly? *(engineering)* → **Go**, see [ADR 0001](adr/0001-language.md)
 - [ ] Shim latency budget: the daemon check must not noticeably slow every `docker` call. *(engineering)*
 - [ ] Does Kilo's CLI offer a before-tool-execution hook (its `.kilo` JS plugins suggest an OpenCode-style one), and can it deny with a message to the model? Decides whether P1 agent hooks cover Kilo. *(engineering)*
 

@@ -39,7 +39,7 @@ Kilo spawns `/bin/zsh -c` (non-login) directly from the `.kilo` process with its
 ## Caveats
 
 - Kilo's interactive TUI was not tested, only `kilo run`. Both use the same tool runtime (`.kilo` binary), so the result should be the same. Re-check in the #31 integration.
-- Kilo's default model is a local provider (`bionic`) that wasn't running. The test used `kilo/kilo-auto/free`.
+- Kilo was tested twice, with identical results: once on `kilo/kilo-auto/free`, then on its default local provider (Bionic, `qwen/qwen3.8-27b` on `localhost:1337`). The first Bionic attempt got "Cannot connect" until the Bionic server came up.
 - Agents that explicitly spawn `bash -l` / `zsh -l` *without* re-exporting PATH would lose the shim (control row). Neither tested agent does. A subprocess an agent runs (e.g. a Makefile calling `bash -l -c docker …`) still could. That is the residual ungated path R4 (#33) must detect.
 
 ## Decision for R9 (#31)

@@ -262,3 +262,51 @@ func TestWriteErrorsAreLoggedOncePerChange(t *testing.T) {
 		t.Fatalf("did not recover:\n%s", log)
 	}
 }
+
+func TestFailedWriteStartsAFreshLineNextTime(t *testing.T) {
+	w, dir, _ := newTestWriter(t)
+	w.write(snapAt(day1))
+	path := filepath.Join(dir, "2026-10-07.jsonl")
+	// A write cut short (disk full) leaves a fragment; the next write fails.
+	if err := os.WriteFile(path, append(must(os.ReadFile(path)), `{"v":1,"t":"20`...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.f.Close()
+	w.write(snapAt(day1.Add(5 * time.Second))) // fails on the closed file
+	w.write(snapAt(day1.Add(10 * time.Second)))
+	w.close()
+	b := must(os.ReadFile(path))
+	ls := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(ls) != 3 || !strings.HasPrefix(ls[2], `{"v":1,"t":"2026-10-07T12:00:10Z"`) {
+		t.Fatalf("file = %q; want the fragment ended and the next sample on its own line", b)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestHousekeepingDoesNotHoldUpWrites(t *testing.T) {
+	w, dir, _ := newTestWriter(t)
+	release := make(chan struct{})
+	w.beforeHousekeep = func() { <-release }
+	done := make(chan struct{})
+	go func() {
+		w.write(snapAt(day1)) // opens the day: starts housekeeping
+		w.write(snapAt(day1.Add(5 * time.Second)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("write waited for housekeeping")
+	}
+	close(release)
+	w.close() // waits for housekeeping
+	if got := lines(t, filepath.Join(dir, "2026-10-07.jsonl")); len(got) != 2 {
+		t.Fatalf("got %d samples", len(got))
+	}
+}

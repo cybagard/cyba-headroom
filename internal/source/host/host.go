@@ -59,8 +59,8 @@ type counters struct {
 func (s *Source) readCounters(at time.Time) counters {
 	c := counters{at: at, ok: true}
 	var err error
-	if c.swapins, err = s.sys.Uint64("vm.compressor.swapper.swapins_total"); err == nil {
-		c.swapouts, err = s.sys.Uint64("vm.compressor.swapper.swapouts_total")
+	if c.swapins, err = s.uint("vm.compressor.swapper.swapins_total"); err == nil {
+		c.swapouts, err = s.uint("vm.compressor.swapper.swapouts_total")
 	}
 	if err != nil {
 		return counters{at: at}

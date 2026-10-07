@@ -294,3 +294,18 @@ func TestOnPublishSeesEachPublishedSnapshot(t *testing.T) {
 		t.Fatalf("got %d snapshots, last %+v", len(got), got[len(got)-1])
 	}
 }
+
+func TestDerivePanicPublishesNoHalfDerivedSections(t *testing.T) {
+	src := fakeSource{name: "host", collect: func(context.Context) (Reading, error) {
+		return sectionReading{total: 64}, nil
+	}}
+	d := newDaemon(t, time.Second, src)
+	d.SetDerive(func(s *protocol.Snapshot) {
+		s.Budget = &protocol.Budget{TotalBytes: 1}
+		panic("half way")
+	})
+	d.Tick(context.Background())
+	if s := d.Snapshot(); s.Budget != nil || s.Host == nil {
+		t.Fatalf("published %+v", s)
+	}
+}

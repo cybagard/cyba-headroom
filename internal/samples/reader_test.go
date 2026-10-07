@@ -2,8 +2,10 @@ package samples
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,5 +110,42 @@ func TestReadMissingDirIsEmpty(t *testing.T) {
 	got, st := readAll(t, filepath.Join(t.TempDir(), "none"), time.Time{}, day1)
 	if len(got) != 0 || st != (Stats{}) {
 		t.Fatalf("got %v %+v", got, st)
+	}
+}
+
+func TestReadDropsDuplicatesFromAnInterruptedGzip(t *testing.T) {
+	// A crash between renaming the archive into place and removing the plain
+	// file leaves both, so the next run appends the same lines again. A
+	// reader racing the gzip can see both files, too. Each sample counts once.
+	dir := threeDays(t)
+	plain := filepath.Join(dir, "2026-10-07.jsonl")
+	w, _, _ := newTestWriter(t)
+	w.dir = dir
+	w.now = func() time.Time { return day1 }
+	w.write(snapAt(day1)) // appends to 10-07, which was archived: a duplicate T
+	w.close()
+	if !exists(plain) {
+		t.Fatal("fixture: want a plain file next to the archive")
+	}
+	got, st := readAll(t, dir, time.Time{}, day1.AddDate(1, 0, 0))
+	if len(got) != 6 || st.Duplicates != 1 {
+		t.Fatalf("got %d samples, stats %+v; want 6 and 1 duplicate", len(got), st)
+	}
+}
+
+func TestReadSkipsAnOverlongLineOnly(t *testing.T) {
+	dir := threeDays(t)
+	f, err := os.OpenFile(filepath.Join(dir, "2026-10-08.jsonl"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(f)
+	_, _ = f.Seek(0, 0)
+	_, _ = f.Write([]byte(strings.Repeat("x", maxLine+10) + "\n"))
+	_, _ = f.Write(b)
+	_ = f.Close()
+	got, st := readAll(t, dir, time.Time{}, day1.AddDate(1, 0, 0))
+	if len(got) != 6 || st.Skipped != 1 || st.BadFiles != 0 {
+		t.Fatalf("got %d samples, stats %+v; want the long line skipped and the rest read", len(got), st)
 	}
 }

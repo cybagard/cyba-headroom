@@ -2,6 +2,7 @@ package samples
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,9 @@ type Stats struct {
 	// Skipped lines: truncated by a crash, malformed, or of an unknown
 	// schema version.
 	Skipped int
+	// Duplicates were samples seen before for the same day and time: left by
+	// a crash mid-gzip, or seen in both files while the daemon gzips a day.
+	Duplicates int
 	// BadFiles could not be read to the end, such as a corrupt archive.
 	// Samples read from them before the damage still count.
 	BadFiles int
@@ -71,8 +75,12 @@ func Read(dir string, from, to time.Time, fn func(Sample) error) (Stats, error) 
 		}
 		return 1
 	})
+	r := &dayReader{from: from, to: to, fn: fn, st: &st, br: bufio.NewReaderSize(nil, maxLine)}
 	for _, f := range files {
-		if err := readFile(f, from, to, fn, &st); err != nil {
+		if f.day != r.day {
+			r.day, r.seen = f.day, map[int64]bool{}
+		}
+		if err := r.read(f); err != nil {
 			return st, err
 		}
 	}
@@ -90,43 +98,87 @@ func mayOverlap(day string, from, to time.Time) bool {
 	return start.AddDate(0, 0, -1).Before(to) && start.AddDate(0, 0, 2).After(from)
 }
 
-// readFile reads one day file. Only an error from fn is returned; damage is
+// dayReader reads day files in order, dropping repeated samples within a day.
+type dayReader struct {
+	from, to time.Time
+	fn       func(Sample) error
+	st       *Stats
+	br       *bufio.Reader
+	day      string
+	seen     map[int64]bool
+}
+
+// read reads one day file. Only an error from fn is returned; damage is
 // counted.
-func readFile(f dayFile, from, to time.Time, fn func(Sample) error, st *Stats) error {
+func (r *dayReader) read(f dayFile) error {
 	file, err := os.Open(f.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // gzipped away since the listing
+	}
 	if err != nil {
-		st.BadFiles++
+		r.st.BadFiles++
 		return nil
 	}
 	defer func() { _ = file.Close() }()
-	var r io.Reader = file
+	var src io.Reader = file
 	if f.gz {
 		zr, err := gzip.NewReader(file)
 		if err != nil {
-			st.BadFiles++
+			r.st.BadFiles++
 			return nil
 		}
 		defer func() { _ = zr.Close() }()
-		r = zr
+		src = zr
 	}
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
-	for sc.Scan() {
-		var s Sample
-		if err := json.Unmarshal(sc.Bytes(), &s); err != nil || s.V != Version {
-			st.Skipped++
-			continue
+	r.br.Reset(src)
+	for {
+		line, tooLong, err := readLine(r.br)
+		if tooLong {
+			r.st.Skipped++
+		} else if len(bytes.TrimSpace(line)) > 0 {
+			if ferr := r.sample(line); ferr != nil {
+				return ferr
+			}
 		}
-		if s.T.Before(from) || !s.T.Before(to) {
-			continue
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
-		st.Samples++
-		if err := fn(s); err != nil {
-			return err
+		if err != nil {
+			r.st.BadFiles++
+			return nil
 		}
 	}
-	if sc.Err() != nil {
-		st.BadFiles++
+}
+
+// sample decodes one line and hands it to fn if it is new and in range.
+func (r *dayReader) sample(line []byte) error {
+	var s Sample
+	if err := json.Unmarshal(line, &s); err != nil || s.V != Version {
+		r.st.Skipped++
+		return nil
 	}
-	return nil
+	if s.T.Before(r.from) || !s.T.Before(r.to) {
+		return nil
+	}
+	key := s.T.UnixNano()
+	if r.seen[key] {
+		r.st.Duplicates++
+		return nil
+	}
+	r.seen[key] = true
+	r.st.Samples++
+	return r.fn(s)
+}
+
+// readLine returns the next line. A line longer than the reader's buffer is
+// consumed and reported as tooLong, so one bad line costs only itself.
+func readLine(br *bufio.Reader) (line []byte, tooLong bool, err error) {
+	line, err = br.ReadSlice('\n')
+	if !errors.Is(err, bufio.ErrBufferFull) {
+		return line, false, err
+	}
+	for errors.Is(err, bufio.ErrBufferFull) {
+		_, err = br.ReadSlice('\n')
+	}
+	return nil, true, err
 }

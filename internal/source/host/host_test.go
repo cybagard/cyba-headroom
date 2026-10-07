@@ -38,8 +38,15 @@ func (f *fakeSysctl) Uint64(name string) (uint64, error) {
 }
 
 func (f *fakeSysctl) Raw(name string) ([]byte, error) {
+	if err := f.errs[name]; err != nil {
+		return nil, err
+	}
 	if v, ok := f.raw[name]; ok {
 		return v, nil
+	}
+	// The kernel serves every integer through the raw call as well.
+	if v, ok := f.u64[name]; ok {
+		return le64(v), nil
 	}
 	return nil, fmt.Errorf("unknown oid %q: %w", name, syscall.ENOENT)
 }
@@ -382,5 +389,23 @@ func TestCompressedIsOptional(t *testing.T) {
 	}
 	if h.UsedBytes == nil || h.CompressorBytes == nil {
 		t.Fatal("used and compressor must not depend on it")
+	}
+}
+
+func TestSwapCountersAcceptEitherWidth(t *testing.T) {
+	sys := healthyMac()
+	delete(sys.u64, "vm.compressor.swapper.swapins_total")
+	delete(sys.u64, "vm.compressor.swapper.swapouts_total")
+	sys.raw["vm.compressor.swapper.swapins_total"] = le32(10)
+	sys.raw["vm.compressor.swapper.swapouts_total"] = le32(20)
+	c := newClock()
+	src := host.New(sys, 5*time.Minute, c.now)
+	collect(t, src)
+	c.advance(5 * time.Second)
+	sys.raw["vm.compressor.swapper.swapins_total"] = le32(60)
+	sys.raw["vm.compressor.swapper.swapouts_total"] = le32(20)
+	h := collect(t, src)
+	if h.SwapinsPerSec == nil || *h.SwapinsPerSec != 10 {
+		t.Fatalf("swapins/s = %v, want 10 from 32-bit counters", h.SwapinsPerSec)
 	}
 }

@@ -135,6 +135,8 @@ func TestLoadErrors(t *testing.T) {
 		{"absurd baseline", "[budget]\nhost_baseline_gb = 1e10\n", "budget.host_baseline_gb must be <= 1024"},
 		{"absurd docker overhead", "[budget]\ndocker_overhead_gb = 5000\n", "budget.docker_overhead_gb must be <= 1024"},
 		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
+		{"NaN baseline", "[budget]\nhost_baseline_gb = nan\n", "budget.host_baseline_gb must be a number"},
+		{"NaN headroom", "[policy]\nmin_headroom_gb = nan\n", "policy.min_headroom_gb must be >= 0"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {
@@ -201,5 +203,10 @@ func TestSamplesSettings(t *testing.T) {
 	}
 	if cfg.Samples.Enabled || cfg.Samples.Retention.Duration != 14*24*time.Hour {
 		t.Fatalf("loaded %+v", cfg.Samples)
+	}
+	// Retention does not matter while recording is off.
+	write(t, dir, "[samples]\nenabled = false\nretention = \"0s\"\n")
+	if _, err := LoadDir(dir); err != nil {
+		t.Fatalf("disabled samples with short retention: %v", err)
 	}
 }

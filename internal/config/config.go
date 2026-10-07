@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,10 +256,10 @@ func (c Config) Validate() error {
 	if c.Daemon.TrendWindow.Duration < 3*c.Daemon.Interval.Duration {
 		errs = append(errs, errors.New("daemon.trend_window must be at least 3 x daemon.interval"))
 	}
-	if c.Policy.MinHeadroomGB < 0 {
+	if !(c.Policy.MinHeadroomGB >= 0) { // also rejects NaN
 		errs = append(errs, errors.New("policy.min_headroom_gb must be >= 0"))
 	}
-	if c.Policy.PerWorktreeCapGB < 0 {
+	if !(c.Policy.PerWorktreeCapGB >= 0) {
 		errs = append(errs, errors.New("policy.per_worktree_cap_gb must be >= 0"))
 	}
 	if c.Policy.LeaseTimeout.Duration <= 0 {
@@ -276,13 +277,15 @@ func (c Config) Validate() error {
 		{"lmstudio_idle_gb", c.Budget.LMStudioIdleGB},
 	} {
 		switch {
+		case math.IsNaN(v.gb):
+			errs = append(errs, fmt.Errorf("budget.%s must be a number", v.key))
 		case v.gb < 0:
 			errs = append(errs, fmt.Errorf("budget.%s must be >= 0", v.key))
 		case v.gb > maxBudgetGB:
 			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, maxBudgetGB))
 		}
 	}
-	if c.Samples.Retention.Duration < 24*time.Hour {
+	if c.Samples.Enabled && c.Samples.Retention.Duration < 24*time.Hour {
 		errs = append(errs, errors.New("samples.retention must be at least 24h"))
 	}
 	if c.Budget.MaxMacOSVMs < 0 {

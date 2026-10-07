@@ -1,0 +1,86 @@
+{
+ "id": "00000000-0000-4000-8000-00000000000a",
+ "ok": true,
+ "result": {
+  "app": {
+   "main": {
+    "cpu": 0.17667468313252815,
+    "memory": 410730496
+   },
+   "renderer": {
+    "cpu": 0.062332849038544275,
+    "memory": 391790592
+   },
+   "other": {
+    "cpu": 0.0008567909801137955,
+    "memory": 206618624
+   },
+   "cpu": 0.23986432315118622,
+   "memory": 1009139712,
+   "history": [
+    852787200,
+    1009139712
+   ]
+  },
+  "worktrees": [
+   {
+    "worktreeId": "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-2",
+    "worktreeName": "Orchestrator",
+    "repoId": "00000000-0000-4000-8000-00000000000b",
+    "repoName": "project-a",
+    "cpu": 0.2,
+    "memory": 381140992,
+    "sessions": [
+     {
+      "sessionId": "00000000-0000-4000-8000-00000000000b::/Users/dev/orca/workspaces/project-a/feature-2@@b82870b9",
+      "paneKey": null,
+      "pid": 1557,
+      "cpu": 0.2,
+      "memory": 381140992
+     }
+    ],
+    "history": [
+     372621312,
+     381140992
+    ]
+   },
+   {
+    "worktreeId": "00000000-0000-4000-8000-000000000008::/Users/dev/orca/workspaces/cyba-headroom/main",
+    "worktreeName": "main",
+    "repoId": "00000000-0000-4000-8000-000000000008",
+    "repoName": "cyba-headroom",
+    "cpu": 15.8,
+    "memory": 852475904,
+    "sessions": [
+     {
+      "sessionId": "00000000-0000-4000-8000-000000000008::/Users/dev/orca/workspaces/cyba-headroom/main@@19a107e5",
+      "paneKey": "00000000-0000-4000-8000-00000000000c:00000000-0000-4000-8000-000000000003",
+      "pid": 69132,
+      "cpu": 15.8,
+      "memory": 852475904
+     }
+    ],
+    "history": [
+     852475904
+    ]
+   }
+  ],
+  "host": {
+   "totalMemory": 68719476736,
+   "freeMemory": 26163986432,
+   "availableMemory": 64596308132,
+   "availableMemorySource": "memory-pressure",
+   "usedMemory": 4123168604,
+   "memoryUsagePercent": 5.999999999767169,
+   "cpuCoreCount": 16,
+   "loadAverage1m": 2.63525390625
+  },
+  "processMemoryMetric": "rss",
+  "totalCpu": 16.239864323151185,
+  "totalMemory": 2242756608,
+  "collectedAt": 1791395098627
+ },
+ "_meta": {
+  "runtimeId": "00000000-0000-4000-8000-000000000004"
+ }
+}

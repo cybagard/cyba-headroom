@@ -23,6 +23,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
+	"github.com/cybagard/cyba-headroom/internal/source/orca"
 	"github.com/cybagard/cyba-headroom/internal/source/tart"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
@@ -107,17 +108,22 @@ func runDaemon(e Env) int {
 		return 1
 	}
 	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
-	// Collectors register here as they land (#16, #17, #49). Docker and Tart
+	// Collectors register here as they land (#16, #49). Docker and Tart
 	// share one VM process listing per tick.
 	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
 	var tartCLI tart.CLI
 	if p := tart.Locate(cfg.Tart.Path, e.Getenv); p != "" {
 		tartCLI = tart.Exec{Path: p}
 	}
+	var orcaCLI orca.CLI
+	if p := orca.Locate(cfg.Orca.Path, e.Getenv); p != "" {
+		orcaCLI = orca.Exec{Path: p}
+	}
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		docker.New(cfg.Docker.Socket, vms),
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
+		orca.New(orcaCLI),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

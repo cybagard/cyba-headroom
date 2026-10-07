@@ -105,7 +105,8 @@ func TestHostTreeAndFootprints(t *testing.T) {
 	}
 	exe, _ := os.Executable()
 	exe, _ = filepath.EvalSymlinks(exe)
-	if tree[0].PID != self || tree[0].Exec != exe {
+	root, _ := filepath.EvalSymlinks(tree[0].Exec) // the kernel keeps the path as invoked
+	if tree[0].PID != self || root != exe {
 		t.Fatalf("root = %+v, want pid %d exec %q", tree[0], self, exe)
 	}
 	i := slices.IndexFunc(tree, func(p vmproc.Process) bool { return p.PID == child.Process.Pid })

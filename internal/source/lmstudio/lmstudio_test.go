@@ -252,3 +252,29 @@ func TestNeverUsedModelHasNoLastUse(t *testing.T) {
 		t.Fatalf("last used = %v, want absent", *m.LastUsedAt)
 	}
 }
+
+func TestBackendReachedThroughASymlink(t *testing.T) {
+	// The app runs from a path that is a symlink to the installed one, as
+	// /var is to /private/var.
+	installed := t.TempDir()
+	link := filepath.Join(t.TempDir(), "apps")
+	if err := os.Symlink(installed, link); err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(installed, "LM Studio")
+	if err := os.WriteFile(app, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := lmHome(t, "500")
+	install := `{"path":"` + app + `"}`
+	if err := os.WriteFile(filepath.Join(home, ".lmstudio/.internal/app-install-location.json"), []byte(install), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	procs := lmTree(home)
+	viaLink := filepath.Join(link, "LM Studio")
+	procs.procs[0].Exec, procs.procs[0].Args = viaLink, []string{viaLink}
+	cli := fakeCLI{t: t, allowed: true, files: map[string]string{"ps --json": "ps-empty.json"}}
+	if got := collect(t, lmstudio.New(cli, procs, home)); !got.Running {
+		t.Fatal("backend run through a symlinked path not recognised")
+	}
+}

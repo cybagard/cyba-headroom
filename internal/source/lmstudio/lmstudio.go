@@ -160,10 +160,20 @@ func (s *Source) backend(app string) ([]vmproc.Process, bool) {
 	if err != nil || len(tree) == 0 {
 		return nil, false
 	}
-	if exec := tree[0].Exec; exec != app && !strings.HasPrefix(exec, s.dir+"/") {
+	// The kernel keeps the path as invoked, so compare resolved paths too.
+	exec := tree[0].Exec
+	if exec != app && resolve(exec) != resolve(app) && !strings.HasPrefix(resolve(exec), resolve(s.dir)+"/") {
 		return nil, false
 	}
 	return tree, true
+}
+
+// resolve returns p with symlinks resolved, or p if that fails.
+func resolve(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
 
 type reading struct{ l protocol.LMStudio }

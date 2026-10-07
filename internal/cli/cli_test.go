@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -105,10 +106,24 @@ func TestDaemonServesAllSources(t *testing.T) {
 		// Off macOS the source is registered but stale; on macOS it must serve data.
 		if code == 0 && strings.Contains(out, `"host"`) && strings.Contains(out, `"docker": {`) && strings.Contains(out, `"tart": {`) && strings.Contains(out, `"orca": {`) && strings.Contains(out, `"lmstudio": {`) && strings.Contains(out, `"budget": {`) &&
 			(runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("status never served all sources; last code=%d out=%s", code, out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The daemon records each tick under the config dir (#55).
+	for {
+		m, _ := filepath.Glob(filepath.Join(dir, "samples", "*.jsonl"))
+		if len(m) == 1 {
+			if b, _ := os.ReadFile(m[0]); strings.HasPrefix(string(b), `{"v":1,`) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no sample file written; found %v", m)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -39,7 +39,19 @@ type Config struct {
 	LMStudio LMStudio `toml:"lmstudio"`
 	Policy   Policy   `toml:"policy"`
 	Budget   Budget   `toml:"budget"`
+	Samples  Samples  `toml:"samples"`
 }
+
+// Samples controls the daemon's on-disk record of every tick (#55), which
+// `headroom suggest` (#23) learns thresholds from.
+type Samples struct {
+	Enabled bool `toml:"enabled"`
+	// Retention is how long day files are kept.
+	Retention Duration `toml:"retention"`
+}
+
+// SamplesDir is where the daemon writes samples.
+func (c Config) SamplesDir() string { return filepath.Join(c.Dir, "samples") }
 
 // Daemon holds collection loop settings (R1).
 type Daemon struct {
@@ -145,7 +157,8 @@ func Defaults(dir string) Config {
 			DaemonTimeout: Duration{500 * time.Millisecond},
 		},
 		// Overheads measured in spike #9 and #16; #23 refines them.
-		Budget: Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
+		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
+		Samples: Samples{Enabled: true, Retention: Duration{30 * 24 * time.Hour}},
 	}
 }
 
@@ -268,6 +281,9 @@ func (c Config) Validate() error {
 		case v.gb > maxBudgetGB:
 			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, maxBudgetGB))
 		}
+	}
+	if c.Samples.Retention.Duration < 24*time.Hour {
+		errs = append(errs, errors.New("samples.retention must be at least 24h"))
 	}
 	if c.Budget.MaxMacOSVMs < 0 {
 		errs = append(errs, errors.New("budget.max_macos_vms must be >= 0"))

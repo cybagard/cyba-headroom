@@ -47,6 +47,7 @@ type Daemon struct {
 	log     *slog.Logger
 	now     func() time.Time
 	derive  func(*protocol.Snapshot)
+	publish func(*protocol.Snapshot)
 
 	tickMu sync.Mutex
 	seq    uint64
@@ -75,6 +76,11 @@ func New(sources []Source, sourceTimeout time.Duration, log *slog.Logger) (*Daem
 // is applied and before it is published, to fill sections computed from the
 // others (the budget, R2). Call it before Run or Tick.
 func (d *Daemon) SetDerive(f func(*protocol.Snapshot)) { d.derive = f }
+
+// OnPublish sets f to receive each snapshot right after it is published,
+// e.g. to record it. f runs on the tick's goroutine, so it must not block,
+// and must not modify the snapshot. Call it before Run or Tick.
+func (d *Daemon) OnPublish(f func(*protocol.Snapshot)) { d.publish = f }
 
 // Snapshot returns the latest published snapshot. Callers must not modify it.
 func (d *Daemon) Snapshot() *protocol.Snapshot { return d.snap.Load() }
@@ -181,6 +187,9 @@ func (d *Daemon) Tick(ctx context.Context) {
 	next.Seq = d.seq
 	next.CollectedAt = d.now()
 	d.snap.Store(next)
+	if d.publish != nil {
+		d.publish(next)
+	}
 }
 
 // safeDerive runs derive, logging a panic instead of crashing the daemon: the

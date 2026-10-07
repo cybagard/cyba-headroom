@@ -34,4 +34,12 @@ docker_overhead_gb = 1.6   # Docker VM beyond its containers
 lmstudio_idle_gb = 0.6     # LM Studio with no model loaded
 ```
 
+The daemon records each tick to `samples/YYYY-MM-DD.jsonl` in the config directory (mode 0600). `headroom suggest` (#23) learns thresholds from these samples. Finished days are gzipped, and days past `retention` are deleted. A sample is about 2.7 KB with eight worktrees (measured). At the default 5 s interval that is about 47 MB for the current day and about 3 MB for each gzipped day, so 30 days take about 150 MB at most. Samples hold memory figures, worktree names and paths, container names and images, and bind-mount paths. They never hold container labels, environment or command lines.
+
+```toml
+[samples]
+enabled = true
+retention = "720h"   # 30 days; at least 24h
+```
+
 License: AGPL-3.0-only

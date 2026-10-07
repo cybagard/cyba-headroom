@@ -134,6 +134,7 @@ func TestLoadErrors(t *testing.T) {
 		{"negative lmstudio idle", "[budget]\nlmstudio_idle_gb = -0.5\n", "budget.lmstudio_idle_gb must be >= 0"},
 		{"absurd baseline", "[budget]\nhost_baseline_gb = 1e10\n", "budget.host_baseline_gb must be <= 1024"},
 		{"absurd docker overhead", "[budget]\ndocker_overhead_gb = 5000\n", "budget.docker_overhead_gb must be <= 1024"},
+		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {
@@ -184,5 +185,21 @@ func TestBudgetParams(t *testing.T) {
 	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, LMStudioIdleGB: 0.25}.Params()
 	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.LMStudioIdleBytes != 1<<28 {
 		t.Fatalf("params = %+v; GB means GiB, as macOS reports memory", p)
+	}
+}
+
+func TestSamplesSettings(t *testing.T) {
+	d := Defaults("/x")
+	if !d.Samples.Enabled || d.Samples.Retention.Duration != 30*24*time.Hour || d.SamplesDir() != "/x/samples" {
+		t.Fatalf("defaults = %+v dir %q, want enabled, 720h, /x/samples", d.Samples, d.SamplesDir())
+	}
+	dir := shortTempDir(t)
+	write(t, dir, "[samples]\nenabled = false\nretention = \"336h\"\n")
+	cfg, err := LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Samples.Enabled || cfg.Samples.Retention.Duration != 14*24*time.Hour {
+		t.Fatalf("loaded %+v", cfg.Samples)
 	}
 }

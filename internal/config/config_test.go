@@ -82,6 +82,18 @@ func TestDockerSocket(t *testing.T) {
 	}
 }
 
+func TestDockerSocketWithoutHOMEIsLeftUnset(t *testing.T) {
+	// Never a relative ".docker/run/docker.sock", which would resolve against
+	// the daemon's cwd. Unset makes the docker source report the problem.
+	cfg, err := Load(env(map[string]string{"HEADROOM_CONFIG_DIR": shortTempDir(t)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Docker.Socket != "" {
+		t.Fatalf("docker socket = %q, want unset", cfg.Docker.Socket)
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	dir := shortTempDir(t)
 	write(t, dir, `

@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
@@ -29,7 +28,7 @@ func TestRealDockerDesktop(t *testing.T) {
 	limit, _ := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
 	names, _ := exec.Command(cli, "ps", "--format", "{{.Names}}").Output()
 
-	d := collect(t, docker.New(sock, vmproc.New(vmproc.Host{}), time.Now))
+	d := collect(t, docker.New(sock, vmproc.New(vmproc.Host{})))
 	if !d.Running || d.VMLimitBytes != limit {
 		t.Fatalf("running=%v limit=%d, docker info says %d", d.Running, d.VMLimitBytes, limit)
 	}

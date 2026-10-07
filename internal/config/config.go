@@ -140,12 +140,17 @@ func Load(getenv func(string) string) (Config, error) {
 
 // dockerSocket follows the docker CLI: a unix:// DOCKER_HOST, else Docker
 // Desktop's per-user socket. A TCP DOCKER_HOST is a remote engine whose
-// memory is not this Mac's, so it is ignored.
+// memory is not this Mac's, so it is ignored. Docker contexts (Colima,
+// OrbStack) are not read; set [docker] socket for those. Without HOME it
+// stays empty rather than becoming a path relative to the daemon's cwd.
 func dockerSocket(getenv func(string) string) string {
 	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok && p != "" {
 		return p
 	}
-	return filepath.Join(getenv("HOME"), ".docker", "run", "docker.sock")
+	if home := getenv("HOME"); home != "" {
+		return filepath.Join(home, ".docker", "run", "docker.sock")
+	}
+	return ""
 }
 
 // LoadDir reads dir/config.toml over the defaults. Unknown keys are an error,

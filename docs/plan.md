@@ -20,7 +20,7 @@ Run for two weeks after completion to collect the baseline and set default thres
 
 - [x] #12 **Scaffold project (build, CI, lint, tests, config dir)**
 - [x] #13 **R1: daemon core — collection loop and in-memory budget state**
-- [ ] #14 **R1: Docker/Podman collector**
+- [x] #14 **R1: Docker/Podman collector**
 - [ ] #49 **R1: Podman collector and Docker+Podman both-running warning**
 - [ ] #15 **R1: Tart collector**
 - [ ] #16 **R1: LM Studio collector**

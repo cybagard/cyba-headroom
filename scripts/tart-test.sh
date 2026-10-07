@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the darwin test binaries in a clean macOS Tart VM.
+# Run the darwin test binaries in a clean macOS Tart VM, or, with arguments,
+# run that command in the VM instead (the repo is at "$share", read-only).
 # The VM is a clone of $TART_BASE (APFS clone, no extra disk), sized small,
 # and stopped afterwards: it takes one of the two macOS VM slots while it runs.
 set -euo pipefail
@@ -26,4 +27,8 @@ for _ in $(seq 60); do
 	tart exec "$vm" test -d "$share" >/dev/null 2>&1 && break
 	sleep 2
 done
-tart exec "$vm" bash "$share/scripts/darwin-tests.sh" run "$share"
+if [[ $# -gt 0 ]]; then
+	tart exec "$vm" "$@"
+else
+	tart exec "$vm" bash "$share/scripts/darwin-tests.sh" run "$share"
+fi

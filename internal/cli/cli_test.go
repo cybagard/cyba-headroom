@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func run(t *testing.T, env map[string]string, args ...string) (code int, stdout, stderr string) {
@@ -67,5 +70,39 @@ func TestConfigPrintsEffectiveConfig(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestDaemonServesHostSource(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	env := map[string]string{"HEADROOM_CONFIG_DIR": dir}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(Env{Args: []string{"headroom", "daemon"}, Stdout: io.Discard, Stderr: io.Discard,
+			Getenv: func(k string) string { return env[k] }, Context: ctx})
+	}()
+	defer func() {
+		cancel()
+		if code := <-done; code != 0 {
+			t.Errorf("daemon exit code %d", code)
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		code, out, _ := run(t, env, "headroom", "status", "--json")
+		if code == 0 && strings.Contains(out, `"host"`) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status never listed the host source; last code=%d out=%s", code, out)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

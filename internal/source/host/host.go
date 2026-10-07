@@ -108,8 +108,8 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 		FreePercent:    int(free),
 		SwapTotalBytes: swapTotal,
 		SwapUsedBytes:  swapUsed,
-		UsedBytes:      s.memoryUsed(),
 	}
+	s.memory(&h)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.prev != nil && s.prev.ok && cur.ok {
@@ -195,27 +195,44 @@ func (s *Source) freeSlope() float64 {
 	return sxy / sxx
 }
 
-// memoryUsed is Activity Monitor's "Memory Used": app memory (anonymous pages
-// less purgeable ones), wired pages, and what the compressor occupies. It is
-// optional: nil if any counter is missing, so the rest of the reading stands.
-func (s *Source) memoryUsed() *uint64 {
-	var v [5]uint64
+// memory fills Activity Monitor's "Memory Used" (app memory, that is
+// anonymous pages less purgeable ones, plus wired pages and what the
+// compressor occupies) and what the compressor holds at full size. Each is
+// optional: nil if a counter is missing, so the rest of the reading stands.
+func (s *Source) memory(h *protocol.Host) {
+	pagesize, err := s.uint("hw.pagesize")
+	if err != nil {
+		return
+	}
+	if compressor, err := s.uint("vm.compressor_bytes_used"); err == nil {
+		h.CompressorBytes = &compressor
+		if app, wired, ok := s.appAndWired(); ok {
+			used := (app+wired)*pagesize + compressor
+			h.UsedBytes = &used
+		}
+	}
+	// macOS 15 has no such counter; vm_stat reads it via host_statistics64.
+	if pages, err := s.uint("vm.compressor.pages_compressed_incore"); err == nil {
+		compressed := pages * pagesize
+		h.CompressedBytes = &compressed
+	}
+}
+
+// appAndWired returns app memory and wired memory in pages.
+func (s *Source) appAndWired() (app, wired uint64, ok bool) {
+	var v [3]uint64
 	for i, name := range []string{
 		"vm.page_pageable_internal_count",
 		"vm.page_purgeable_count",
-		"vm.page_wired_count",
-		"hw.pagesize",
-		"vm.compressor_bytes_used",
+		"vm.page_wired_count", // absent on macOS 15
 	} {
 		var err error
 		if v[i], err = s.uint(name); err != nil {
-			return nil
+			return 0, 0, false
 		}
 	}
-	internal, purgeable, wired, pagesize, compressed := v[0], v[1], v[2], v[3], v[4]
-	app := internal - min(purgeable, internal)
-	used := (app+wired)*pagesize + compressed
-	return &used
+	internal, purgeable := v[0], v[1]
+	return internal - min(purgeable, internal), v[2], true
 }
 
 // uint reads an integer sysctl of either width. The page counters mix 32 and

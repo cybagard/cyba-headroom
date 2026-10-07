@@ -162,7 +162,9 @@ func i64(v int64) *int64 { return &v }
 // busyMac is a 64 GiB Mac with every source reporting.
 func busyMac() *protocol.Snapshot {
 	return &protocol.Snapshot{
-		Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(40 * gib)},
+		// 1 GiB of compressor pages holding 4 GiB, which footprints count whole.
+		Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(40 * gib),
+			CompressorBytes: u64(1 * gib), CompressedBytes: u64(4 * gib)},
 		Docker: &protocol.Docker{Running: true, VMRunning: true, VMFootprintBytes: 6 * gib,
 			Containers: []protocol.Container{{MemoryBytes: 2 * gib}}},
 		Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{
@@ -184,9 +186,9 @@ func TestTotalsAndHeadroom(t *testing.T) {
 	if b.Unknown != nil {
 		t.Errorf("unknown = %v, want none", b.Unknown)
 	}
-	// 40 used − (6 docker + 5 tart + 13 lmstudio)
-	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(16*gib) {
-		t.Errorf("unaccounted = %v, want 16 GiB", b.UnaccountedBytes)
+	// 40 used − 1 compressor + 4 compressed − (6 docker + 5 tart + 13 lmstudio)
+	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(19*gib) {
+		t.Errorf("unaccounted = %v, want 19 GiB", b.UnaccountedBytes)
 	}
 	names := []string{}
 	for _, c := range b.Components {
@@ -195,8 +197,8 @@ func TestTotalsAndHeadroom(t *testing.T) {
 	if want := []string{"docker", "tart", "lmstudio", "host_baseline"}; !slices.Equal(names, want) {
 		t.Errorf("components = %v, want %v", names, want)
 	}
-	if c := component(t, b, "host_baseline"); c.ReservedBytes != 10*gib || !usedEq(c.UsedBytes, u64(16*gib)) {
-		t.Errorf("host_baseline = %d used %v, want 10 GiB used 16 GiB", c.ReservedBytes, c.UsedBytes)
+	if c := component(t, b, "host_baseline"); c.ReservedBytes != 10*gib || !usedEq(c.UsedBytes, u64(19*gib)) {
+		t.Errorf("host_baseline = %d used %v, want 10 GiB used 19 GiB", c.ReservedBytes, c.UsedBytes)
 	}
 }
 
@@ -222,10 +224,11 @@ func TestUnaccounted(t *testing.T) {
 		want *int64
 	}{
 		"host used unknown":      {func(s *protocol.Snapshot) { s.Host.UsedBytes = nil }, nil},
+		"compressed unknown":     {func(s *protocol.Snapshot) { s.Host.CompressedBytes = nil }, nil},
 		"tart footprint unknown": {func(s *protocol.Snapshot) { s.Tart.VMs[0].FootprintBytes = nil }, nil},
 		"no docker reading":      {func(s *protocol.Snapshot) { s.Docker = nil }, nil},
 		"negative from skew": {
-			func(s *protocol.Snapshot) { s.Host.UsedBytes = u64(20 * gib) }, i64(-int64(4 * gib)),
+			func(s *protocol.Snapshot) { s.Host.UsedBytes = u64(20 * gib) }, i64(-int64(1 * gib)),
 		},
 	}
 	for name, tc := range cases {

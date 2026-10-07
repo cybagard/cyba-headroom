@@ -76,6 +76,8 @@ func healthyMac() *fakeSysctl {
 			"vm.page_wired_count":             le32(200),
 			"vm.compressor_bytes_used":        le64(1 << 20),
 			"hw.pagesize":                     le64(16384),
+			// 300 pages held in the compressor, at their full size.
+			"vm.compressor.pages_compressed_incore": le32(300),
 		},
 	}
 }
@@ -358,5 +360,27 @@ func TestMemoryUsedIsOptional(t *testing.T) {
 	sys.raw["vm.page_wired_count"] = []byte{1, 2}
 	if h := collect(t, host.New(sys, 5*time.Minute, newClock().now)); h.UsedBytes != nil {
 		t.Fatalf("odd width: used = %d, want unknown", *h.UsedBytes)
+	}
+}
+
+func TestReportsCompressor(t *testing.T) {
+	h := collect(t, host.New(healthyMac(), 5*time.Minute, newClock().now))
+	if h.CompressorBytes == nil || *h.CompressorBytes != 1<<20 {
+		t.Errorf("compressor = %v, want %d", h.CompressorBytes, 1<<20)
+	}
+	if h.CompressedBytes == nil || *h.CompressedBytes != 300*16384 {
+		t.Errorf("compressed = %v, want %d", h.CompressedBytes, 300*16384)
+	}
+}
+
+func TestCompressedIsOptional(t *testing.T) {
+	sys := healthyMac()
+	delete(sys.raw, "vm.compressor.pages_compressed_incore") // macOS 15
+	h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+	if h.CompressedBytes != nil {
+		t.Fatalf("compressed = %d, want unknown", *h.CompressedBytes)
+	}
+	if h.UsedBytes == nil || h.CompressorBytes == nil {
+		t.Fatal("used and compressor must not depend on it")
 	}
 }

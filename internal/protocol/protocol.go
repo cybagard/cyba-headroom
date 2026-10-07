@@ -62,10 +62,10 @@ type Budget struct {
 	// UnaccountedBytes is memory in use that no component explains: macOS,
 	// Orca, the agents and everything else, which the host baseline reserves
 	// for. It is what #23 learns host_baseline_gb from. Signed, because its
-	// inputs are read at slightly different instants, and because host used
-	// counts compressed memory at its compressed size while process
-	// footprints may count it whole, so it reads low under compression (#23
-	// checks this). Absent when host used or a component's footprint is
+	// inputs are read at slightly different instants. Compressed memory is
+	// counted at full size on both sides, as footprints count it, so the
+	// figure holds under compression; pages swapped out to disk are not
+	// (#23). Absent when host used, compressed or a component's footprint is
 	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
 	// Components are docker, tart, lmstudio and host_baseline, in that order.
@@ -248,6 +248,12 @@ type Host struct {
 	// UsedBytes is Activity Monitor's "Memory Used": app memory, wired and
 	// compressed. Absent where the kernel lacks one of its counters.
 	UsedBytes *uint64 `json:"used_bytes,omitempty"`
+	// CompressorBytes is what the compressor occupies, a part of UsedBytes.
+	CompressorBytes *uint64 `json:"compressor_bytes,omitempty"`
+	// CompressedBytes is what the compressor holds, at its uncompressed size:
+	// the size process footprints count compressed pages at. Absent on
+	// macOS 15.
+	CompressedBytes *uint64 `json:"compressed_bytes,omitempty"`
 
 	SwapTotalBytes uint64 `json:"swap_total_bytes"`
 	SwapUsedBytes  uint64 `json:"swap_used_bytes"`

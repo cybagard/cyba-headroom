@@ -58,8 +58,11 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	}
 
 	base := protocol.BudgetComponent{Name: "host_baseline", ReservedBytes: p.HostBaselineBytes}
-	if h := s.Host; h != nil && h.UsedBytes != nil && footprintsKnown {
-		un := int64(*h.UsedBytes) - int64(footprints)
+	// Footprints count compressed pages at full size, host used at their
+	// compressed size: swap the compressor's share for its full size first.
+	if h := s.Host; h != nil && h.UsedBytes != nil && h.CompressorBytes != nil && h.CompressedBytes != nil && footprintsKnown {
+		whole := int64(*h.UsedBytes) - int64(*h.CompressorBytes) + int64(*h.CompressedBytes)
+		un := whole - int64(footprints)
 		b.UnaccountedBytes = &un
 		used := uint64(max(un, 0))
 		base.UsedBytes = &used

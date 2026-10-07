@@ -57,6 +57,14 @@ func TestSystemReadsTheRealKernel(t *testing.T) {
 	case h.UsedBytes != nil && (*h.UsedBytes == 0 || *h.UsedBytes > h.TotalBytes):
 		t.Errorf("memory used = %d, total %d", *h.UsedBytes, h.TotalBytes)
 	}
+	if h.CompressorBytes == nil {
+		t.Error("compressor bytes unknown")
+	}
+	// macOS 15 lacks the in-core compressed page count, too.
+	_, incoreErr := exec.Command("/usr/sbin/sysctl", "-n", "vm.compressor.pages_compressed_incore").Output()
+	if (incoreErr == nil) != (h.CompressedBytes != nil) {
+		t.Errorf("compressed = %v, but sysctl error = %v", h.CompressedBytes, incoreErr)
+	}
 	// sysctl prints e.g. "total = 2048.00M  used = 1024.00M ...".
 	if !strings.Contains(sysctlCmd(t, "vm.swapusage"), "total = ") {
 		t.Error("unexpected vm.swapusage format")

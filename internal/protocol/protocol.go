@@ -40,7 +40,39 @@ type Snapshot struct {
 	CollectedAt time.Time               `json:"collected_at"`
 	Sources     map[string]SourceStatus `json:"sources"`
 
-	Host *Host `json:"host,omitempty"`
+	Host   *Host   `json:"host,omitempty"`
+	Docker *Docker `json:"docker,omitempty"`
+}
+
+// Docker is Docker Desktop's state (R1).
+type Docker struct {
+	// Running is false when nothing answers on the Docker socket.
+	Running bool `json:"running"`
+	// VMLimitBytes is the VM's configured memory (/info MemTotal): a ceiling,
+	// not a cost (spike #9).
+	VMLimitBytes uint64 `json:"vm_limit_bytes"`
+	// VMRunning is false while Resource Saver has stopped the VM, even though
+	// the API still answers.
+	VMRunning bool `json:"vm_running"`
+	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
+	// overhead plus the guest's high-water mark, which it does not give back.
+	VMFootprintBytes uint64      `json:"vm_footprint_bytes"`
+	Containers       []Container `json:"containers"`
+}
+
+// Container is one running container.
+type Container struct {
+	ID     string            `json:"id"`
+	Name   string            `json:"name"`
+	Image  string            `json:"image"`
+	Labels map[string]string `json:"labels,omitempty"`
+	// Mounts are the host paths of bind mounts, for worktree attribution (R3).
+	Mounts []string `json:"mounts,omitempty"`
+	// MemoryBytes is usage minus inactive file cache, as docker stats shows.
+	MemoryBytes uint64 `json:"memory_bytes"`
+	// CPUPercent is CPU use since the previous tick, 100 = one core, as
+	// docker stats shows; absent on a container's first tick.
+	CPUPercent *float64 `json:"cpu_percent,omitempty"`
 }
 
 // Host is the host's memory state (R1, R4 top line).

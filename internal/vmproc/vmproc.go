@@ -39,6 +39,14 @@ type VM struct {
 	FootprintBytes uint64
 }
 
+// Process is a process with its full argument list.
+type Process struct {
+	PID, PPID int
+	// Comm is the kernel's short name (at most 16 bytes).
+	Comm string
+	Args []string
+}
+
 // System is the OS access vmproc needs. The darwin implementation is Host.
 type System interface {
 	// VMPIDs lists the PIDs of Virtualization.framework VM processes.

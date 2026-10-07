@@ -21,7 +21,7 @@
 **R3 — Worktree attribution.** The worktree path is the join key.
 
 - [ ] Containers attributed by compose project label, bind-mount path or launching process cwd
-- [ ] Tart VMs attributed by naming convention (VM name contains the worktree name) or by the cwd of the `tart run` process
+- [ ] Tart VMs attributed by naming convention (VM name contains the worktree name), by the cwd of the process that launched `tart run`, or by its `--dir` host paths. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
 - [ ] Anything that matches no live worktree appears under **unattributed**
 - [ ] Given a container started from worktree `fix-login`, when the view refreshes, then it appears under `fix-login`
 

@@ -32,6 +32,7 @@ type Config struct {
 
 	Daemon Daemon `toml:"daemon"`
 	Docker Docker `toml:"docker"`
+	Tart   Tart   `toml:"tart"`
 	Policy Policy `toml:"policy"`
 	Budget Budget `toml:"budget"`
 }
@@ -51,6 +52,13 @@ type Docker struct {
 	// Socket is the engine's Unix socket. Empty means: DOCKER_HOST if it is a
 	// unix:// URL, else Docker Desktop's ~/.docker/run/docker.sock.
 	Socket string `toml:"socket"`
+}
+
+// Tart locates the tart CLI.
+type Tart struct {
+	// Path is the tart binary. Empty means: PATH, then tart.app and the usual
+	// install locations.
+	Path string `toml:"path"`
 }
 
 // Policy is the fixed-threshold policy (R8) and lease settings (R10).
@@ -176,6 +184,7 @@ func LoadDir(dir string) (Config, error) {
 	cfg.Socket = expandHome(cfg.Socket)
 	cfg.ShimDir = expandHome(cfg.ShimDir)
 	cfg.Docker.Socket = expandHome(cfg.Docker.Socket)
+	cfg.Tart.Path = expandHome(cfg.Tart.Path)
 	return cfg, cfg.Validate()
 }
 

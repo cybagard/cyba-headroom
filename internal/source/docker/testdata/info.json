@@ -1,0 +1,8 @@
+{
+ "MemTotal": 33333952512,
+ "OperatingSystem": "Docker Desktop",
+ "ServerVersion": "29.8.1",
+ "NCPU": 16,
+ "Containers": 1,
+ "ContainersRunning": 1
+}

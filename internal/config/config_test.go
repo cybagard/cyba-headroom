@@ -55,6 +55,33 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	}
 }
 
+func TestDockerSocket(t *testing.T) {
+	dir := shortTempDir(t)
+	cases := []struct {
+		name, file string
+		env        map[string]string
+		want       string
+	}{
+		{"Docker Desktop default", "", map[string]string{"HOME": "/Users/dev"}, "/Users/dev/.docker/run/docker.sock"},
+		{"DOCKER_HOST unix socket", "", map[string]string{"HOME": "/Users/dev", "DOCKER_HOST": "unix:///var/run/docker.sock"}, "/var/run/docker.sock"},
+		{"DOCKER_HOST over TCP is not a local engine", "", map[string]string{"HOME": "/Users/dev", "DOCKER_HOST": "tcp://10.0.0.5:2375"}, "/Users/dev/.docker/run/docker.sock"},
+		{"config file wins", "[docker]\nsocket = \"/tmp/d.sock\"\n", map[string]string{"HOME": "/Users/dev", "DOCKER_HOST": "unix:///var/run/docker.sock"}, "/tmp/d.sock"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			write(t, dir, tc.file)
+			tc.env["HEADROOM_CONFIG_DIR"] = dir
+			cfg, err := Load(env(tc.env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Docker.Socket != tc.want {
+				t.Fatalf("docker socket = %q, want %q", cfg.Docker.Socket, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	dir := shortTempDir(t)
 	write(t, dir, `

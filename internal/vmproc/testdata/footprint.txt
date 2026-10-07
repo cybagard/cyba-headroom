@@ -1,0 +1,8 @@
+======================================================================
+com.apple.Virtualization.VirtualMachine [1234]: 64-bit    Footprint: 1709280520 B (16384 bytes per page)
+======================================================================
+
+Auxiliary data:
+    phys_footprint: 1709280520 B
+    phys_footprint_peak: 1709280520 B
+

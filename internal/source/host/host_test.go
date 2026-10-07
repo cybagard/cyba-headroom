@@ -14,9 +14,10 @@ import (
 
 // fakeSysctl serves fixed values by name; tests change them between ticks.
 type fakeSysctl struct {
-	u32 map[string]uint32
-	u64 map[string]uint64
-	raw map[string][]byte
+	u32  map[string]uint32
+	u64  map[string]uint64
+	raw  map[string][]byte
+	errs map[string]error // returned instead of a value when set
 }
 
 func (f *fakeSysctl) Uint32(name string) (uint32, error) {
@@ -27,6 +28,9 @@ func (f *fakeSysctl) Uint32(name string) (uint32, error) {
 }
 
 func (f *fakeSysctl) Uint64(name string) (uint64, error) {
+	if err := f.errs[name]; err != nil {
+		return 0, err
+	}
 	if v, ok := f.u64[name]; ok {
 		return v, nil
 	}
@@ -117,9 +121,8 @@ func TestReportsSwapUsage(t *testing.T) {
 
 func TestBadKernelValuesAreErrors(t *testing.T) {
 	cases := map[string]func(*fakeSysctl){
-		"unknown pressure level": func(f *fakeSysctl) { f.u32["kern.memorystatus_vm_pressure_level"] = 3 },
-		"short xsw_usage":        func(f *fakeSysctl) { f.raw["vm.swapusage"] = make([]byte, 16) },
-		"missing oid":            func(f *fakeSysctl) { delete(f.u64, "hw.memsize") },
+		"short xsw_usage": func(f *fakeSysctl) { f.raw["vm.swapusage"] = make([]byte, 24) },
+		"missing oid":     func(f *fakeSysctl) { delete(f.u64, "hw.memsize") },
 	}
 	for name, breakIt := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -254,5 +257,53 @@ func TestSwapRatesAbsentWhenKernelLacksCounters(t *testing.T) {
 	}
 	if h.Pressure != "normal" || h.Trend.Samples != 2 {
 		t.Fatalf("rest of the reading missing: %+v", h)
+	}
+}
+
+func TestUnknownPressureLevelKeepsRestOfReading(t *testing.T) {
+	sys := healthyMac()
+	sys.sample(8, 70) // a level this build does not know, e.g. from a newer macOS
+	h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+	if h.Pressure != "unknown" || h.FreePercent != 70 || h.TotalBytes != 64<<30 {
+		t.Fatalf("got %+v, want pressure unknown with free %% and total still read", h)
+	}
+}
+
+func TestSwapRatesAbsentOnAnyCounterError(t *testing.T) {
+	sys := healthyMac()
+	// x/sys returns EIO when a sysctl's size is not 8 bytes.
+	sys.errs = map[string]error{"vm.compressor.swapper.swapins_total": syscall.EIO}
+	clk := newClock()
+	src := host.New(sys, 5*time.Minute, clk.now)
+	collect(t, src)
+	clk.advance(10 * time.Second)
+	if h := collect(t, src); h.SwapinsPerSec != nil || h.Pressure != "normal" {
+		t.Fatalf("got %+v, want reading without rates", h)
+	}
+}
+
+func TestNewestSampleCountsTowardTimeAtLevel(t *testing.T) {
+	sys := healthyMac()
+	clk := newClock()
+	src := host.New(sys, 5*time.Minute, clk.now)
+	collect(t, src)
+	clk.advance(5 * time.Second)
+	sys.sample(4, 20)
+	// Pressure just went critical: the guard must see it on this tick.
+	if tr := collect(t, src).Trend; tr.Worst != "critical" || tr.CriticalSeconds != 5 {
+		t.Fatalf("trend = %+v, want worst critical with 5s at critical", tr)
+	}
+}
+
+func TestDirectionNeedsAMinuteOfHistory(t *testing.T) {
+	sys := healthyMac()
+	clk := newClock()
+	src := host.New(sys, 5*time.Minute, clk.now)
+	sys.sample(1, 80)
+	collect(t, src)
+	clk.advance(5 * time.Second)
+	sys.sample(1, 79) // 1 point in 5 s would read as -12 %/min
+	if tr := collect(t, src).Trend; tr.Direction != "unknown" {
+		t.Fatalf("direction after 5 s of history = %q, want unknown", tr.Direction)
 	}
 }

@@ -47,7 +47,8 @@ type Snapshot struct {
 type Host struct {
 	TotalBytes uint64 `json:"total_bytes"`
 	// Pressure is the kernel's level: normal, warn or critical (Activity
-	// Monitor's green, yellow, red).
+	// Monitor's green, yellow, red), or unknown for a level this build does
+	// not recognise.
 	Pressure string `json:"pressure"`
 	// FreePercent is the kernel's free-memory percentage, the signal
 	// `memory_pressure` reports.
@@ -55,8 +56,9 @@ type Host struct {
 
 	SwapTotalBytes uint64 `json:"swap_total_bytes"`
 	SwapUsedBytes  uint64 `json:"swap_used_bytes"`
-	// Swap-in/out rates in pages per second since the previous sample; absent
-	// on the first sample.
+	// Swap-in/out events per second since the previous sample, in the unit
+	// the kernel's vm.compressor.swapper totals count (unverified; see #23).
+	// Absent on the first sample and where the kernel lacks the counters.
 	SwapinsPerSec  *float64 `json:"swapins_per_sec,omitempty"`
 	SwapoutsPerSec *float64 `json:"swapouts_per_sec,omitempty"`
 
@@ -68,15 +70,15 @@ type Trend struct {
 	Samples int `json:"samples"`
 	// Worst is the highest pressure level seen in the window.
 	Worst string `json:"worst"`
-	// Seconds spent at warn and at critical; each sample's level holds until
-	// the next sample.
+	// Seconds spent at warn and at critical; each sample's level covers the
+	// interval leading up to it.
 	WarnSeconds     float64 `json:"warn_seconds"`
 	CriticalSeconds float64 `json:"critical_seconds"`
 	MinFreePercent  int     `json:"min_free_percent"`
 	// FreeSlopePerMin is the least-squares slope of free % per minute.
 	FreeSlopePerMin float64 `json:"free_slope_per_min"`
 	// Direction of pressure: rising (free memory falling), steady, falling,
-	// or unknown with a single sample.
+	// or unknown until a minute of history exists.
 	Direction string `json:"direction"`
 }
 

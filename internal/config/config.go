@@ -31,6 +31,7 @@ type Config struct {
 	ShimDir string `toml:"shim_dir"`
 
 	Daemon Daemon `toml:"daemon"`
+	Docker Docker `toml:"docker"`
 	Policy Policy `toml:"policy"`
 	Budget Budget `toml:"budget"`
 }
@@ -43,6 +44,13 @@ type Daemon struct {
 	SourceTimeout Duration `toml:"source_timeout"`
 	// TrendWindow is how much host pressure history the trend covers (R4).
 	TrendWindow Duration `toml:"trend_window"`
+}
+
+// Docker locates the Docker Engine API.
+type Docker struct {
+	// Socket is the engine's Unix socket. Empty means: DOCKER_HOST if it is a
+	// unix:// URL, else Docker Desktop's ~/.docker/run/docker.sock.
+	Socket string `toml:"socket"`
 }
 
 // Policy is the fixed-threshold policy (R8) and lease settings (R10).
@@ -113,13 +121,36 @@ func Dir(getenv func(string) string) (string, error) {
 	return filepath.Join(home, ".config", "headroom"), nil
 }
 
-// Load reads the config from the resolved directory. A missing file yields defaults.
+// Load reads the config from the resolved directory. A missing file yields
+// defaults; settings left empty are resolved from the environment.
 func Load(getenv func(string) string) (Config, error) {
 	dir, err := Dir(getenv)
 	if err != nil {
 		return Config{}, err
 	}
-	return LoadDir(dir)
+	cfg, err := LoadDir(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.Docker.Socket == "" {
+		cfg.Docker.Socket = dockerSocket(getenv)
+	}
+	return cfg, nil
+}
+
+// dockerSocket follows the docker CLI: a unix:// DOCKER_HOST, else Docker
+// Desktop's per-user socket. A TCP DOCKER_HOST is a remote engine whose
+// memory is not this Mac's, so it is ignored. Docker contexts (Colima,
+// OrbStack) are not read; set [docker] socket for those. Without HOME it
+// stays empty rather than becoming a path relative to the daemon's cwd.
+func dockerSocket(getenv func(string) string) string {
+	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok && p != "" {
+		return p
+	}
+	if home := getenv("HOME"); home != "" {
+		return filepath.Join(home, ".docker", "run", "docker.sock")
+	}
+	return ""
 }
 
 // LoadDir reads dir/config.toml over the defaults. Unknown keys are an error,
@@ -144,6 +175,7 @@ func LoadDir(dir string) (Config, error) {
 	cfg.Dir = dir
 	cfg.Socket = expandHome(cfg.Socket)
 	cfg.ShimDir = expandHome(cfg.ShimDir)
+	cfg.Docker.Socket = expandHome(cfg.Docker.Socket)
 	return cfg, cfg.Validate()
 }
 

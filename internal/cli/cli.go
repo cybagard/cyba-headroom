@@ -21,7 +21,9 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
+	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
 // Version is set at build time with -ldflags "-X .../internal/cli.Version=...".
@@ -104,8 +106,12 @@ func runDaemon(e Env) int {
 		return 1
 	}
 	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
-	// Collectors register here as they land (#14–#17).
-	sources := []daemon.Source{host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now)}
+	// Collectors register here as they land (#15–#17, #49).
+	vms := vmproc.New(vmproc.Host{})
+	sources := []daemon.Source{
+		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
+		docker.New(cfg.Docker.Socket, vms),
+	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)

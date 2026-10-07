@@ -19,12 +19,13 @@ Exit criterion: attribution and the Orca launch environment are confirmed to rea
 Run for two weeks after completion to collect the baseline and set default thresholds. Blocked by Phase 1. Spec: docs/02-requirements.md R1–R4.
 
 - [x] #12 **Scaffold project (build, CI, lint, tests, config dir)**
-- [ ] #13 **R1: daemon core — collection loop and in-memory budget state**
+- [x] #13 **R1: daemon core — collection loop and in-memory budget state**
 - [ ] #14 **R1: Docker/Podman collector**
+- [ ] #49 **R1: Podman collector and Docker+Podman both-running warning**
 - [ ] #15 **R1: Tart collector**
 - [ ] #16 **R1: LM Studio collector**
 - [ ] #17 **R1: Orca collector**
-- [ ] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
+- [x] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
 - [ ] #19 **R2: budget model (reserved vs used vs headroom)**
 - [ ] #20 **R3: worktree attribution**
 - [ ] #21 **R4: observe view — `headroom` and `headroom --watch`**

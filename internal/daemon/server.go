@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -19,37 +20,65 @@ import (
 // connTimeout bounds one client exchange so a stuck client cannot pin a goroutine.
 const connTimeout = 2 * time.Second
 
-// staleProbe is how long Listen waits for an existing daemon to answer.
-const staleProbe = 200 * time.Millisecond
-
-// Listen binds the daemon socket at path. It refuses if another daemon is
-// answering there, removes a stale socket left by a crash, and restricts the
-// socket to the current user.
+// Listen binds the daemon socket at path. An exclusive lock on path+".lock",
+// held until the listener closes, makes the daemon a singleton: a second
+// daemon fails here even if the live one's socket is gone or slow to answer.
+// Holding the lock also proves any existing socket is stale, so it is removed.
+// The socket is created owner-only, with no window where others can connect.
 func Listen(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
+	lockPath := path + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("daemon: another daemon is already running (%s is locked)", lockPath)
+		}
+		return nil, fmt.Errorf("daemon: locking %s: %w", lockPath, err)
+	}
+	ln, err := listenLocked(path)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return &lockedListener{Listener: ln, lock: lock}, nil
+}
+
+func listenLocked(path string) (net.Listener, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode().Type() != fs.ModeSocket {
 			return nil, fmt.Errorf("daemon: %s exists and is not a socket", path)
-		}
-		if c, err := net.DialTimeout("unix", path, staleProbe); err == nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("daemon: another daemon is already listening on %s", path)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("daemon: removing stale socket: %w", err)
 		}
 	}
+	// Umask is process-wide; Listen runs once at startup, before other goroutines.
+	old := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", path)
+	syscall.Umask(old)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = ln.Close()
-		return nil, fmt.Errorf("daemon: %w", err)
-	}
 	return ln, nil
+}
+
+// lockedListener releases the singleton lock when the listener closes.
+type lockedListener struct {
+	net.Listener
+	lock *os.File
+	once sync.Once
+}
+
+func (l *lockedListener) Close() error {
+	err := l.Listener.Close()
+	l.once.Do(func() { _ = l.lock.Close() })
+	return err
 }
 
 // Serve answers clients on ln until ctx ends, then closes ln (which removes
@@ -59,14 +88,28 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 	defer stop()
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	var backoff time.Duration
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("daemon: accept: %w", err)
+			if errors.Is(err, net.ErrClosed) {
+				return fmt.Errorf("daemon: accept: %w", err)
+			}
+			// Temporary, e.g. EMFILE under a burst of shim calls: back off and
+			// keep serving, as net/http does, rather than taking the daemon down.
+			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+			d.log.Warn("accept failed, retrying", "err", err, "in", backoff)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
+			continue
 		}
+		backoff = 0
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -37,6 +37,15 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestStatusRejectsExtraArgs(t *testing.T) {
+	for _, args := range [][]string{{"--watch"}, {"--json", "foo"}} {
+		code, _, stderr := run(t, nil, append([]string{"headroom", "status"}, args...)...)
+		if code != 2 || !strings.Contains(stderr, "status") {
+			t.Errorf("%v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+}
+
 func TestNotYetPointsAtIssue(t *testing.T) {
 	code, _, stderr := run(t, nil, "headroom", "doctor")
 	if code != 1 || !strings.Contains(stderr, "#32") {

@@ -7,6 +7,7 @@ set -euo pipefail
 
 root=${2:-$(cd "$(dirname "$0")/.." && pwd)}
 out=bin/darwin-test
+name() { [[ $1 == . ]] && echo root.test || echo "${1//\//_}.test"; }
 
 case ${1:-} in
 build)
@@ -14,8 +15,9 @@ build)
 	rm -rf "$out" && mkdir -p "$out"
 	mod=$(go list -m)
 	for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...); do
-		rel=${pkg#"$mod"/}
-		GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -c -o "$out/${rel//\//_}.test" "$pkg"
+		rel=.
+		[[ $pkg == "$mod" ]] || rel=${pkg#"$mod"/}
+		GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -c -o "$out/$(name "$rel")" "$pkg"
 		echo "$rel" >>"$out/packages"
 	done
 	;;
@@ -26,7 +28,7 @@ run)
 	trap 'rm -f "$log"' EXIT
 	while read -r rel; do
 		# Run from the package dir, as go test does, so testdata paths resolve.
-		if (cd "$root/$rel" && "$root/$out/${rel//\//_}.test" -test.count=1 >"$log" 2>&1); then
+		if (cd "$root/$rel" && "$root/$out/$(name "$rel")" -test.count=1 >"$log" 2>&1); then
 			echo "ok   $rel"
 		else
 			echo "FAIL $rel"; cat "$log"; fail=1

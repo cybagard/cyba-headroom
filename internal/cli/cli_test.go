@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,7 +98,8 @@ func TestDaemonServesHostSource(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		code, out, _ := run(t, env, "headroom", "status", "--json")
-		if code == 0 && strings.Contains(out, `"host"`) {
+		// Off macOS the source is registered but stale; on macOS it must serve data.
+		if code == 0 && strings.Contains(out, `"host"`) && (runtime.GOOS != "darwin" || strings.Contains(out, `"pressure"`)) {
 			return
 		}
 		if time.Now().After(deadline) {

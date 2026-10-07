@@ -4,10 +4,8 @@ package host
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
@@ -20,6 +18,10 @@ type Sysctl interface {
 	Uint64(name string) (uint64, error)
 	Raw(name string) ([]byte, error)
 }
+
+// minTrendSpan is the history needed before a direction is reported; over a
+// shorter span a 1-point change in the integer free % reads as a steep slope.
+const minTrendSpan = time.Minute
 
 // steadySlope is the |free %/min| below which pressure counts as steady.
 // A starting guess; calibrate from the #23 baseline.
@@ -45,26 +47,25 @@ type sample struct {
 }
 
 // counters are the cumulative swap counters at one sample. ok is false when
-// the kernel lacks them: macOS 15 has no vm.compressor.swapper.* totals.
+// they cannot be read: macOS 15 has no vm.compressor.swapper.* totals, and a
+// future release may change their size. They are optional, so no error fails
+// the rest of the reading.
 type counters struct {
 	at                time.Time
 	ok                bool
 	swapins, swapouts uint64
 }
 
-func (s *Source) readCounters() (counters, error) {
-	c := counters{at: s.now(), ok: true}
+func (s *Source) readCounters(at time.Time) counters {
+	c := counters{at: at, ok: true}
 	var err error
 	if c.swapins, err = s.sys.Uint64("vm.compressor.swapper.swapins_total"); err == nil {
 		c.swapouts, err = s.sys.Uint64("vm.compressor.swapper.swapouts_total")
 	}
-	switch {
-	case errors.Is(err, syscall.ENOENT):
-		return counters{at: c.at}, nil
-	case err != nil:
-		return counters{}, err
+	if err != nil {
+		return counters{at: at}
 	}
-	return c, nil
+	return c
 }
 
 // New returns a source reading sys, keeping window of trend history.
@@ -89,10 +90,6 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	pressure, err := pressureName(level)
-	if err != nil {
-		return nil, err
-	}
 	raw, err := s.sys.Raw("vm.swapusage")
 	if err != nil {
 		return nil, err
@@ -101,14 +98,13 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	cur, err := s.readCounters()
-	if err != nil {
-		return nil, err
-	}
+	// Wall clock, not Go's monotonic reading: on darwin the monotonic clock
+	// stops while the Mac sleeps, so old samples would survive a night asleep.
+	cur := s.readCounters(s.now().Round(0))
 
 	h := protocol.Host{
 		TotalBytes:     total,
-		Pressure:       pressure,
+		Pressure:       pressureName(level),
 		FreePercent:    int(free),
 		SwapTotalBytes: swapTotal,
 		SwapUsedBytes:  swapUsed,
@@ -139,25 +135,29 @@ func (s *Source) record(x sample) {
 
 // trend summarises the history. It is never empty: record runs first.
 func (s *Source) trend() protocol.Trend {
-	worst := s.history[0].level
-	t := protocol.Trend{Samples: len(s.history), MinFreePercent: s.history[0].free}
+	first, last := s.history[0], s.history[len(s.history)-1]
+	worst := severity(first.level)
+	t := protocol.Trend{Samples: len(s.history), MinFreePercent: first.free}
 	for i, x := range s.history {
-		worst = max(worst, x.level)
+		worst = max(worst, severity(x.level))
 		t.MinFreePercent = min(t.MinFreePercent, x.free)
-		if i+1 < len(s.history) {
-			held := s.history[i+1].at.Sub(x.at).Seconds()
-			switch x.level {
-			case 2:
-				t.WarnSeconds += held
-			case 4:
-				t.CriticalSeconds += held
-			}
+		if i == 0 {
+			continue
+		}
+		// A sample's level covers the interval leading up to it, so pressure
+		// that just turned critical counts on the tick that sees it.
+		held := max(x.at.Sub(s.history[i-1].at).Seconds(), 0)
+		switch x.level {
+		case levelWarn:
+			t.WarnSeconds += held
+		case levelCritical:
+			t.CriticalSeconds += held
 		}
 	}
-	t.Worst, _ = pressureName(worst)
+	t.Worst = severityName[worst]
 	t.FreeSlopePerMin = s.freeSlope()
 	switch {
-	case len(s.history) < 2:
+	case last.at.Sub(first.at) < minTrendSpan:
 		t.Direction = "unknown"
 	case t.FreeSlopePerMin <= -steadySlope:
 		t.Direction = "rising"
@@ -207,25 +207,38 @@ func rate(prev, cur uint64, seconds float64) *float64 {
 // decodeSwapUsage reads darwin's struct xsw_usage: u64 total, u64 avail,
 // u64 used, u32 pagesize, boolean_t encrypted (32 bytes, little endian).
 func decodeSwapUsage(b []byte) (total, used uint64, err error) {
-	if len(b) < 24 {
+	if len(b) < 32 {
 		return 0, 0, fmt.Errorf("vm.swapusage: %d bytes, want 32", len(b))
 	}
 	return binary.LittleEndian.Uint64(b[0:]), binary.LittleEndian.Uint64(b[16:]), nil
 }
 
-// pressureName maps kern.memorystatus_vm_pressure_level (xnu's
-// kVMPressureNormal/Warning/Critical) to a name.
-func pressureName(level uint32) (string, error) {
+// kern.memorystatus_vm_pressure_level values (xnu's kVMPressureNormal,
+// kVMPressureWarning, kVMPressureCritical).
+const (
+	levelNormal   = 1
+	levelWarn     = 2
+	levelCritical = 4
+)
+
+// severity orders levels; an unknown level ranks below normal.
+func severity(level uint32) int {
 	switch level {
-	case 1:
-		return "normal", nil
-	case 2:
-		return "warn", nil
-	case 4:
-		return "critical", nil
+	case levelNormal:
+		return 1
+	case levelWarn:
+		return 2
+	case levelCritical:
+		return 3
 	}
-	return "", fmt.Errorf("unknown memory pressure level %d", level)
+	return 0
 }
+
+var severityName = []string{"unknown", "normal", "warn", "critical"}
+
+// pressureName names a level. An unknown one (a newer macOS) is reported as
+// "unknown" rather than failing the free %, swap and trend read alongside it.
+func pressureName(level uint32) string { return severityName[severity(level)] }
 
 type reading struct{ h protocol.Host }
 

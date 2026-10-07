@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -215,5 +217,23 @@ func TestCancelledTickPublishesNothing(t *testing.T) {
 	d.Tick(ctx)
 	if s := d.Snapshot(); s.Seq != 0 {
 		t.Fatalf("tick cancelled mid-way published %+v", s)
+	}
+}
+
+func TestRepeatedFailureWarnsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	down := fakeSource{name: "down", collect: func(context.Context) (Reading, error) {
+		return nil, errors.New("unsupported")
+	}}
+	d, err := New([]Source{down}, time.Second, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		d.Tick(context.Background())
+	}
+	if n := strings.Count(buf.String(), "source failed"); n != 1 {
+		t.Fatalf("logged %d warnings for the same error, want 1:\n%s", n, buf.String())
 	}
 }

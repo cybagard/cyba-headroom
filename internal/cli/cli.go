@@ -41,9 +41,6 @@ type Env struct {
 	Context context.Context
 }
 
-// trendWindow is how much host pressure history the observe view shows (R4).
-const trendWindow = 5 * time.Minute
-
 // Run executes one invocation and returns the process exit code.
 func Run(e Env) int {
 	if len(e.Args) == 0 {
@@ -108,7 +105,7 @@ func runDaemon(e Env) int {
 	}
 	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
 	// Collectors register here as they land (#14–#17).
-	sources := []daemon.Source{host.New(host.System{}, trendWindow, time.Now)}
+	sources := []daemon.Source{host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now)}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)

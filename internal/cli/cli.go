@@ -48,6 +48,9 @@ type Env struct {
 	// Context ends long-running commands (the daemon) besides SIGINT/SIGTERM.
 	// Nil means context.Background().
 	Context context.Context
+	// Terminal reports whether Stdout is a terminal, and its width. Nil
+	// means: ask the OS about Stdout.
+	Terminal func() (tty bool, width int)
 }
 
 // Run executes one invocation and returns the process exit code.
@@ -72,8 +75,8 @@ func Run(e Env) int {
 		return 0
 	case "config":
 		return runConfig(e)
-	case "", "--watch":
-		return notYet(e, "observe view", 21)
+	case "", "--watch", "--all":
+		return runView(e)
 	case "daemon":
 		return runDaemon(e)
 	case "status":

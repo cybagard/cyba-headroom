@@ -117,7 +117,7 @@ func runDaemon(e Env) int {
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		docker.New(cfg.Docker.Socket, vms),
-		tart.New(tartCLI, vmproc.Host{}, vms),
+		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

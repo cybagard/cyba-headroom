@@ -36,12 +36,12 @@ func TestRealTart(t *testing.T) {
 		}
 	}
 
-	got := collect(t, tart.New(tart.Exec{Path: path}, vmproc.Host{}, vmproc.New(vmproc.Host{})))
+	got := collect(t, tart.New(tart.Exec{Path: path}, vmproc.Host{}, vmproc.New(vmproc.Host{}), os.Getenv("HOME")))
 	if !got.Installed || len(got.VMs) != running {
 		t.Fatalf("got %d VMs, tart list says %d running", len(got.VMs), running)
 	}
 	for _, vm := range got.VMs {
-		if vm.MemoryBytes == 0 || vm.FootprintBytes == 0 || vm.RunPID == 0 {
+		if vm.MemoryBytes == 0 || vm.FootprintBytes == nil || vm.RunPID == 0 {
 			t.Errorf("VM %+v missing memory, footprint or run pid", vm)
 		}
 	}

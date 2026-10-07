@@ -56,16 +56,17 @@ type Budget struct {
 	// TotalBytes is the host's physical memory.
 	TotalBytes    uint64 `json:"total_bytes"`
 	ReservedBytes uint64 `json:"reserved_bytes"`
-	// HeadroomBytes is total minus reserved; negative when over-committed.
-	HeadroomBytes int64 `json:"headroom_bytes"`
-	// UsedBytes is the host's memory in use (Host.UsedBytes); absent when
-	// unknown.
-	UsedBytes *uint64 `json:"used_bytes,omitempty"`
+	// HeadroomBytes is total minus reserved; negative when over-committed,
+	// absent while the host's total is unknown. Used memory is Host.UsedBytes.
+	HeadroomBytes *int64 `json:"headroom_bytes,omitempty"`
 	// UnaccountedBytes is memory in use that no component explains: macOS,
 	// Orca, the agents and everything else, which the host baseline reserves
 	// for. It is what #23 learns host_baseline_gb from. Signed, because its
-	// inputs are read at slightly different instants. Absent when host used
-	// or a component's footprint is unknown.
+	// inputs are read at slightly different instants, and because host used
+	// counts compressed memory at its compressed size while process
+	// footprints may count it whole, so it reads low under compression (#23
+	// checks this). Absent when host used or a component's footprint is
+	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
 	// Components are docker, tart, lmstudio and host_baseline, in that order.
 	Components []BudgetComponent `json:"components"`

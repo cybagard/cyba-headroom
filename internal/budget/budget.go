@@ -21,61 +21,81 @@ type Params struct {
 // in Unknown and counts as 0; a stale source's last good reading is used.
 func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	var b protocol.Budget
-	// footprints sums the components' host cost; nil once one is unknown.
-	footprints := new(uint64)
-	add := func(name string, present bool, c func() protocol.BudgetComponent) {
-		if !present {
-			b.Unknown = append(b.Unknown, name)
-			footprints = nil
-			return
-		}
-		comp := c()
-		b.Components = append(b.Components, comp)
-		b.ReservedBytes += comp.ReservedBytes
-		if comp.UsedBytes == nil {
-			footprints = nil
-		} else if footprints != nil {
-			*footprints += *comp.UsedBytes
+	// Each component's host cost is removed from host used to leave the
+	// unaccounted rest; one unknown cost makes the rest unknown.
+	footprintsKnown := true
+	var footprints uint64
+	add := func(c protocol.BudgetComponent) {
+		b.Components = append(b.Components, c)
+		b.ReservedBytes += c.ReservedBytes
+		if c.UsedBytes == nil {
+			footprintsKnown = false
+		} else {
+			footprints += *c.UsedBytes
 		}
 	}
 	if s.Host == nil {
 		b.Unknown = append(b.Unknown, "host")
 	}
-	add("docker", s.Docker != nil, func() protocol.BudgetComponent { return docker(s.Docker, p) })
-	add("tart", s.Tart != nil, func() protocol.BudgetComponent { return tart(s.Tart) })
-	add("lmstudio", s.LMStudio != nil, func() protocol.BudgetComponent { return lmstudio(s.LMStudio, p) })
+	if s.Docker != nil {
+		add(docker(s.Docker, p))
+	} else {
+		b.Unknown = append(b.Unknown, "docker")
+		footprintsKnown = false
+	}
+	if s.Tart != nil {
+		add(tart(s.Tart))
+	} else {
+		b.Unknown = append(b.Unknown, "tart")
+		footprintsKnown = false
+	}
+	if s.LMStudio != nil {
+		add(lmstudio(s.LMStudio, p))
+	} else {
+		b.Unknown = append(b.Unknown, "lmstudio")
+		footprintsKnown = false
+	}
 
 	base := protocol.BudgetComponent{Name: "host_baseline", ReservedBytes: p.HostBaselineBytes}
-	if s.Host != nil {
-		b.TotalBytes = s.Host.TotalBytes
-		b.UsedBytes = s.Host.UsedBytes
-		if b.UsedBytes != nil && footprints != nil {
-			un := int64(*b.UsedBytes) - int64(*footprints)
-			b.UnaccountedBytes = &un
-			used := uint64(max(un, 0))
-			base.UsedBytes = &used
-		}
+	if h := s.Host; h != nil && h.UsedBytes != nil && footprintsKnown {
+		un := int64(*h.UsedBytes) - int64(footprints)
+		b.UnaccountedBytes = &un
+		used := uint64(max(un, 0))
+		base.UsedBytes = &used
 	}
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
-	b.HeadroomBytes = int64(b.TotalBytes) - int64(b.ReservedBytes)
+
+	// Without the host's total there is nothing to subtract from: headroom is
+	// unknown, not -reserved.
+	if s.Host != nil {
+		b.TotalBytes = s.Host.TotalBytes
+		headroom := int64(b.TotalBytes) - int64(b.ReservedBytes)
+		b.HeadroomBytes = &headroom
+	}
 	return b
 }
 
-// tart reserves each running VM's configured memory (R2): a VM grows into it
-// and does not give it back.
+// tart reserves each running VM's configured memory (R2), which the VM grows
+// into and does not give back, or its footprint when the hypervisor's
+// overhead puts it above that.
 func tart(t *protocol.Tart) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "tart"}
-	used := new(uint64)
+	var used uint64
+	known := true
 	for _, vm := range t.VMs {
-		c.ReservedBytes += vm.MemoryBytes
+		r := vm.MemoryBytes
 		if vm.FootprintBytes == nil {
-			used = nil
-		} else if used != nil {
-			*used += *vm.FootprintBytes
+			known = false
+		} else {
+			used += *vm.FootprintBytes
+			r = max(r, *vm.FootprintBytes)
 		}
+		c.ReservedBytes += r
 	}
-	c.UsedBytes = used
+	if known {
+		c.UsedBytes = &used
+	}
 	return c
 }
 
@@ -86,31 +106,26 @@ func tart(t *protocol.Tart) protocol.BudgetComponent {
 // memory counts as spent.
 func docker(d *protocol.Docker, p Params) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "docker"}
-	if !d.Running {
+	if !d.Running || (d.VMError == "" && !d.VMRunning) {
 		c.UsedBytes = new(uint64)
 		return c
-	}
-	if d.VMError == "" {
-		if !d.VMRunning {
-			c.UsedBytes = new(uint64)
-			return c
-		}
-		used := d.VMFootprintBytes
-		c.UsedBytes = &used
 	}
 	need := p.DockerOverheadBytes
 	for _, ct := range d.Containers {
 		need += ct.MemoryBytes
 	}
 	c.ReservedBytes = need
-	if c.UsedBytes != nil {
-		c.ReservedBytes = max(need, *c.UsedBytes)
+	if d.VMError == "" {
+		used := d.VMFootprintBytes
+		c.UsedBytes = &used
+		c.ReservedBytes = max(need, used)
 	}
 	return c
 }
 
-// lmstudio reserves loaded models even when idle (R2): their file size, or
-// what LM Studio costs beyond its idle self when context and runtime add more.
+// lmstudio reserves LM Studio itself plus its loaded models, even when idle
+// (R2): their file sizes, or its whole footprint when context and runtime add
+// more, or while a model loads before lms ps lists it.
 func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "lmstudio"}
 	if !l.Running {
@@ -118,14 +133,12 @@ func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 		return c
 	}
 	c.UsedBytes = l.FootprintBytes
-	if len(l.Models) == 0 {
-		return c
-	}
+	c.ReservedBytes = p.LMStudioIdleBytes
 	for _, m := range l.Models {
 		c.ReservedBytes += m.SizeBytes
 	}
-	if fp := l.FootprintBytes; fp != nil && *fp > p.LMStudioIdleBytes {
-		c.ReservedBytes = max(c.ReservedBytes, *fp-p.LMStudioIdleBytes)
+	if fp := l.FootprintBytes; fp != nil {
+		c.ReservedBytes = max(c.ReservedBytes, *fp)
 	}
 	return c
 }

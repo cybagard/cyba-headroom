@@ -12,8 +12,8 @@ const gib = uint64(1 << 30)
 
 func TestEmptySnapshotMarksEverySourceUnknown(t *testing.T) {
 	b := budget.Compute(&protocol.Snapshot{}, budget.Params{})
-	if b.TotalBytes != 0 || b.ReservedBytes != 0 || b.HeadroomBytes != 0 {
-		t.Fatalf("got total=%d reserved=%d headroom=%d, want zeros", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
+	if b.TotalBytes != 0 || b.ReservedBytes != 0 || b.HeadroomBytes != nil {
+		t.Fatalf("got total=%d reserved=%d headroom=%v, want zeros and unknown headroom", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
 	}
 	want := []string{"host", "docker", "tart", "lmstudio"}
 	if !slices.Equal(b.Unknown, want) {
@@ -56,6 +56,10 @@ func TestTartReservesConfiguredMemory(t *testing.T) {
 				{Name: "b", MemoryBytes: 4 * gib, FootprintBytes: u64(3 * gib)},
 			},
 			12 * gib, u64(8 * gib),
+		},
+		"footprint above configured": {
+			[]protocol.TartVM{{Name: "a", MemoryBytes: 4 * gib, FootprintBytes: u64(4*gib + gib/2)}},
+			4*gib + gib/2, u64(4*gib + gib/2),
 		},
 		"footprint unknown": {
 			[]protocol.TartVM{
@@ -125,18 +129,22 @@ func TestLMStudioReservesLoadedModels(t *testing.T) {
 		used     *uint64
 	}{
 		"not installed":   {&protocol.LMStudio{}, 0, u64(0)},
-		"no model loaded": {&protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(gib / 2)}, 0, u64(gib / 2)},
+		"no model loaded": {&protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(gib / 2)}, 1 * gib, u64(gib / 2)},
 		"idle model, size wins": {
 			&protocol.LMStudio{Installed: true, Running: true, Models: models(8*gib, 4*gib), FootprintBytes: u64(5 * gib)},
-			12 * gib, u64(5 * gib),
+			13 * gib, u64(5 * gib),
 		},
 		"context and runtime on top": {
 			&protocol.LMStudio{Installed: true, Running: true, Models: models(12 * gib), FootprintBytes: u64(14 * gib)},
-			13 * gib, u64(14 * gib),
+			14 * gib, u64(14 * gib),
+		},
+		"loading, not listed yet": {
+			&protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(20 * gib)},
+			20 * gib, u64(20 * gib),
 		},
 		"footprint unknown": {
 			&protocol.LMStudio{Installed: true, Running: true, Models: models(12 * gib), FootprintError: "boom"},
-			12 * gib, nil,
+			13 * gib, nil,
 		},
 	}
 	for name, tc := range cases {
@@ -169,15 +177,12 @@ func TestTotalsAndHeadroom(t *testing.T) {
 	p := budget.Params{HostBaselineBytes: 10 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: 1 * gib}
 	b := budget.Compute(busyMac(), p)
 
-	// docker 6 + tart 8 + lmstudio 12 + baseline 10
-	if b.TotalBytes != 64*gib || b.ReservedBytes != 36*gib || b.HeadroomBytes != int64(28*gib) {
-		t.Fatalf("got total=%d reserved=%d headroom=%d", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
+	// docker 6 + tart 8 + lmstudio max(12+1, 13) + baseline 10
+	if b.TotalBytes != 64*gib || b.ReservedBytes != 37*gib || b.HeadroomBytes == nil || *b.HeadroomBytes != int64(27*gib) {
+		t.Fatalf("got total=%d reserved=%d headroom=%v", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
 	}
 	if b.Unknown != nil {
 		t.Errorf("unknown = %v, want none", b.Unknown)
-	}
-	if !usedEq(b.UsedBytes, u64(40*gib)) {
-		t.Errorf("used = %v, want 40 GiB", b.UsedBytes)
 	}
 	// 40 used − (6 docker + 5 tart + 13 lmstudio)
 	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(16*gib) {
@@ -197,8 +202,17 @@ func TestTotalsAndHeadroom(t *testing.T) {
 
 func TestHeadroomGoesNegativeWhenOverCommitted(t *testing.T) {
 	b := budget.Compute(busyMac(), budget.Params{HostBaselineBytes: 40 * gib})
-	if b.HeadroomBytes >= 0 {
-		t.Fatalf("headroom = %d, want negative", b.HeadroomBytes)
+	if b.HeadroomBytes == nil || *b.HeadroomBytes >= 0 {
+		t.Fatalf("headroom = %v, want negative", b.HeadroomBytes)
+	}
+}
+
+func TestHeadroomUnknownWithoutHost(t *testing.T) {
+	s := busyMac()
+	s.Host = nil
+	b := budget.Compute(s, budget.Params{HostBaselineBytes: 10 * gib})
+	if b.HeadroomBytes != nil || b.ReservedBytes == 0 {
+		t.Fatalf("headroom = %v reserved = %d, want unknown headroom and reserved still summed", b.HeadroomBytes, b.ReservedBytes)
 	}
 }
 

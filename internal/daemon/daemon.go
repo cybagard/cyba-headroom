@@ -175,12 +175,25 @@ func (d *Daemon) Tick(ctx context.Context) {
 		next.Sources[s.src.Name()] = s.status
 	}
 	if d.derive != nil {
-		d.derive(next)
+		d.safeDerive(next)
 	}
 	d.seq++
 	next.Seq = d.seq
 	next.CollectedAt = d.now()
 	d.snap.Store(next)
+}
+
+// safeDerive runs derive, logging a panic instead of crashing the daemon: the
+// snapshot is then published with the sources' readings but without the
+// derived sections.
+func (d *Daemon) safeDerive(s *protocol.Snapshot) {
+	defer func() {
+		if p := recover(); p != nil {
+			d.log.Error("derive failed", "panic", fmt.Sprint(p))
+			s.Budget = nil
+		}
+	}()
+	d.derive(s)
 }
 
 // safeCollect turns a panic or a nil reading into an error.

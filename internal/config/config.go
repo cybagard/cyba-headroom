@@ -107,6 +107,10 @@ func (b Budget) Params() budget.Params {
 	}
 }
 
+// maxBudgetGB bounds budget sizes well above any Mac's memory, so their sum
+// cannot overflow when converted to bytes.
+const maxBudgetGB = 1024
+
 func gib(v float64) uint64 { return uint64(v * (1 << 30)) }
 
 // Duration is a time.Duration that reads TOML strings such as "2m".
@@ -250,14 +254,20 @@ func (c Config) Validate() error {
 	if c.Policy.DaemonTimeout.Duration <= 0 {
 		errs = append(errs, errors.New("policy.daemon_timeout must be > 0"))
 	}
-	if c.Budget.HostBaselineGB < 0 {
-		errs = append(errs, errors.New("budget.host_baseline_gb must be >= 0"))
-	}
-	if c.Budget.DockerOverheadGB < 0 {
-		errs = append(errs, errors.New("budget.docker_overhead_gb must be >= 0"))
-	}
-	if c.Budget.LMStudioIdleGB < 0 {
-		errs = append(errs, errors.New("budget.lmstudio_idle_gb must be >= 0"))
+	for _, v := range []struct {
+		key string
+		gb  float64
+	}{
+		{"host_baseline_gb", c.Budget.HostBaselineGB},
+		{"docker_overhead_gb", c.Budget.DockerOverheadGB},
+		{"lmstudio_idle_gb", c.Budget.LMStudioIdleGB},
+	} {
+		switch {
+		case v.gb < 0:
+			errs = append(errs, fmt.Errorf("budget.%s must be >= 0", v.key))
+		case v.gb > maxBudgetGB:
+			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, maxBudgetGB))
+		}
 	}
 	if c.Budget.MaxMacOSVMs < 0 {
 		errs = append(errs, errors.New("budget.max_macos_vms must be >= 0"))

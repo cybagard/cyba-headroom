@@ -132,6 +132,8 @@ func TestLoadErrors(t *testing.T) {
 		{"socket too long", "socket = \"/" + strings.Repeat("s", 110) + "\"\n", "socket path is"},
 		{"negative docker overhead", "[budget]\ndocker_overhead_gb = -1\n", "budget.docker_overhead_gb must be >= 0"},
 		{"negative lmstudio idle", "[budget]\nlmstudio_idle_gb = -0.5\n", "budget.lmstudio_idle_gb must be >= 0"},
+		{"absurd baseline", "[budget]\nhost_baseline_gb = 1e10\n", "budget.host_baseline_gb must be <= 1024"},
+		{"absurd docker overhead", "[budget]\ndocker_overhead_gb = 5000\n", "budget.docker_overhead_gb must be <= 1024"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {

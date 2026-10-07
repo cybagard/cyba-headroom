@@ -51,3 +51,26 @@ func TestSharedListsOncePerTick(t *testing.T) {
 		t.Fatalf("inner List called %d times after the TTL, want 2", n)
 	}
 }
+
+// flakyLister fails its first call.
+type flakyLister struct{ calls int }
+
+func (f *flakyLister) List(context.Context) ([]vmproc.VM, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, context.DeadlineExceeded
+	}
+	return []vmproc.VM{{PID: 1}}, nil
+}
+
+func TestSharedDoesNotCacheErrors(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	shared := vmproc.NewShared(&flakyLister{}, time.Second, func() time.Time { return now })
+	if _, err := shared.List(context.Background()); err == nil {
+		t.Fatal("want the first caller's error")
+	}
+	// Same tick, another source: one caller's timeout must not become everyone's.
+	if vms, err := shared.List(context.Background()); err != nil || len(vms) != 1 {
+		t.Fatalf("second List = %v, %v; want a fresh listing", vms, err)
+	}
+}

@@ -56,6 +56,9 @@ type Tart struct {
 	// VMError is set when VM processes could not be read; footprints are
 	// then unknown, not zero.
 	VMError string `json:"vm_error,omitempty"`
+	// LaunchError is set when tart run processes could not be read; launch
+	// details (attribution only) are then missing.
+	LaunchError string `json:"launch_error,omitempty"`
 }
 
 // TartVM is one running Tart VM.
@@ -67,8 +70,9 @@ type TartVM struct {
 	// MemoryBytes is the configured memory: what the VM reserves (R2).
 	MemoryBytes uint64 `json:"memory_bytes"`
 	// FootprintBytes is what the VM process costs the host now
-	// (phys_footprint); 0 if its process was not found.
-	FootprintBytes uint64 `json:"footprint_bytes"`
+	// (phys_footprint); absent if its process was not found (e.g. booting),
+	// which means unknown, not free.
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
 
 	// How the VM was launched, for attribution (R3). tart run changes its own
 	// cwd to the VM bundle, so the launching shell is its parent.

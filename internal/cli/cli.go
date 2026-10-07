@@ -23,6 +23,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
+	"github.com/cybagard/cyba-headroom/internal/source/tart"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
@@ -106,11 +107,17 @@ func runDaemon(e Env) int {
 		return 1
 	}
 	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
-	// Collectors register here as they land (#15–#17, #49).
-	vms := vmproc.New(vmproc.Host{})
+	// Collectors register here as they land (#16, #17, #49). Docker and Tart
+	// share one VM process listing per tick.
+	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
+	var tartCLI tart.CLI
+	if p := tart.Locate(cfg.Tart.Path, e.Getenv); p != "" {
+		tartCLI = tart.Exec{Path: p}
+	}
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		docker.New(cfg.Docker.Socket, vms),
+		tart.New(tartCLI, vmproc.Host{}, vms),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

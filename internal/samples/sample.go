@@ -101,9 +101,6 @@ type Worktree struct {
 	Agents []string `json:"agents,omitempty"`
 }
 
-// composeDirLabel is the label Docker Compose sets to the project directory.
-const composeDirLabel = "com.docker.compose.project.working_dir"
-
 // FromSnapshot builds the sample for s.
 func FromSnapshot(s *protocol.Snapshot) Sample {
 	out := Sample{V: Version, T: s.CollectedAt, Budget: s.Budget}
@@ -128,7 +125,7 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 		for _, c := range d.Containers {
 			out.Containers = append(out.Containers, Container{
 				Name: c.Name, Image: c.Image, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
-				ComposeDir: c.Labels[composeDirLabel], Mounts: c.Mounts,
+				ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts,
 			})
 		}
 	}

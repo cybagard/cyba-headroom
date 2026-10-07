@@ -1,6 +1,8 @@
 package attribution_test
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cybagard/cyba-headroom/internal/attribution"
@@ -42,11 +44,11 @@ func TestContainerFromWorktreeAppearsUnderIt(t *testing.T) {
 		w.Containers[1].Name != "web" || w.Containers[1].By != attribution.ByMount {
 		t.Fatalf("fix-login = %+v", w)
 	}
-	if w.ContainerMemoryBytes != 3*gib || w.ContainerCPUPercent != 15 {
-		t.Errorf("container totals = %d, %.1f%%", w.ContainerMemoryBytes, w.ContainerCPUPercent)
+	if w.ContainerMemoryBytes != 3*gib || w.ContainerCPUPercent == nil || *w.ContainerCPUPercent != 15 {
+		t.Errorf("container totals = %d, %v", w.ContainerMemoryBytes, w.ContainerCPUPercent)
 	}
-	if w.AgentMemoryBytes != gib || w.AgentCPUPercent != 30 {
-		t.Errorf("agent totals = %d, %.1f%%", w.AgentMemoryBytes, w.AgentCPUPercent)
+	if w.AgentMemoryBytes == nil || *w.AgentMemoryBytes != gib || w.AgentCPUPercent == nil || *w.AgentCPUPercent != 30 {
+		t.Errorf("agent totals = %v, %v", w.AgentMemoryBytes, w.AgentCPUPercent)
 	}
 }
 
@@ -72,12 +74,44 @@ func TestUnattributedWithReasons(t *testing.T) {
 }
 
 func TestEverythingUnattributedWithoutOrca(t *testing.T) {
+	for name, edit := range map[string]func(*protocol.Snapshot){
+		"no reading":  func(s *protocol.Snapshot) { s.Orca = nil },
+		"not running": func(s *protocol.Snapshot) { s.Orca = &protocol.Orca{Installed: true, Worktrees: []protocol.Worktree{}} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := snapshot()
+			edit(s)
+			a := attribution.Attribute(s)
+			if len(a.Worktrees) != 0 || len(a.Unattributed.Containers) != 4 || len(a.Unattributed.TartVMs) != 2 ||
+				a.Unattributed.Containers[0].Reason != attribution.OrcaUnknown {
+				t.Fatalf("got %+v", a)
+			}
+		})
+	}
+}
+
+func TestStaleOrcaIsFlagged(t *testing.T) {
 	s := snapshot()
-	s.Orca = nil
-	a := attribution.Attribute(s)
-	if len(a.Worktrees) != 0 || len(a.Unattributed.Containers) != 4 || len(a.Unattributed.TartVMs) != 2 ||
-		a.Unattributed.Containers[0].Reason != attribution.OrcaUnknown {
-		t.Fatalf("got %+v", a)
+	s.Sources = map[string]protocol.SourceStatus{"orca": {Stale: true}}
+	if a := attribution.Attribute(s); !a.OrcaStale || len(a.Worktrees[0].Containers) != 2 {
+		t.Fatalf("got stale=%v, %d containers; want the last worktrees used and flagged", a.OrcaStale, len(a.Worktrees[0].Containers))
+	}
+}
+
+func TestUnknownAgentMemoryIsNotZero(t *testing.T) {
+	s := snapshot()
+	s.Orca.MemoryError = "diagnostics failed"
+	s.Orca.Worktrees[0].MemoryBytes, s.Orca.Worktrees[0].CPUPercent = 0, 0
+	if w := attribution.Attribute(s).Worktrees[0]; w.AgentMemoryBytes != nil || w.AgentCPUPercent != nil {
+		t.Fatalf("agent memory = %v, cpu = %v; want unknown", w.AgentMemoryBytes, w.AgentCPUPercent)
+	}
+}
+
+func TestContainerCPUUnknownWhenAnyIs(t *testing.T) {
+	s := snapshot()
+	s.Docker.Containers[1].CPUPercent = nil // first tick
+	if w := attribution.Attribute(s).Worktrees[0]; w.ContainerCPUPercent != nil {
+		t.Fatalf("cpu = %v, want unknown", *w.ContainerCPUPercent)
 	}
 }
 
@@ -85,5 +119,17 @@ func TestEmptySnapshot(t *testing.T) {
 	a := attribution.Attribute(&protocol.Snapshot{})
 	if len(a.Worktrees) != 0 || len(a.Unattributed.Containers) != 0 {
 		t.Fatalf("got %+v", a)
+	}
+}
+
+func TestEmptyListsAreArraysNotNull(t *testing.T) {
+	s := snapshot()
+	s.Docker, s.Tart = nil, nil
+	b, err := json.Marshal(attribution.Attribute(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "null") {
+		t.Fatalf("json has null lists: %s", b)
 	}
 }

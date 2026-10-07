@@ -60,7 +60,14 @@ type Attribution struct {
 	Worktrees []WorktreeUsage `json:"worktrees"`
 	// Unattributed holds what matched no live worktree, or several.
 	Unattributed Usage `json:"unattributed"`
+	// OrcaStale means Orca's latest read failed: worktrees are the last
+	// ones seen, and may have changed since.
+	OrcaStale bool `json:"orca_stale,omitempty"`
 }
+
+// ComposeWorkingDirLabel is the label Docker Compose sets on a container to
+// its project directory.
+const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
 
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {
@@ -68,17 +75,20 @@ type WorktreeUsage struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
 	Usage
-	// The agents' own processes, from Orca (RSS).
-	AgentMemoryBytes uint64  `json:"agent_memory_bytes"`
-	AgentCPUPercent  float64 `json:"agent_cpu_percent"`
+	// The agents' own processes, from Orca (RSS); absent when Orca's memory
+	// diagnostics failed.
+	AgentMemoryBytes *uint64  `json:"agent_memory_bytes,omitempty"`
+	AgentCPUPercent  *float64 `json:"agent_cpu_percent,omitempty"`
 }
 
 // Usage is a set of containers and Tart VMs, with totals.
 type Usage struct {
 	Containers           []AttributedContainer `json:"containers"`
 	ContainerMemoryBytes uint64                `json:"container_memory_bytes"`
-	ContainerCPUPercent  float64               `json:"container_cpu_percent"`
-	TartVMs              []AttributedVM        `json:"tart_vms"`
+	// ContainerCPUPercent is absent while any container's CPU is unknown
+	// (its first tick).
+	ContainerCPUPercent *float64       `json:"container_cpu_percent,omitempty"`
+	TartVMs             []AttributedVM `json:"tart_vms"`
 	// TartMemoryBytes is the VMs' configured memory, what they reserve.
 	TartMemoryBytes uint64 `json:"tart_memory_bytes"`
 	// TartFootprintBytes is absent when a VM's footprint is unknown.

@@ -50,10 +50,44 @@ type Match struct {
 	Reason     string
 }
 
-// MatchKeys finds k's worktree. Evidence is tried strongest first; the first
+// MatchKeys finds k's worktree among wts. To match many items against the
+// same worktrees, build a Matcher once.
+func MatchKeys(wts []Worktree, k Keys) Match { return NewMatcher(wts).Match(k) }
+
+// Matcher matches items against a fixed set of worktrees, prepared once.
+type Matcher struct {
+	wts []prepared
+}
+
+// prepared is a worktree with its path in comparable form and its directory
+// name as words, or nil words when the name must not be used.
+type prepared struct {
+	id    string
+	path  string
+	words []string
+}
+
+// NewMatcher prepares wts for matching.
+func NewMatcher(wts []Worktree) *Matcher {
+	m := &Matcher{}
+	count := map[string]int{}
+	for _, w := range wts {
+		count[dirName(w.Path)]++
+	}
+	for _, w := range wts {
+		p := prepared{id: w.ID, path: key(w.Path)}
+		if name := dirName(w.Path); count[name] == 1 && specific(name) {
+			p.words = split(name)
+		}
+		m.wts = append(m.wts, p)
+	}
+	return m
+}
+
+// Match finds k's worktree. Evidence is tried strongest first; the first
 // kind that points anywhere decides. If it points at two worktrees, the item
 // is ambiguous rather than given to either.
-func MatchKeys(wts []Worktree, k Keys) Match {
+func (m *Matcher) Match(k Keys) Match {
 	for _, ev := range []struct {
 		by    string
 		paths []string
@@ -63,49 +97,52 @@ func MatchKeys(wts []Worktree, k Keys) Match {
 		{ByMount, k.Mounts},
 		{BySharedDir, k.SharedDirs},
 	} {
-		if m, ok := decide(ev.by, pathMatches(wts, ev.paths)); ok {
-			return m
+		if r, ok := decide(ev.by, m.pathMatches(ev.paths)); ok {
+			return r
 		}
 	}
-	if m, ok := decide(ByVMName, nameMatches(wts, k.VMName)); ok {
-		return m
+	if r, ok := decide(ByVMName, m.nameMatches(k.VMName)); ok {
+		return r
 	}
 	return Match{Reason: NoMatch}
 }
 
 // nameMatches returns the worktrees whose directory name appears in vm as
 // whole words (split on - _ .), ignoring case. The longest such name wins,
-// so a VM named after project-a is not also claimed by project. A directory
-// name that several live worktrees share (main, say) says nothing and is
-// skipped.
-func nameMatches(wts []Worktree, vm string) []string {
+// so a VM named after project-a is not also claimed by project.
+func (m *Matcher) nameMatches(vm string) []string {
 	if vm == "" {
 		return nil
-	}
-	count := map[string]int{}
-	for _, w := range wts {
-		count[dirName(w.Path)]++
 	}
 	words := split(vm)
 	var ids []string
 	longest := 0
-	for _, w := range wts {
-		name := dirName(w.Path)
-		if name == "" || count[name] > 1 {
-			continue
-		}
-		nw := split(name)
-		if !containsRun(words, nw) {
+	for _, w := range m.wts {
+		if !containsRun(words, w.words) {
 			continue
 		}
 		switch {
-		case len(nw) > longest:
-			ids, longest = []string{w.ID}, len(nw)
-		case len(nw) == longest:
-			ids = append(ids, w.ID)
+		case len(w.words) > longest:
+			ids, longest = []string{w.id}, len(w.words)
+		case len(w.words) == longest:
+			ids = append(ids, w.id)
 		}
 	}
 	return ids
+}
+
+// genericNames say nothing about which worktree a VM belongs to.
+var genericNames = map[string]bool{
+	"main": true, "master": true, "trunk": true, "dev": true, "develop": true,
+	"test": true, "tests": true, "ci": true, "build": true, "src": true,
+	"app": true, "work": true, "repo": true, "tmp": true, "temp": true,
+	"mac": true, "macos": true, "linux": true, "vm": true,
+}
+
+// specific reports whether a directory name may name a VM: at least four
+// characters, and not a generic word.
+func specific(name string) bool {
+	return len(name) >= 4 && !genericNames[name]
 }
 
 func dirName(p string) string {
@@ -144,10 +181,10 @@ func decide(by string, ids []string) (Match, bool) {
 }
 
 // pathMatches returns the distinct worktrees the paths lie in, in order.
-func pathMatches(wts []Worktree, paths []string) []string {
+func (m *Matcher) pathMatches(paths []string) []string {
 	var ids []string
 	for _, p := range paths {
-		if id := owner(wts, p); id != "" && !slices.Contains(ids, id) {
+		if id := m.owner(p); id != "" && !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -156,23 +193,27 @@ func pathMatches(wts []Worktree, paths []string) []string {
 
 // owner is the deepest worktree that p equals or lies under, on whole path
 // segments; "" if none. Relative paths say nothing about the host.
-func owner(wts []Worktree, p string) string {
-	p = canon(p)
+func (m *Matcher) owner(p string) string {
+	p = key(p)
 	if p == "" {
 		return ""
 	}
 	best, bestLen := "", -1
-	for _, w := range wts {
-		wp := canon(w.Path)
-		if wp == "" || len(wp) <= bestLen {
+	for _, w := range m.wts {
+		if w.path == "" || len(w.path) <= bestLen {
 			continue
 		}
-		if p == wp || strings.HasPrefix(p, wp+"/") {
-			best, bestLen = w.ID, len(wp)
+		if p == w.path || strings.HasPrefix(p, w.path+"/") {
+			best, bestLen = w.id, len(w.path)
 		}
 	}
 	return best
 }
+
+// key is p in comparable form: canonical and lower-case, since macOS
+// volumes are case-insensitive by default and a shell's spelling of a path
+// need not match Orca's.
+func key(p string) string { return strings.ToLower(canon(p)) }
 
 // canon cleans an absolute path and folds macOS's /private aliases, so
 // /private/tmp/x and /tmp/x compare equal. No filesystem access.

@@ -14,6 +14,9 @@ var wts = []attribution.Worktree{
 	{ID: "tmp", Path: "/tmp/scratch"},
 	{ID: "m1", Path: "/Users/dev/w/one/main"},
 	{ID: "m2", Path: "/Users/dev/w/two/main"},
+	{ID: "ci", Path: "/Users/dev/w/ci"},
+	{ID: "test", Path: "/Users/dev/w/test"},
+	{ID: "case", Path: "/Users/dev/w/Fix-Login"},
 }
 
 func TestMatchPaths(t *testing.T) {
@@ -30,6 +33,7 @@ func TestMatchPaths(t *testing.T) {
 		"prefix not parent": {attribution.Keys{Mounts: []string{"/Users/dev/w/project"}}, attribution.Match{Reason: attribution.NoMatch}},
 		"no keys":           {attribution.Keys{}, attribution.Match{Reason: attribution.NoMatch}},
 		"relative ignored":  {attribution.Keys{Mounts: []string{"project-a"}}, attribution.Match{Reason: attribution.NoMatch}},
+		"case-insensitive":  {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -89,6 +93,14 @@ func TestMatchRanksEvidence(t *testing.T) {
 			attribution.Keys{VMName: "project-a_project-b"},
 			attribution.Match{Reason: attribution.Ambiguous},
 		},
+		"short dir name is never used": {
+			attribution.Keys{VMName: "ci-runner-sequoia"},
+			attribution.Match{Reason: attribution.NoMatch},
+		},
+		"generic dir name is never used": {
+			attribution.Keys{VMName: "test-vm"},
+			attribution.Match{Reason: attribution.NoMatch},
+		},
 		"paths beat the vm name": {
 			attribution.Keys{VMName: "project-a", SharedDirs: []string{"/Users/dev/w/project-b"}},
 			attribution.Match{WorktreeID: "b", By: attribution.BySharedDir},
@@ -100,5 +112,13 @@ func TestMatchRanksEvidence(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMatcherMatchesLikeMatchKeys(t *testing.T) {
+	m := attribution.NewMatcher(wts)
+	k := attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/x"}}
+	if got, want := m.Match(k), attribution.MatchKeys(wts, k); got != want || got.WorktreeID != "a" {
+		t.Fatalf("matcher %+v, MatchKeys %+v", got, want)
 	}
 }

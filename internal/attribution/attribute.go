@@ -2,27 +2,34 @@ package attribution
 
 import "github.com/cybagard/cyba-headroom/internal/protocol"
 
-// OrcaUnknown marks everything unattributed while Orca has no reading: with
-// no worktrees to match, no match means nothing.
+// OrcaUnknown marks everything unattributed while Orca's worktrees are
+// unknown (no reading, or Orca not running): no match would mean nothing.
 const OrcaUnknown = "orca_unknown"
-
-// composeDirLabel is the label Docker Compose sets to the project directory.
-const composeDirLabel = "com.docker.compose.project.working_dir"
 
 // Attribute assigns s's containers and Tart VMs to its live worktrees.
 func Attribute(s *protocol.Snapshot) protocol.Attribution {
-	a := protocol.Attribution{Worktrees: []protocol.WorktreeUsage{}}
+	a := protocol.Attribution{Worktrees: []protocol.WorktreeUsage{}, OrcaStale: s.Sources["orca"].Stale}
+	known := s.Orca != nil && s.Orca.Running
 	var wts []Worktree
 	index := map[string]int{}
-	if s.Orca != nil {
+	if known {
 		for i, w := range s.Orca.Worktrees {
 			wts = append(wts, Worktree{ID: w.ID, Path: w.Path})
 			index[w.ID] = i
-			a.Worktrees = append(a.Worktrees, protocol.WorktreeUsage{
-				ID: w.ID, Path: w.Path, Name: w.Name,
-				AgentMemoryBytes: w.MemoryBytes, AgentCPUPercent: w.CPUPercent,
-			})
+			wu := protocol.WorktreeUsage{ID: w.ID, Path: w.Path, Name: w.Name}
+			if s.Orca.MemoryError == "" {
+				mem, cpu := w.MemoryBytes, w.CPUPercent
+				wu.AgentMemoryBytes, wu.AgentCPUPercent = &mem, &cpu
+			}
+			a.Worktrees = append(a.Worktrees, wu)
 		}
+	}
+	m := NewMatcher(wts)
+	match := func(k Keys) Match {
+		if !known {
+			return Match{Reason: OrcaUnknown}
+		}
+		return m.Match(k)
 	}
 	// usage is where a match lands: its worktree, or the unattributed set.
 	usage := func(m Match) *protocol.Usage {
@@ -31,17 +38,12 @@ func Attribute(s *protocol.Snapshot) protocol.Attribution {
 		}
 		return &a.Worktrees[index[m.WorktreeID]].Usage
 	}
-	match := func(k Keys) Match {
-		if s.Orca == nil {
-			return Match{Reason: OrcaUnknown}
-		}
-		return MatchKeys(wts, k)
-	}
 
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
-			m := match(Keys{ComposeDir: c.Labels[composeDirLabel], Mounts: c.Mounts})
-			addContainer(usage(m), protocol.AttributedContainer{
+			m := match(Keys{ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts})
+			u := usage(m)
+			u.Containers = append(u.Containers, protocol.AttributedContainer{
 				ID: c.ID, Name: c.Name, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
 				By: m.By, Reason: m.Reason,
 			})
@@ -50,36 +52,52 @@ func Attribute(s *protocol.Snapshot) protocol.Attribution {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			m := match(Keys{LaunchCwd: vm.LaunchCwd, SharedDirs: vm.SharedDirs, VMName: vm.Name})
-			addVM(usage(m), protocol.AttributedVM{
+			u := usage(m)
+			u.TartVMs = append(u.TartVMs, protocol.AttributedVM{
 				Name: vm.Name, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes,
 				By: m.By, Reason: m.Reason,
 			})
 		}
 	}
+	for i := range a.Worktrees {
+		total(&a.Worktrees[i].Usage)
+	}
+	total(&a.Unattributed)
 	return a
 }
 
-func addContainer(u *protocol.Usage, c protocol.AttributedContainer) {
-	u.Containers = append(u.Containers, c)
-	u.ContainerMemoryBytes += c.MemoryBytes
-	if c.CPUPercent != nil {
-		u.ContainerCPUPercent += *c.CPUPercent
+// total fills u's totals. A CPU or footprint total is known only if every
+// part is. Lists are empty rather than null on the wire.
+func total(u *protocol.Usage) {
+	if u.Containers == nil {
+		u.Containers = []protocol.AttributedContainer{}
 	}
-}
-
-// addVM adds a VM. The footprint total stays known only while every VM's is.
-func addVM(u *protocol.Usage, vm protocol.AttributedVM) {
-	first := len(u.TartVMs) == 0
-	u.TartVMs = append(u.TartVMs, vm)
-	u.TartMemoryBytes += vm.MemoryBytes
-	switch {
-	case vm.FootprintBytes == nil:
-		u.TartFootprintBytes = nil
-	case first:
-		fp := *vm.FootprintBytes
-		u.TartFootprintBytes = &fp
-	case u.TartFootprintBytes != nil:
-		fp := *u.TartFootprintBytes + *vm.FootprintBytes
+	if u.TartVMs == nil {
+		u.TartVMs = []protocol.AttributedVM{}
+	}
+	cpu, cpuKnown := 0.0, true
+	for _, c := range u.Containers {
+		u.ContainerMemoryBytes += c.MemoryBytes
+		if c.CPUPercent == nil {
+			cpuKnown = false
+		} else {
+			cpu += *c.CPUPercent
+		}
+	}
+	if cpuKnown {
+		u.ContainerCPUPercent = &cpu
+	}
+	var fp uint64
+	fpKnown := true
+	for _, vm := range u.TartVMs {
+		u.TartMemoryBytes += vm.MemoryBytes
+		if vm.FootprintBytes == nil {
+			fpKnown = false
+		} else {
+			fp += *vm.FootprintBytes
+		}
+	}
+	if fpKnown {
 		u.TartFootprintBytes = &fp
 	}
 }

@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/source/host"
 )
 
 // Version is set at build time with -ldflags "-X .../internal/cli.Version=...".
@@ -34,7 +36,13 @@ type Env struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Getenv func(string) string
+	// Context ends long-running commands (the daemon) besides SIGINT/SIGTERM.
+	// Nil means context.Background().
+	Context context.Context
 }
+
+// trendWindow is how much host pressure history the observe view shows (R4).
+const trendWindow = 5 * time.Minute
 
 // Run executes one invocation and returns the process exit code.
 func Run(e Env) int {
@@ -99,8 +107,9 @@ func runDaemon(e Env) int {
 		return 1
 	}
 	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
-	// Collectors register here as they land (#14–#18).
-	d, err := daemon.New(nil, cfg.Daemon.SourceTimeout.Duration, log)
+	// Collectors register here as they land (#14–#17).
+	sources := []daemon.Source{host.New(host.System{}, trendWindow, time.Now)}
+	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
@@ -110,7 +119,11 @@ func runDaemon(e Env) int {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	base := e.Context
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration)
 

@@ -28,11 +28,11 @@
 
 **R4 — Observe view.** `headroom` prints once; `headroom --watch` refreshes in place.
 
-- [ ] Top line: host total, reserved, used, headroom, swap, pressure, plus the 5-minute pressure trend
-- [ ] One row per worktree: agent, state, containers + GB, Tart VMs + GB, CPU
-- [ ] Rows where the agent is waiting or done but still holds resources are marked
-- [ ] Unattributed row always shown when non-empty
-- [ ] Containers or VMs that appear without a matching lease (R10) are flagged as **ungated**: direct socket use, SDKs such as Testcontainers, or a broken PATH
+- [x] Top line: host total, reserved, used, headroom, swap, pressure, plus the 5-minute pressure trend (#21; headroom and pressure lead, so a narrow terminal keeps them)
+- [x] One row per worktree: agent, state, containers + GB, Tart VMs + GB, CPU, and the agents' own memory (#21). Worktrees with no agent and nothing running are hidden unless `--all` is given
+- [x] Rows where the agent is waiting or done, or there is no agent, but the worktree still holds resources are marked ⚑ (#21)
+- [x] Unattributed row always shown when non-empty, with each item's reason (#21)
+- [ ] Containers or VMs that appear without a matching lease (R10) are flagged as **ungated** (#33): direct socket use, SDKs such as Testcontainers, or a broken PATH
 
 **R5 — Gate shim for `docker`, `podman` and `tart` (authoritative).** One global shim directory, put first on PATH by the Orca launch environment (R9). It is the only enforcement point; agent hooks and MCP are advisory.
 

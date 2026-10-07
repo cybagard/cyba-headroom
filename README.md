@@ -20,6 +20,20 @@ make lint    # go vet + golangci-lint
 bin/headroom config   # effective config and its path
 ```
 
+## Observe
+
+`headroom daemon` collects the data; the other commands read it from the daemon.
+
+```sh
+bin/headroom daemon           # collector; keep it running
+bin/headroom                  # observe view, printed once
+bin/headroom --watch          # redraws in place; Ctrl-C to quit
+bin/headroom --all            # also worktrees with no agent and nothing running
+bin/headroom status --json    # the full snapshot
+```
+
+The view leads with headroom and memory pressure. Below that is one row per worktree, showing its agents, containers, Tart VMs, CPU and the agents' own memory, then anything that matches no worktree. `⚑` marks a worktree that holds containers or VMs while none of its agents is working. `?` means unknown, never 0. `≤` before headroom means some source has not reported yet. Colour is used only on a terminal, and never when `NO_COLOR` is set.
+
 Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds and the host baseline default to 0 (unset) until the observe baseline (#23); the Docker and LM Studio overheads default to the spike measurements. GB means GiB.
 
 ```toml

@@ -48,6 +48,28 @@ type Env struct {
 	// Context ends long-running commands (the daemon) besides SIGINT/SIGTERM.
 	// Nil means context.Background().
 	Context context.Context
+	// Terminal reports whether Stdout is a terminal, and its width. Nil
+	// means: ask the OS about Stdout.
+	Terminal func() (tty bool, width int)
+
+	// Test hooks for --watch; zero values mean the real behaviour.
+	watchEvery time.Duration  // poll interval (1s)
+	suspend    chan os.Signal // delivers Ctrl-Z (SIGTSTP)
+	stopSelf   func()         // stops the process (SIGSTOP)
+}
+
+// signalContext is e.Context (or Background) that also ends on sigs.
+func signalContext(e Env, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+	base := e.Context
+	if base == nil {
+		base = context.Background()
+	}
+	return signal.NotifyContext(base, sigs...)
+}
+
+// unreachable tells the user the daemon is down and how to start it.
+func unreachable(e Env, socket string, err error) {
+	fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom daemon`)\n", socket, err)
 }
 
 // Run executes one invocation and returns the process exit code.
@@ -72,8 +94,8 @@ func Run(e Env) int {
 		return 0
 	case "config":
 		return runConfig(e)
-	case "", "--watch":
-		return notYet(e, "observe view", 21)
+	case "", "--watch", "--all":
+		return runView(e)
 	case "daemon":
 		return runDaemon(e)
 	case "status":
@@ -152,11 +174,7 @@ func runDaemon(e Env) int {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
-	base := e.Context
-	if base == nil {
-		base = context.Background()
-	}
-	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration, "samples", cfg.Samples.Enabled)
 
@@ -178,7 +196,8 @@ func runDaemon(e Env) int {
 	return 0
 }
 
-// runStatus prints the daemon's raw snapshot as JSON. The human view is #21.
+// runStatus prints the daemon's raw snapshot as JSON; runView is the human
+// view.
 func runStatus(e Env) int {
 	for _, a := range e.Args[2:] {
 		if a != "--json" {
@@ -193,7 +212,7 @@ func runStatus(e Env) int {
 	}
 	snap, err := client.Status(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
 	if err != nil {
-		fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom daemon`)\n", cfg.Socket, err)
+		unreachable(e, cfg.Socket, err)
 		return 1
 	}
 	enc := json.NewEncoder(e.Stdout)
@@ -219,8 +238,10 @@ func notYet(e Env, what string, issue int) int {
 func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage: headroom [command]
 
-  headroom            observe view (one shot)
-  headroom --watch    observe view, refreshing
+  headroom [--all]    observe view (one shot); --all also shows worktrees
+                      with no agent and nothing running
+  headroom --watch [--all]
+                      observe view, redrawn in place; Ctrl-C to quit
   headroom config     print the effective config and its path
   headroom daemon     run the collector daemon
   headroom status [--json]

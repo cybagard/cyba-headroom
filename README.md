@@ -32,4 +32,4 @@ lease_timeout = "2m"
 host_baseline_gb = 10
 ```
 
-License: MIT
+License: AGPL-3.0-only

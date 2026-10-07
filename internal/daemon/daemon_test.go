@@ -237,3 +237,46 @@ func TestRepeatedFailureWarnsOnce(t *testing.T) {
 		t.Fatalf("logged %d warnings for the same error, want 1:\n%s", n, buf.String())
 	}
 }
+
+// sectionReading fills the Host section, like a real collector.
+type sectionReading struct{ total uint64 }
+
+func (r sectionReading) Apply(s *protocol.Snapshot) { s.Host = &protocol.Host{TotalBytes: r.total} }
+
+func TestDeriveSeesEveryReadingAndIsPublished(t *testing.T) {
+	src := fakeSource{name: "host", collect: func(context.Context) (Reading, error) {
+		return sectionReading{total: 64}, nil
+	}}
+	d := newDaemon(t, time.Second, src)
+	d.SetDerive(func(s *protocol.Snapshot) {
+		if s.Host == nil {
+			t.Error("derive ran before readings were applied")
+			return
+		}
+		s.Budget = &protocol.Budget{TotalBytes: s.Host.TotalBytes}
+	})
+	d.Tick(context.Background())
+	if b := d.Snapshot().Budget; b == nil || b.TotalBytes != 64 {
+		t.Fatalf("budget = %+v, want total 64", b)
+	}
+}
+
+func TestDerivePanicKeepsTheDaemonRunning(t *testing.T) {
+	src := fakeSource{name: "host", collect: func(context.Context) (Reading, error) {
+		return sectionReading{total: 64}, nil
+	}}
+	var buf bytes.Buffer
+	d, err := New([]Source{src}, time.Second, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetDerive(func(*protocol.Snapshot) { panic("boom") })
+	d.Tick(context.Background())
+	s := d.Snapshot()
+	if s.Seq != 1 || s.Host == nil || s.Host.TotalBytes != 64 {
+		t.Fatalf("snapshot not published with its readings: %+v", s)
+	}
+	if !strings.Contains(buf.String(), "boom") {
+		t.Errorf("panic not logged: %s", buf.String())
+	}
+}

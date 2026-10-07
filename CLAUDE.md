@@ -23,6 +23,7 @@ Tests run on Linux, but headroom ships only for macOS. So:
 
 - Put macOS-only code (libproc, `memory_pressure`, Apple Virtualization) behind `//go:build darwin`, with a small interface that has a fake for tests. Containers can then test the logic.
 - Verify macOS behaviour with `make test-host` or `make test-tart`, and by running `bin/headroom` on the host. CI's macOS runners check it again.
+- Sysctls come and go between macOS releases, and so do their widths: `vm.page_wired_count` and the swapper totals are missing on macOS 15, and the page counters mix 32- and 64-bit values. Read any sysctl that isn't core as optional (nil = unknown) and accept either width. Then check it with `make test-tart`.
 - Socket tests need a short path under `/tmp` (`os.MkdirTemp("/tmp", "hr")`). macOS caps `sun_path` at 104 bytes, and `t.TempDir()` there is longer.
 
 ## Implementation loop

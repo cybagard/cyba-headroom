@@ -18,9 +18,11 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
@@ -136,6 +138,11 @@ func runDaemon(e Env) int {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
+	params := cfg.Budget.Params()
+	d.SetDerive(func(s *protocol.Snapshot) {
+		b := budget.Compute(s, params)
+		s.Budget = &b
+	})
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)

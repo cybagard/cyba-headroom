@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cybagard/cyba-headroom/internal/budget"
 )
 
 // FileName is the config file inside the config directory.
@@ -83,13 +85,33 @@ type Policy struct {
 	DaemonTimeout    Duration `toml:"daemon_timeout"`
 }
 
-// Budget holds inputs to the budget model (R2).
+// Budget holds inputs to the budget model (R2). GB means GiB, as macOS
+// reports memory. `headroom suggest` (#23) learns these from recorded samples.
 type Budget struct {
 	// HostBaselineGB is reserved for macOS, Orca and the agents' own processes.
 	HostBaselineGB float64 `toml:"host_baseline_gb"`
+	// DockerOverheadGB is the Docker VM's cost beyond its containers.
+	DockerOverheadGB float64 `toml:"docker_overhead_gb"`
+	// LMStudioIdleGB is LM Studio's footprint with no model loaded.
+	LMStudioIdleGB float64 `toml:"lmstudio_idle_gb"`
 	// MaxMacOSVMs is the macOS VM slot count (R6); Apple's licence allows two.
 	MaxMacOSVMs int `toml:"max_macos_vms"`
 }
+
+// Params converts the settings to the budget model's inputs.
+func (b Budget) Params() budget.Params {
+	return budget.Params{
+		HostBaselineBytes:   gib(b.HostBaselineGB),
+		DockerOverheadBytes: gib(b.DockerOverheadGB),
+		LMStudioIdleBytes:   gib(b.LMStudioIdleGB),
+	}
+}
+
+// maxBudgetGB bounds budget sizes well above any Mac's memory, so their sum
+// cannot overflow when converted to bytes.
+const maxBudgetGB = 1024
+
+func gib(v float64) uint64 { return uint64(v * (1 << 30)) }
 
 // Duration is a time.Duration that reads TOML strings such as "2m".
 type Duration struct{ time.Duration }
@@ -122,7 +144,8 @@ func Defaults(dir string) Config {
 			LeaseTimeout:  Duration{2 * time.Minute},
 			DaemonTimeout: Duration{500 * time.Millisecond},
 		},
-		Budget: Budget{MaxMacOSVMs: 2},
+		// Overheads measured in spike #9 and #16; #23 refines them.
+		Budget: Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
 	}
 }
 
@@ -231,8 +254,20 @@ func (c Config) Validate() error {
 	if c.Policy.DaemonTimeout.Duration <= 0 {
 		errs = append(errs, errors.New("policy.daemon_timeout must be > 0"))
 	}
-	if c.Budget.HostBaselineGB < 0 {
-		errs = append(errs, errors.New("budget.host_baseline_gb must be >= 0"))
+	for _, v := range []struct {
+		key string
+		gb  float64
+	}{
+		{"host_baseline_gb", c.Budget.HostBaselineGB},
+		{"docker_overhead_gb", c.Budget.DockerOverheadGB},
+		{"lmstudio_idle_gb", c.Budget.LMStudioIdleGB},
+	} {
+		switch {
+		case v.gb < 0:
+			errs = append(errs, fmt.Errorf("budget.%s must be >= 0", v.key))
+		case v.gb > maxBudgetGB:
+			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, maxBudgetGB))
+		}
 	}
 	if c.Budget.MaxMacOSVMs < 0 {
 		errs = append(errs, errors.New("budget.max_macos_vms must be >= 0"))

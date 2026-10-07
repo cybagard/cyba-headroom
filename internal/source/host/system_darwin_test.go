@@ -46,6 +46,25 @@ func TestSystemReadsTheRealKernel(t *testing.T) {
 	if h.SwapUsedBytes > h.SwapTotalBytes {
 		t.Errorf("swap used %d > total %d", h.SwapUsedBytes, h.SwapTotalBytes)
 	}
+	// macOS 15 has no vm.page_wired_count (only host_statistics64, which
+	// needs cgo), so memory used is unknown there; newer releases have it.
+	_, wiredErr := exec.Command("/usr/sbin/sysctl", "-n", "vm.page_wired_count").Output()
+	switch {
+	case wiredErr != nil && h.UsedBytes != nil:
+		t.Errorf("memory used = %d without vm.page_wired_count", *h.UsedBytes)
+	case wiredErr == nil && h.UsedBytes == nil:
+		t.Error("memory used unknown, though vm.page_wired_count exists")
+	case h.UsedBytes != nil && (*h.UsedBytes == 0 || *h.UsedBytes > h.TotalBytes):
+		t.Errorf("memory used = %d, total %d", *h.UsedBytes, h.TotalBytes)
+	}
+	if h.CompressorBytes == nil {
+		t.Error("compressor bytes unknown")
+	}
+	// macOS 15 lacks the in-core compressed page count, too.
+	_, incoreErr := exec.Command("/usr/sbin/sysctl", "-n", "vm.compressor.pages_compressed_incore").Output()
+	if (incoreErr == nil) != (h.CompressedBytes != nil) {
+		t.Errorf("compressed = %v, but sysctl error = %v", h.CompressedBytes, incoreErr)
+	}
 	// sysctl prints e.g. "total = 2048.00M  used = 1024.00M ...".
 	if !strings.Contains(sysctlCmd(t, "vm.swapusage"), "total = ") {
 		t.Error("unexpected vm.swapusage format")

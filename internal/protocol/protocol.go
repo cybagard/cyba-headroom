@@ -45,6 +45,45 @@ type Snapshot struct {
 	Tart     *Tart     `json:"tart,omitempty"`
 	Orca     *Orca     `json:"orca,omitempty"`
 	LMStudio *LMStudio `json:"lmstudio,omitempty"`
+
+	// Budget is derived from the sections above once per tick (R2).
+	Budget *Budget `json:"budget,omitempty"`
+}
+
+// Budget is reserved vs. used vs. headroom (R2). Reserved is what running
+// workloads hold or may grow into; headroom is what is left to admit more.
+type Budget struct {
+	// TotalBytes is the host's physical memory.
+	TotalBytes    uint64 `json:"total_bytes"`
+	ReservedBytes uint64 `json:"reserved_bytes"`
+	// HeadroomBytes is total minus reserved; negative when over-committed,
+	// absent while the host's total is unknown. Used memory is Host.UsedBytes.
+	HeadroomBytes *int64 `json:"headroom_bytes,omitempty"`
+	// UnaccountedBytes is memory in use that no component explains: macOS,
+	// Orca, the agents and everything else, which the host baseline reserves
+	// for. It is what #23 learns host_baseline_gb from. Signed, because its
+	// inputs are read at slightly different instants. Compressed memory is
+	// counted at full size on both sides, as footprints count it, so the
+	// figure holds under compression; pages swapped out to disk are not
+	// (#23). Absent when host used, compressed or a component's footprint is
+	// unknown.
+	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
+	// Components are docker, tart, lmstudio and host_baseline, in that order.
+	Components []BudgetComponent `json:"components"`
+	// Unknown names sources with no reading yet. They count as 0, so headroom
+	// is then an upper bound.
+	Unknown []string `json:"unknown,omitempty"`
+	// Stale names budget inputs whose latest read failed; their last good
+	// reading is used, so the budget may lag what is running now.
+	Stale []string `json:"stale,omitempty"`
+}
+
+// BudgetComponent is one part of the reservation.
+type BudgetComponent struct {
+	Name          string `json:"name"`
+	ReservedBytes uint64 `json:"reserved_bytes"`
+	// UsedBytes is what it costs the host now; absent when unknown.
+	UsedBytes *uint64 `json:"used_bytes,omitempty"`
 }
 
 // LMStudio is LM Studio's loaded models and what they cost (R1).
@@ -206,6 +245,15 @@ type Host struct {
 	// FreePercent is the kernel's free-memory percentage, the signal
 	// `memory_pressure` reports.
 	FreePercent int `json:"free_percent"`
+	// UsedBytes is Activity Monitor's "Memory Used": app memory, wired and
+	// compressed. Absent where the kernel lacks one of its counters.
+	UsedBytes *uint64 `json:"used_bytes,omitempty"`
+	// CompressorBytes is what the compressor occupies, a part of UsedBytes.
+	CompressorBytes *uint64 `json:"compressor_bytes,omitempty"`
+	// CompressedBytes is what the compressor holds, at its uncompressed size:
+	// the size process footprints count compressed pages at. Absent on
+	// macOS 15.
+	CompressedBytes *uint64 `json:"compressed_bytes,omitempty"`
 
 	SwapTotalBytes uint64 `json:"swap_total_bytes"`
 	SwapUsedBytes  uint64 `json:"swap_used_bytes"`

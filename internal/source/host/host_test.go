@@ -67,9 +67,26 @@ func healthyMac() *fakeSysctl {
 			"vm.compressor.swapper.swapins_total":  0,
 			"vm.compressor.swapper.swapouts_total": 0,
 		},
-		raw: map[string][]byte{"vm.swapusage": xswUsage(0, 0, 0)},
+		raw: map[string][]byte{
+			"vm.swapusage": xswUsage(0, 0, 0),
+			// 1000 internal − 100 purgeable + 200 wired pages of 16 KiB, plus
+			// 1 MiB compressed. Widths as on macOS 27: some are 32-bit.
+			"vm.page_pageable_internal_count": le32(1000),
+			"vm.page_purgeable_count":         le64(100),
+			"vm.page_wired_count":             le32(200),
+			"vm.compressor_bytes_used":        le64(1 << 20),
+			"hw.pagesize":                     le64(16384),
+			// 300 pages held in the compressor, at their full size.
+			"vm.compressor.pages_compressed_incore": le32(300),
+		},
 	}
 }
+
+// healthyUsed is the memory in use healthyMac reports.
+const healthyUsed = 1100*16384 + 1<<20
+
+func le32(v uint32) []byte { return binary.LittleEndian.AppendUint32(nil, v) }
+func le64(v uint64) []byte { return binary.LittleEndian.AppendUint64(nil, v) }
 
 // clock is a manual clock for the source.
 type clock struct{ t time.Time }
@@ -305,5 +322,65 @@ func TestDirectionNeedsAMinuteOfHistory(t *testing.T) {
 	sys.sample(1, 79) // 1 point in 5 s would read as -12 %/min
 	if tr := collect(t, src).Trend; tr.Direction != "unknown" {
 		t.Fatalf("direction after 5 s of history = %q, want unknown", tr.Direction)
+	}
+}
+
+func TestReportsMemoryUsed(t *testing.T) {
+	h := collect(t, host.New(healthyMac(), 5*time.Minute, newClock().now))
+	if h.UsedBytes == nil || *h.UsedBytes != healthyUsed {
+		t.Fatalf("used = %v, want %d", h.UsedBytes, healthyUsed)
+	}
+}
+
+func TestMemoryUsedAcceptsEitherWidth(t *testing.T) {
+	sys := healthyMac()
+	sys.raw["vm.page_pageable_internal_count"] = le64(1000)
+	sys.raw["vm.page_purgeable_count"] = le32(100)
+	h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+	if h.UsedBytes == nil || *h.UsedBytes != healthyUsed {
+		t.Fatalf("used = %v, want %d", h.UsedBytes, healthyUsed)
+	}
+}
+
+func TestMemoryUsedIsOptional(t *testing.T) {
+	for _, oid := range []string{"vm.page_wired_count", "vm.compressor_bytes_used", "hw.pagesize"} {
+		t.Run(oid, func(t *testing.T) {
+			sys := healthyMac()
+			delete(sys.raw, oid)
+			h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+			if h.UsedBytes != nil {
+				t.Fatalf("used = %d, want unknown", *h.UsedBytes)
+			}
+			if h.TotalBytes != 64<<30 {
+				t.Fatalf("rest of the reading lost: %+v", h)
+			}
+		})
+	}
+	sys := healthyMac()
+	sys.raw["vm.page_wired_count"] = []byte{1, 2}
+	if h := collect(t, host.New(sys, 5*time.Minute, newClock().now)); h.UsedBytes != nil {
+		t.Fatalf("odd width: used = %d, want unknown", *h.UsedBytes)
+	}
+}
+
+func TestReportsCompressor(t *testing.T) {
+	h := collect(t, host.New(healthyMac(), 5*time.Minute, newClock().now))
+	if h.CompressorBytes == nil || *h.CompressorBytes != 1<<20 {
+		t.Errorf("compressor = %v, want %d", h.CompressorBytes, 1<<20)
+	}
+	if h.CompressedBytes == nil || *h.CompressedBytes != 300*16384 {
+		t.Errorf("compressed = %v, want %d", h.CompressedBytes, 300*16384)
+	}
+}
+
+func TestCompressedIsOptional(t *testing.T) {
+	sys := healthyMac()
+	delete(sys.raw, "vm.compressor.pages_compressed_incore") // macOS 15
+	h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+	if h.CompressedBytes != nil {
+		t.Fatalf("compressed = %d, want unknown", *h.CompressedBytes)
+	}
+	if h.UsedBytes == nil || h.CompressorBytes == nil {
+		t.Fatal("used and compressor must not depend on it")
 	}
 }

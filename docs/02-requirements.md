@@ -14,9 +14,10 @@
 
 **R2 — Budget model.** The budget is reserved vs. used vs. headroom, not free memory.
 
-- [ ] Reserved = container VM ceiling + configured memory of running Tart VMs + loaded model size + host baseline
-- [ ] A loaded model counts as reserved even when idle
-- [ ] Headroom = 64 GB minus reserved, shown next to memory pressure and swap
+- [x] Reserved = container VM reservation + configured memory of running Tart VMs + loaded model size + host baseline. The container VM reservation is `max(VM footprint, Σ containers + VM overhead)`, not the VM's memory limit: spike #9 showed the limit (31 GiB) would leave no headroom (#19)
+- [x] A loaded model counts as reserved even when idle: `max(idle footprint + Σ model file sizes, LM Studio footprint)` (#19)
+- [ ] Headroom = host memory (64 GB here) minus reserved, shown next to memory pressure and swap (computed in #19; shown by #21)
+- [x] Memory in use that no component accounts for is reported, so the host baseline can be learned from samples (#19, #55, #23)
 
 **R3 — Worktree attribution.** The worktree path is the join key.
 

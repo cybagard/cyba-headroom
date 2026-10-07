@@ -109,6 +109,7 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 		SwapTotalBytes: swapTotal,
 		SwapUsedBytes:  swapUsed,
 	}
+	s.memory(&h)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.prev != nil && s.prev.ok && cur.ok {
@@ -192,6 +193,62 @@ func (s *Source) freeSlope() float64 {
 		return 0
 	}
 	return sxy / sxx
+}
+
+// memory fills Activity Monitor's "Memory Used" (app memory, that is
+// anonymous pages less purgeable ones, plus wired pages and what the
+// compressor occupies) and what the compressor holds at full size. Each is
+// optional: nil if a counter is missing, so the rest of the reading stands.
+func (s *Source) memory(h *protocol.Host) {
+	pagesize, err := s.uint("hw.pagesize")
+	if err != nil {
+		return
+	}
+	if compressor, err := s.uint("vm.compressor_bytes_used"); err == nil {
+		h.CompressorBytes = &compressor
+		if app, wired, ok := s.appAndWired(); ok {
+			used := (app+wired)*pagesize + compressor
+			h.UsedBytes = &used
+		}
+	}
+	// macOS 15 has no such counter; vm_stat reads it via host_statistics64.
+	if pages, err := s.uint("vm.compressor.pages_compressed_incore"); err == nil {
+		compressed := pages * pagesize
+		h.CompressedBytes = &compressed
+	}
+}
+
+// appAndWired returns app memory and wired memory in pages.
+func (s *Source) appAndWired() (app, wired uint64, ok bool) {
+	var v [3]uint64
+	for i, name := range []string{
+		"vm.page_pageable_internal_count",
+		"vm.page_purgeable_count",
+		"vm.page_wired_count", // absent on macOS 15
+	} {
+		var err error
+		if v[i], err = s.uint(name); err != nil {
+			return 0, 0, false
+		}
+	}
+	internal, purgeable := v[0], v[1]
+	return internal - min(purgeable, internal), v[2], true
+}
+
+// uint reads an integer sysctl of either width. The page counters mix 32 and
+// 64 bits, and their widths have changed between macOS releases.
+func (s *Source) uint(name string) (uint64, error) {
+	b, err := s.sys.Raw(name)
+	if err != nil {
+		return 0, err
+	}
+	switch len(b) {
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(b)), nil
+	case 8:
+		return binary.LittleEndian.Uint64(b), nil
+	}
+	return 0, fmt.Errorf("%s: %d bytes, want 4 or 8", name, len(b))
 }
 
 // rate is the per-second increase of a cumulative counter; a counter that went

@@ -168,7 +168,18 @@ func classify(lsof []byte) identity {
 }
 
 func (f *Finder) footprint(ctx context.Context, pid int) (uint64, error) {
-	out, err := f.sys.Run(ctx, footprintPath, "-p", strconv.Itoa(pid), "-f", "bytes", "--noCategories")
+	return ReadFootprint(ctx, f.sys, pid)
+}
+
+// Runner runs a command; System and Host implement it.
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+}
+
+// ReadFootprint returns a process's phys_footprint via footprint(1): what it
+// costs the host, as Activity Monitor shows it. No sudo for own processes.
+func ReadFootprint(ctx context.Context, r Runner, pid int) (uint64, error) {
+	out, err := r.Run(ctx, footprintPath, "-p", strconv.Itoa(pid), "-f", "bytes", "--noCategories")
 	if err != nil {
 		return 0, err
 	}

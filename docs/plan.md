@@ -24,7 +24,7 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [ ] #49 **R1: Podman collector and Docker+Podman both-running warning**
 - [x] #15 **R1: Tart collector**
 - [ ] #16 **R1: LM Studio collector**
-- [ ] #17 **R1: Orca collector**
+- [x] #17 **R1: Orca collector**
 - [x] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
 - [ ] #19 **R2: budget model (reserved vs used vs headroom)**
 - [ ] #20 **R3: worktree attribution**

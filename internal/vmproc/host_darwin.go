@@ -111,6 +111,11 @@ func procArgs(pid int) (exec string, args []string, err error) {
 	return string(path), args, nil
 }
 
+// Footprint returns a process's phys_footprint.
+func (h Host) Footprint(ctx context.Context, pid int) (uint64, error) {
+	return ReadFootprint(ctx, h, pid)
+}
+
 // Run implements System.
 func (Host) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()

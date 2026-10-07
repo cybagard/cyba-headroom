@@ -22,12 +22,14 @@ build)
 run)
 	[[ $(uname -s) == Darwin ]] || { echo "darwin-tests: run needs macOS" >&2; exit 2; }
 	fail=0
+	log=$(mktemp)
+	trap 'rm -f "$log"' EXIT
 	while read -r rel; do
 		# Run from the package dir, as go test does, so testdata paths resolve.
-		if (cd "$root/$rel" && "$root/$out/${rel//\//_}.test" -test.count=1 >/tmp/hr-test.log 2>&1); then
+		if (cd "$root/$rel" && "$root/$out/${rel//\//_}.test" -test.count=1 >"$log" 2>&1); then
 			echo "ok   $rel"
 		else
-			echo "FAIL $rel"; cat /tmp/hr-test.log; fail=1
+			echo "FAIL $rel"; cat "$log"; fail=1
 		fi
 	done <"$root/$out/packages"
 	exit $fail

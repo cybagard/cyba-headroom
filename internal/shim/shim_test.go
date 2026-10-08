@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cybagard/cyba-headroom/internal/shim"
+	"github.com/cybagard/cyba-headroom/internal/source/tart"
 )
 
 // fixture is a fake headroom binary and a few PATH dirs.
@@ -63,7 +65,7 @@ func (f *fixture) env(path ...string) func(string) string {
 	}
 }
 
-func (f *fixture) resolve(name string, path ...string) (shim.Target, error) {
+func (f *fixture) resolve(name string, path ...string) (string, error) {
 	return shim.Resolve(name, []string{f.self}, f.env(path...), nil)
 }
 
@@ -73,7 +75,7 @@ func TestFindsTheRealBinaryAfterTheShim(t *testing.T) {
 	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
 	f.file("later/docker", "#!later\n", 0o755)
 	got, err := f.resolve("docker", f.dir("shims"), f.dir("usr/bin"), f.dir("later"))
-	if err != nil || got.Path != realBin || shim.Engine("docker", got.Path) != "docker" {
+	if err != nil || got != realBin || shim.Engine("docker", got) != "docker" {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }
@@ -90,7 +92,7 @@ func TestNeverItself(t *testing.T) {
 	}
 	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
 	got, err := f.resolve("docker", f.dir("shims"), f.dir("shims2"), f.dir("hard"), f.dir("usr/bin"))
-	if err != nil || got.Path != realBin {
+	if err != nil || got != realBin {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }
@@ -103,16 +105,16 @@ func TestSkipsUnsafeAndUnusableEntries(t *testing.T) {
 	t.Chdir(f.dir("noexec"))
 	f.file("noexec/rel/docker", "#!relative\n", 0o755)
 	got, err := f.resolve("docker", "", ".", "rel", f.dir("noexec"), f.dir("isdir"), f.dir("usr/bin"))
-	if err != nil || got.Path != realBin {
+	if err != nil || got != realBin {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }
 
 func TestFallsBackToUsualLocations(t *testing.T) {
 	f := newFixture(t)
-	tart := f.file("home/.local/bin/tart", "#!tart\n", 0o755)
+	tartBin := f.file("home/.local/bin/tart", "#!tart\n", 0o755)
 	got, err := shim.Resolve("tart", []string{f.self}, f.env(f.dir("empty")), []string{"~/.local/bin/tart"})
-	if err != nil || got.Path != tart || shim.Engine("tart", got.Path) != "tart" {
+	if err != nil || got != tartBin || shim.Engine("tart", got) != "tart" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
@@ -133,11 +135,11 @@ func TestDockerThatIsPodman(t *testing.T) {
 	f.file("viaScript/docker", "#!/bin/sh\n[ -e /etc/containers/nodocker ] || echo emulate\nexec /opt/podman/bin/podman \"$@\"\n", 0o755)
 	for _, dir := range []string{"viaLink", "viaScript"} {
 		got, err := f.resolve("docker", f.dir(dir))
-		if err != nil || shim.Engine("docker", got.Path) != "podman" {
+		if err != nil || shim.Engine("docker", got) != "podman" {
 			t.Errorf("%s: got %+v, %v; want engine podman", dir, got, err)
 		}
 	}
-	if got, _ := f.resolve("podman", f.dir("opt/podman/bin")); shim.Engine("podman", got.Path) != "podman" {
+	if got, _ := f.resolve("podman", f.dir("opt/podman/bin")); shim.Engine("podman", got) != "podman" {
 		t.Errorf("podman itself: %+v", got)
 	}
 	// A wrapper that only mentions podman is docker.
@@ -164,12 +166,12 @@ func TestSkipsEveryHeadroomOnTheWay(t *testing.T) {
 	// Two headroom builds, each with a shim dir on PATH: B, exec'd by A's
 	// shim, must not exec A back.
 	f := newFixture(t)
-	other := f.file("other/headroom", "#!another headroom build\n", 0o755)
+	other := f.file("other/headroom-dev", "#!another headroom build, renamed\n", 0o755)
 	f.link("shimsA/docker", f.self)
 	f.link("shimsB/docker", other)
 	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
 	got, err := shim.Resolve("docker", []string{other, f.self}, f.env(f.dir("shimsA"), f.dir("shimsB"), f.dir("usr/bin")), nil)
-	if err != nil || got.Path != realBin {
+	if err != nil || got != realBin {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }
@@ -179,7 +181,27 @@ func TestSkipsWhatThisUserCannotRun(t *testing.T) {
 	f.file("others/docker", "#!only for group and others\n", 0o011)
 	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
 	got, err := f.resolve("docker", f.dir("others"), f.dir("usr/bin"))
-	if err != nil || got.Path != realBin {
+	if err != nil || got != realBin {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
+	}
+}
+
+func TestSkipsAnyHeadroomShim(t *testing.T) {
+	// Another headroom build's shim dir, even one that never exec'd this
+	// process (its environment lost HEADROOM_SHIM_SELVES): its links lead to
+	// a binary named headroom.
+	f := newFixture(t)
+	other := f.file("other/headroom", "#!another headroom build\n", 0o755)
+	f.link("shimsB/docker", other)
+	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
+	got, err := f.resolve("docker", f.dir("shimsB"), f.dir("usr/bin"))
+	if err != nil || got != realBin {
+		t.Fatalf("got %q, %v; want %s", got, err, realBin)
+	}
+}
+
+func TestTartFallbacksAreTheDaemons(t *testing.T) {
+	if !slices.Equal(shim.Fallbacks["tart"], tart.Fallbacks) {
+		t.Fatalf("shim looks for tart in %q, the daemon in %q", shim.Fallbacks["tart"], tart.Fallbacks)
 	}
 }

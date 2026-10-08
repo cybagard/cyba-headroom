@@ -6,12 +6,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -304,24 +306,31 @@ func runShim(e Env, name string) int {
 	if fallbacks == nil {
 		fallbacks = shim.Fallbacks
 	}
-	t, err := shim.Resolve(name, selves, getenv, fallbacks[name])
+	target, err := shim.Resolve(name, selves, getenv, fallbacks[name])
 	if err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
 		return 127 // as the shell says for a missing command
 	}
 	if getenv("HEADROOM_SHIM_DEBUG") != "" {
-		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, t.Path, shim.Engine(name, t.Path))
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, target, shim.Engine(name, target))
 	}
+	// Replace, not add: Go's and libc's getenv read the first of duplicates.
+	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, shimSelvesVar+"=") })
 	env = append(env, shimSelvesVar+"="+strings.Join(selves, string(filepath.ListSeparator)))
+	// argv[0] is the bare name, as the shell passes a command found on PATH:
+	// the shim's own path would point the real binary back at the shim dir.
+	argv := append([]string{name}, e.Args[1:]...)
 	exec := e.exec
 	if exec == nil {
 		exec = syscall.Exec
 	}
 	// On success this never returns: the real binary takes over the
-	// process, with its PID, terminal, signals and exit code. argv[0] stays
-	// as invoked, as the shell would pass it.
-	if err := exec(t.Path, e.Args, env); err != nil {
-		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", t.Path, err)
+	// process, with its PID, terminal, signals and exit code.
+	if err := exec(target, argv, env); err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", target, err)
+		if errors.Is(err, syscall.ENOENT) {
+			return 127 // gone since it was found (an upgrade): not found
+		}
 		return 126 // found but not runnable
 	}
 	return 0

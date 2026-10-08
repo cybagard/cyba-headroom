@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -76,5 +77,62 @@ func TestShimDebugLine(t *testing.T) {
 		exec:    func(string, []string, []string) error { return nil }})
 	if !strings.Contains(errb.String(), "headroom: docker → "+filepath.Join(dir, "docker")+" (podman)") {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+}
+
+func TestShimReplacesTheSelvesItWasGiven(t *testing.T) {
+	// The child must see one HEADROOM_SHIM_SELVES: Go and libc getenv read
+	// the first of duplicates, and would miss this headroom.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!real\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var gotEnv []string
+	Run(Env{Args: []string{"docker", "ps"}, Stdout: io.Discard, Stderr: io.Discard,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"HEADROOM_SHIM_SELVES=/opt/earlier/headroom", "PATH=" + dir} },
+		exec:    func(_ string, _, env []string) error { gotEnv = env; return nil }})
+	var selves []string
+	for _, kv := range gotEnv {
+		if v, ok := strings.CutPrefix(kv, "HEADROOM_SHIM_SELVES="); ok {
+			selves = append(selves, v)
+		}
+	}
+	self, _ := os.Executable()
+	if len(selves) != 1 || !strings.Contains(selves[0], self) || !strings.Contains(selves[0], "/opt/earlier/headroom") {
+		t.Fatalf("HEADROOM_SHIM_SELVES entries = %q", selves)
+	}
+}
+
+func TestShimPassesTheBareName(t *testing.T) {
+	// Called by the shim's full path, the real binary still sees "podman",
+	// not a path back into the shim dir.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte("#!real\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgv []string
+	Run(Env{Args: []string{"/Users/dev/.config/headroom/shims/podman", "ps"}, Stdout: io.Discard, Stderr: io.Discard,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"PATH=" + dir} },
+		exec:    func(_ string, argv, _ []string) error { gotArgv = argv; return nil }})
+	if !slices.Equal(gotArgv, []string{"podman", "ps"}) {
+		t.Fatalf("argv = %q", gotArgv)
+	}
+}
+
+func TestShimTargetGoneIsNotFound(t *testing.T) {
+	// Removed between lookup and exec (an upgrade): "not found", as the shell
+	// would say, not "not runnable".
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!real\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code := Run(Env{Args: []string{"docker", "ps"}, Stdout: io.Discard, Stderr: io.Discard,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"PATH=" + dir} },
+		exec:    func(string, []string, []string) error { return syscall.ENOENT }})
+	if code != 127 {
+		t.Fatalf("exit %d, want 127", code)
 	}
 }

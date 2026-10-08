@@ -8,67 +8,49 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
-	"golang.org/x/sys/unix"
+	"github.com/cybagard/cyba-headroom/internal/binpath"
+	"github.com/cybagard/cyba-headroom/internal/source/tart"
 )
 
 // ErrNotFound means no real binary of that name exists outside the shim.
 var ErrNotFound = errors.New("not found on PATH (other than headroom's shim)")
 
-// Target is the real binary a shim call goes to.
-type Target struct {
-	Path string
-}
-
 // Fallbacks are the usual install locations, tried after PATH. A path
-// starting with "~/" is under HOME.
+// starting with "~/" is under HOME. Tart's are the daemon's.
 var Fallbacks = map[string][]string{
 	"docker": {"/usr/local/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker", "/opt/homebrew/bin/docker"},
 	"podman": {"/opt/homebrew/bin/podman", "/opt/podman/bin/podman", "/usr/local/bin/podman"},
-	"tart":   {"/opt/homebrew/bin/tart", "~/.local/bin/tart", "/Applications/tart.app/Contents/MacOS/tart"},
+	"tart":   tart.Fallbacks,
 }
 
 // Resolve finds the real binary called name: the first file of that name on
-// PATH, then in fallbacks, that this user can execute and that is none of
-// selves (the running headroom and any headroom whose shim exec'd it, however
-// they are linked). Empty and relative PATH entries are skipped: they name
-// the current directory, where a repository could plant a fake binary.
-func Resolve(name string, selves []string, getenv func(string) string, fallbacks []string) (Target, error) {
+// PATH, then in fallbacks, that this user can execute and that is no
+// headroom. It skips selves (the running headroom and any headroom whose
+// shim exec'd it, however they are linked) and anything that resolves to a
+// binary named headroom (another build's shim links). Empty and relative
+// PATH entries are skipped: they name the current directory, where a
+// repository could plant a fake binary.
+func Resolve(name string, selves []string, getenv func(string) string, fallbacks []string) (string, error) {
 	var skip []os.FileInfo
 	for _, s := range selves {
 		if fi, err := os.Stat(s); err == nil {
 			skip = append(skip, fi)
 		}
 	}
-	var candidates []string
-	for _, dir := range filepath.SplitList(getenv("PATH")) {
-		if filepath.IsAbs(dir) {
-			candidates = append(candidates, filepath.Join(dir, name))
+	p := binpath.Search(name, getenv, fallbacks, func(p string, fi os.FileInfo) bool {
+		if slices.ContainsFunc(skip, func(s os.FileInfo) bool { return os.SameFile(fi, s) }) {
+			return true
 		}
+		target, err := filepath.EvalSymlinks(p)
+		return err == nil && filepath.Base(target) == "headroom"
+	})
+	if p == "" {
+		return "", ErrNotFound
 	}
-	for _, p := range fallbacks {
-		if rest, ok := strings.CutPrefix(p, "~/"); ok {
-			p = filepath.Join(getenv("HOME"), rest)
-		}
-		if filepath.IsAbs(p) {
-			candidates = append(candidates, p)
-		}
-	}
-next:
-	for _, p := range candidates {
-		fi, err := os.Stat(p) // follows symlinks
-		if err != nil || !fi.Mode().IsRegular() || unix.Access(p, unix.X_OK) != nil {
-			continue
-		}
-		for _, s := range skip {
-			if os.SameFile(fi, s) {
-				continue next
-			}
-		}
-		return Target{Path: p}, nil
-	}
-	return Target{}, ErrNotFound
+	return p, nil
 }
 
 // podmanExec matches a wrapper script line that runs podman.

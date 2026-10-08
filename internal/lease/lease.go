@@ -263,6 +263,18 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// call was admitted, and its containers may be a pull away.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
+		if !e.oneoff && e.project != "" && s != nil && r.Worktree != "" {
+			// compose up -d of a stack that already runs, once its lease
+			// ended: its running containers are this lease's, so it holds
+			// only what they do not use, and ends quietly. Only those of
+			// this worktree, and held by no lease.
+			for _, x := range resources(s) {
+				if x.kind == "compose" && !x.oneoff && x.project == e.project && x.worktree == r.Worktree && !e.bound[x.key] && !b.boundAnywhere(x.key) {
+					e.bind(x)
+					e.used += x.bytes
+				}
+			}
+		}
 	}
 	if r.ContainerID != "" && !slices.ContainsFunc(starts, func(t policy.Start) bool { return t.ID == r.ContainerID }) {
 		// docker start a b with a running, or held by an open lease: the

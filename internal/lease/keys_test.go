@@ -736,3 +736,43 @@ func TestAStartOfSeveralWaitsForEach(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+// compose up -d again once the first up's lease has ended: the stack runs,
+// nothing new starts. Its running containers are the lease's, so it holds
+// no cost for nothing and logs no "never appeared".
+func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
+	b, c, log := book(t)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
+	b.Observe(snap())
+	b.Check(up, snap(), cfg)
+	s := withComposeContainer(snap(), "web", "w1", gib/2)
+	b.Observe(s)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("first lease still open: %+v", l)
+	}
+	b.Check(up, s, cfg)
+	if r := reserved(b); r != 2*gib-gib/2 {
+		t.Fatalf("reserved %d MiB, want the estimate less what web uses", r>>20)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// Another worktree's containers of a same-named project are not its.
+func TestComposeUpBindsNoOtherWorktreesStack(t *testing.T) {
+	b, c, log := book(t)
+	s := withComposeContainer(snap(), "web", "w2", gib/2)
+	b.Observe(s)
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, s, cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if !strings.Contains(log.String(), "never appeared") {
+		t.Fatal("w1's up bound w2's container")
+	}
+}

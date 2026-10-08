@@ -105,6 +105,8 @@ func Run(e Env) int {
 		return runInstall(e, cmd == "uninstall")
 	case "logs":
 		return runLogs(e)
+	case "suggest":
+		return runSuggest(e)
 	case "run":
 		return notYet(e, "run", 31)
 	case "doctor":
@@ -289,6 +291,9 @@ func usage(w io.Writer) {
   headroom uninstall [--bin PATH]
                       remove the agent and binary; keeps config, samples, logs
   headroom logs [-f]  show (or follow) the daemon's log
+  headroom suggest [--since 14d] [--write]
+                      suggest [budget] and [policy] values from the recorded
+                      samples; --write merges them into config.toml
   headroom version    print the version
 `)
 }

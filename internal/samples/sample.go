@@ -55,6 +55,9 @@ type Docker struct {
 	VMRunning        bool   `json:"vm_running"`
 	VMLimitBytes     uint64 `json:"vm_limit_bytes"`
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
+	// VMUnknown means the VM process could not be read: VMRunning and the
+	// footprint are unknown, not zero. Added to schema v1 later.
+	VMUnknown bool `json:"vm_unknown,omitempty"`
 }
 
 // Container is one running container and its attribution keys.
@@ -128,7 +131,8 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 		}
 	}
 	if d := s.Docker; d != nil && d.Running {
-		out.Docker = &Docker{VMRunning: d.VMRunning, VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes}
+		out.Docker = &Docker{VMRunning: d.VMRunning, VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes,
+			VMUnknown: d.VMError != ""}
 		for _, c := range d.Containers {
 			out.Containers = append(out.Containers, Container{
 				Name: c.Name, Image: c.Image, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,

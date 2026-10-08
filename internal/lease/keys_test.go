@@ -737,9 +737,9 @@ func TestAStartOfSeveralWaitsForEach(t *testing.T) {
 	}
 }
 
-// compose up -d again once the first up's lease has ended: the stack runs,
-// nothing new starts. Its running containers are the lease's, so it holds
-// no cost for nothing and logs no "never appeared".
+// compose up -d again once the first up's lease has ended, its services
+// unknown: its running containers are the lease's, so it logs no "never
+// appeared"; the estimate stays reserved for what the up may add.
 func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
 	b, c, log := book(t)
 	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
@@ -849,5 +849,31 @@ func TestAnEventPrefersAWorktreesLeaseToAManualOne(t *testing.T) {
 	b.Observe(snap())
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("w1's lease bound nothing: %s", log)
+	}
+}
+
+// compose up -d of a stack whose services all run: it starts nothing, so
+// it reserves nothing; one service down costs its share.
+func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
+	stack := func(services ...string) *protocol.Snapshot {
+		s := snap()
+		for _, sv := range services {
+			s = addContainer(s, protocol.Container{ID: sv, Name: sv, MemoryBytes: gib / 4,
+				Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": sv}}, "w1")
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		running []string
+		want    uint64
+	}{{[]string{"web", "db"}, 0}, {[]string{"web"}, gib}, {nil, 2 * gib}} {
+		b, _, _ := book(t)
+		s := stack(tc.running...)
+		b.Observe(s)
+		d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app",
+			Services: []string{"web", "db"}}, s, cfg)
+		if !d.Allow || reserved(b) > tc.want || reserved(b)+1 < tc.want {
+			t.Errorf("%v running: decision %+v, reserved %d MiB, want %d", tc.running, d, reserved(b)>>20, tc.want>>20)
+		}
 	}
 }

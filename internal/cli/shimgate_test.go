@@ -44,7 +44,7 @@ type shimRig struct {
 	raised   os.Signal
 	pending  os.Signal // a signal that came during an ask
 	// composeAsk stands in for docker compose config.
-	composeAsk func(string, []string) (string, error)
+	composeAsk func(string, []string) ([]byte, error)
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -96,11 +96,11 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			return nil
 		},
 		raise: func(s os.Signal) { r.raised = s },
-		composeAsk: func(bin string, args []string) (string, error) {
+		composeAsk: func(bin string, args []string) ([]byte, error) {
 			if r.composeAsk != nil {
 				return r.composeAsk(bin, args)
 			}
-			return "", errors.New("no compose here")
+			return nil, errors.New("no compose here")
 		},
 	})
 	return code, errb.String()
@@ -652,23 +652,27 @@ func TestAnUnreadableDockerConfigIsTheDefaultContext(t *testing.T) {
 // in its own environment and directory. -p needs no asking.
 func TestComposeProjectAsksCompose(t *testing.T) {
 	var asked [][]string
-	ask := func(bin string, args []string) (string, error) {
+	ask := func(bin string, args []string) ([]byte, error) {
 		asked = append(asked, append([]string{bin}, args...))
-		return "shop", nil
+		return []byte(`{"name":"shop","services":{"web":{},"db":{}}}`), nil
 	}
-	c := shim.Call{ComposeFiles: []string{"a.yml", "b.yml"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
-	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
-		t.Fatalf("project = %q", got)
+	c := shim.Call{Op: "up", ComposeFiles: []string{"a.yml", "b.yml"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
+	if got, services := composeProject("/usr/local/bin/docker", c, ask); got != "shop" || !slices.Equal(services, []string{"db", "web"}) {
+		t.Fatalf("project = %q, services %q", got, services)
 	}
 	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
-	if got := composeProject("/usr/local/bin/docker", shim.Call{Target: "p"}, ask); got != "p" || len(asked) != 1 {
+	if got, _ := composeProject("/usr/local/bin/docker", shim.Call{Op: "down", Target: "p"}, ask); got != "p" || len(asked) != 1 {
 		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
 	}
-	failing := func(string, []string) (string, error) { return "", errors.New("exit status 1") }
-	if got := composeProject("/usr/local/bin/docker", shim.Call{}, failing); got != "" {
+	// An up with -p asks for its services: those already running cost nothing.
+	if got, services := composeProject("/usr/local/bin/docker", shim.Call{Op: "up", Target: "p"}, ask); got != "p" || len(services) != 2 {
+		t.Fatalf("-p up: %q, %q", got, services)
+	}
+	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	if got, _ := composeProject("/usr/local/bin/docker", shim.Call{}, failing); got != "" {
 		t.Fatalf("Compose could not say: %q, want no key", got)
 	}
 }
@@ -690,35 +694,42 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	write("compose.yaml", "services:\n  web:\n    image: alpine\n")
 	write("compose.override.yaml", "name: ${STACK}-shop\n")
 	write(".env", "STACK=blue\n")
-	ask := func(bin string, args []string) (string, error) { return askCompose(bin, args, os.Environ(), dir) }
-	if got := composeProject(bin, shim.Call{}, ask); got != "blue-shop" {
-		t.Fatalf("project = %q, want blue-shop", got)
+	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
+	if got, services := composeProject(bin, shim.Call{Op: "up"}, ask); got != "blue-shop" || !slices.Equal(services, []string{"web"}) {
+		t.Fatalf("project = %q, services %q, want blue-shop, [web]", got, services)
 	}
 }
 
 func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	var asked []string
-	ask := func(_ string, args []string) (string, error) { asked = args; return "x", nil }
+	ask := func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"x"}`), nil }
 	composeProject("/d", shim.Call{ConfigDir: "/work/.docker"}, ask)
 	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
 		t.Fatalf("asked %q", asked)
 	}
 }
 
-// Compose is asked only when it must name the project: not for -p, not
-// for podman.
+// Compose is asked only when it must name the project or list an up's
+// services: not for -p otherwise, not for podman.
 func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r := newShimRig(t)
 	r.ask = allow
 	asked := 0
-	r.composeAsk = func(string, []string) (string, error) { asked++; return "x", nil }
-	r.run("docker", "compose", "-p", "shop", "up", "-d")
+	r.composeAsk = func(string, []string) ([]byte, error) {
+		asked++
+		return []byte(`{"name":"x","services":{"web":{}}}`), nil
+	}
+	r.run("docker", "compose", "-p", "shop", "run", "web")
 	if asked != 0 || r.asked[0].Target != "shop" {
 		t.Fatalf("asked %d, target %q", asked, r.asked[0].Target)
 	}
 	r.run("docker", "compose", "up", "-d")
-	if asked != 1 || r.asked[1].Target != "x" {
-		t.Fatalf("asked %d, target %q", asked, r.asked[1].Target)
+	if asked != 1 || r.asked[1].Target != "x" || !slices.Equal(r.asked[1].Services, []string{"web"}) {
+		t.Fatalf("asked %d, target %q, services %q", asked, r.asked[1].Target, r.asked[1].Services)
+	}
+	r.run("docker", "compose", "-p", "shop", "up", "-d")
+	if asked != 2 || r.asked[2].Target != "shop" {
+		t.Fatalf("asked %d, target %q", asked, r.asked[2].Target)
 	}
 }
 

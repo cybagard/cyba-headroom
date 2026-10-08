@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -76,7 +78,7 @@ func (e Env) withDefaults() Env {
 	}
 	if e.composeAsk == nil {
 		env, _ := e.envOf()
-		e.composeAsk = func(bin string, args []string) (string, error) { return askCompose(bin, args, env, "") }
+		e.composeAsk = func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, env, "") }
 	}
 
 	if e.fallbacks == nil {
@@ -127,7 +129,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
 		} else {
-			req.Target = composeProject(bin, c, h.composeAsk)
+			req.Target, req.Services = composeProject(bin, c, h.composeAsk)
 		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
@@ -237,9 +239,9 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 // override files and name: the way it does, keeps the two from parting.
 // "" when Compose cannot say (the call will fail too): no key, failing
 // closed.
-func composeProject(bin string, c shim.Call, ask func(bin string, args []string) (string, error)) string {
-	if c.Target != "" {
-		return c.Target
+func composeProject(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) (string, []string) {
+	if c.Target != "" && c.Op != "up" {
+		return c.Target, nil
 	}
 	var args []string
 	if c.ConfigDir != "" {
@@ -255,11 +257,17 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	for _, f := range c.ComposeEnvFiles {
 		args = append(args, "--env-file", f)
 	}
-	name, err := ask(bin, append(args, "config", "--format", "json"))
-	if err != nil {
-		return ""
+	out, err := ask(bin, append(args, "config", "--format", "json"))
+	var cfg struct {
+		Name     string              `json:"name"`
+		Services map[string]struct{} `json:"services"`
 	}
-	return name
+	if err != nil || json.Unmarshal(out, &cfg) != nil {
+		return c.Target, nil
+	}
+	// An up's services: those already running start nothing new.
+	services := slices.Sorted(maps.Keys(cfg.Services))
+	return cmp.Or(c.Target, cfg.Name), services
 }
 
 // composeStdinProject names the project of compose -f - as Compose does
@@ -307,22 +315,12 @@ const composeTimeout = 2 * time.Second
 
 // askCompose runs docker compose config (args) at bin in env and dir ("":
 // this process's) and returns the project's name.
-func askCompose(bin string, args, env []string, dir string) (string, error) {
+func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	var cfg struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(out, &cfg); err != nil || cfg.Name == "" {
-		return "", errors.New("docker compose config: no project name")
-	}
-	return cfg.Name, nil
+	return cmd.Output()
 }
 
 // dockerEndpointIn is the endpoint the docker CLI talks to: DOCKER_HOST,

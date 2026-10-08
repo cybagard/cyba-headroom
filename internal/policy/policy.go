@@ -102,6 +102,9 @@ type Request struct {
 	// looked up or that Docker did not resolve: each may still start, and
 	// costs one container.
 	Unresolved int
+	// Services are a compose up's project's services: those its worktree
+	// already runs start nothing new.
+	Services []string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

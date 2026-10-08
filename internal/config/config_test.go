@@ -251,3 +251,13 @@ func TestPolicyConfigSnapshotAge(t *testing.T) {
 		t.Fatalf("1m interval: max snapshot age %v", got)
 	}
 }
+
+// A relative shim_dir would put a path that depends on the agent's working
+// directory first on its PATH.
+func TestShimDirMustBeAbsolute(t *testing.T) {
+	dir := shortTempDir(t)
+	write(t, dir, "shim_dir = \"shims\"\n")
+	if _, err := LoadDir(dir); err == nil || !strings.Contains(err.Error(), "shim_dir") {
+		t.Fatalf("err = %v", err)
+	}
+}

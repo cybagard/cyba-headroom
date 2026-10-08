@@ -33,7 +33,7 @@ func linkShims(dir, bin string) (notes []string, err error) {
 		switch {
 		case err == nil && target == bin:
 			continue
-		case err == nil && filepath.Base(target) == "headroom":
+		case err == nil && ownLink(p, target):
 			if err := os.Remove(p); err != nil {
 				return notes, err
 			}
@@ -57,7 +57,7 @@ func linkShims(dir, bin string) (notes []string, err error) {
 func unlinkShims(dir, bin string) error {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
-		if target, err := os.Readlink(p); err == nil && (target == bin || filepath.Base(target) == "headroom") {
+		if target, err := os.Readlink(p); err == nil && (target == bin || ownLink(p, target)) {
 			if err := os.Remove(p); err != nil {
 				return err
 			}
@@ -69,23 +69,60 @@ func unlinkShims(dir, bin string) error {
 	return nil
 }
 
-// hasShims reports whether dir holds a link for every shim name.
-func hasShims(dir string) bool {
-	for _, n := range shimList() {
-		if fi, err := os.Lstat(filepath.Join(dir, n)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-			return false
-		}
+// ownLink reports whether the link at p, to target, is headroom's to
+// replace or remove: it leads to a binary named headroom, or to nothing
+// (a link whose binary is gone gates nothing).
+func ownLink(p, target string) bool {
+	if filepath.Base(target) == "headroom" {
+		return true
 	}
-	return true
+	_, err := os.Stat(p) // follows the link
+	return errors.Is(err, fs.ErrNotExist)
 }
 
-// withFirst is the PATH list with dir first and nowhere else.
+// hasShims reports whether dir holds a shim that leads to a headroom
+// binary that exists: then putting dir first on PATH gates something.
+func hasShims(dir string) bool {
+	for _, n := range shimList() {
+		p := filepath.Join(dir, n)
+		target, err := os.Readlink(p)
+		if err != nil || filepath.Base(target) != "headroom" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultPath is the PATH a shell starts with when it has none.
+const defaultPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+// withFirst is the PATH list with dir first and nowhere else. An empty
+// PATH stands for the system default, which follows dir.
 func withFirst(path, dir string) string {
+	if path == "" {
+		path = defaultPath
+	}
+	dir = filepath.Clean(dir)
 	parts := []string{dir}
 	for _, p := range filepath.SplitList(path) {
-		if filepath.Clean(p) != filepath.Clean(dir) {
+		if filepath.Clean(p) != dir {
 			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, string(filepath.ListSeparator))
+}
+
+// shellWord quotes s for a shell command line if it needs it.
+func shellWord(s string) string {
+	safe := func(r rune) bool {
+		return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%~", r)
+	}
+	plain := s != "" && strings.IndexFunc(s, func(r rune) bool { return !safe(r) }) < 0
+	if plain {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

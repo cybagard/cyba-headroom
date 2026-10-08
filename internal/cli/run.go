@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"syscall"
 
@@ -22,19 +21,7 @@ func runRun(e Env) int {
 		return 2
 	}
 	argv := args[1:]
-	environ := e.Environ
-	if environ == nil {
-		environ = os.Environ
-	}
-	env := environ()
-	getenv := func(k string) string {
-		for i := len(env) - 1; i >= 0; i-- {
-			if v, ok := strings.CutPrefix(env[i], k+"="); ok {
-				return v
-			}
-		}
-		return ""
-	}
+	env, getenv := e.envOf()
 	cfg, err := config.Load(getenv)
 	switch {
 	case err != nil:

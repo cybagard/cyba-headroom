@@ -32,7 +32,14 @@ func newRunRig(t *testing.T, links bool) *runRig {
 		t.Fatal(err)
 	}
 	if links {
-		if _, err := linkShims(r.shims, "/opt/headroom/bin/headroom"); err != nil {
+		bin := filepath.Join(cfg, "bin", "headroom")
+		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bin, []byte("#!headroom\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := linkShims(r.shims, bin); err != nil {
 			t.Fatal(err)
 		}
 	}

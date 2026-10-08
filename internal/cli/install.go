@@ -161,7 +161,7 @@ func (in *installer) installShims(bin string) {
 	var lines []string
 	for _, a := range orcaAgents {
 		if in.lookPath != nil && in.lookPath(a) {
-			lines = append(lines, fmt.Sprintf("  %s: %s run -- %s", a, bin, a))
+			lines = append(lines, fmt.Sprintf("  %s: %s run -- %s", a, shellWord(bin), a))
 		}
 	}
 	if len(lines) > 0 {
@@ -212,8 +212,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 		if len(remove) > 1 {
 			bin = remove[1]
 		}
+		// Best effort: the agent is already stopped, so finish the rest.
 		if err := unlinkShims(in.shimDir, bin); err != nil {
-			return in.fail(fmt.Errorf("removing the shims: %w", err))
+			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
 		}
 	}
 	for _, p := range remove {

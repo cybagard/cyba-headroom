@@ -332,3 +332,20 @@ func TestOldDaemonWithoutAnAgentIsStillRefused(t *testing.T) {
 		t.Fatalf("exit %d: want a refusal", code)
 	}
 }
+
+// A shim that cannot be removed does not stop the uninstall halfway.
+func TestUninstallGoesOnWhenAShimStays(t *testing.T) {
+	f := newInstallFixture(t)
+	f.in.install(context.Background())
+	if err := os.Chmod(f.in.shimDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.in.shimDir, 0o755) })
+	if os.Geteuid() == 0 {
+		t.Skip("root removes whatever the mode")
+	}
+	code := f.in.uninstall(context.Background())
+	if _, err := os.Stat(f.plistPath()); code != 0 || !os.IsNotExist(err) || !strings.Contains(f.errb.String(), "shims") {
+		t.Fatalf("exit %d, plist %v, stderr %q", code, err, f.errb.String())
+	}
+}

@@ -22,14 +22,16 @@ bin/headroom config   # effective config and its path
 
 ## Observe
 
-`headroom daemon` collects the data; the other commands read it from the daemon.
+`headroom install` runs the daemon as a LaunchAgent: it starts at login, restarts if it crashes, and logs to `~/Library/Logs/headroom/daemon.log` (rotated at 5 MB). The install copies the binary to `~/.local/bin/headroom`; run `install` again to upgrade. `headroom uninstall` removes the agent and the binary, but keeps config, samples and logs. The other commands read from the daemon.
 
 ```sh
-bin/headroom daemon           # collector; keep it running
-bin/headroom                  # observe view, printed once
-bin/headroom --watch          # redraws in place; Ctrl-C to quit
-bin/headroom --all            # also worktrees with no agent and nothing running
-bin/headroom status --json    # the full snapshot
+bin/headroom install          # daemon under launchd (or: headroom daemon, in a terminal)
+headroom logs [-f]            # its log
+headroom                      # observe view, printed once
+headroom --watch              # redraws in place; Ctrl-C to quit
+headroom --all                # also worktrees with no agent and nothing running
+headroom status --json        # the full snapshot
+headroom uninstall
 ```
 
 The view leads with headroom and memory pressure. Below that is one row per worktree, showing its agents, containers, Tart VMs, CPU and the agents' own memory, then anything that matches no worktree. `⚑` marks a worktree that holds containers or VMs while none of its agents is working. `?` means unknown, never 0. `≤` before headroom means some source has not reported yet. Colour is used only on a terminal, and never when `NO_COLOR` is set.

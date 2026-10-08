@@ -266,3 +266,12 @@ func TestClientFailsFastWithoutDaemon(t *testing.T) {
 		t.Fatalf("took %s", el)
 	}
 }
+
+func TestPingReportsThePID(t *testing.T) {
+	path := sockPath(t)
+	serve(t, path)
+	pid, err := client.Ping(context.Background(), path, time.Second)
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("pid = %d, %v; want %d", pid, err, os.Getpid())
+	}
+}

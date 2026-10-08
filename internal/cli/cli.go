@@ -23,6 +23,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/logfile"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/samples"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
@@ -69,7 +70,7 @@ func signalContext(e Env, sigs ...os.Signal) (context.Context, context.CancelFun
 
 // unreachable tells the user the daemon is down and how to start it.
 func unreachable(e Env, socket string, err error) {
-	fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom daemon`)\n", socket, err)
+	fmt.Fprintf(e.Stderr, "headroom: daemon not reachable at %s: %v (start it with `headroom install`, or `headroom daemon` in a terminal)\n", socket, err)
 }
 
 // Run executes one invocation and returns the process exit code.
@@ -101,7 +102,9 @@ func Run(e Env) int {
 	case "status":
 		return runStatus(e)
 	case "install", "uninstall":
-		return notYet(e, cmd, 22)
+		return runInstall(e, cmd == "uninstall")
+	case "logs":
+		return runLogs(e)
 	case "run":
 		return notYet(e, "run", 31)
 	case "doctor":
@@ -129,12 +132,43 @@ func runConfig(e Env) int {
 
 // runDaemon runs the collector daemon until SIGINT or SIGTERM.
 func runDaemon(e Env) int {
-	cfg, err := config.Load(e.Getenv)
-	if err != nil {
+	logPath := ""
+	for a := e.Args[2:]; len(a) > 0; a = a[1:] {
+		if a[0] != "--log" || len(a) < 2 {
+			fmt.Fprintf(e.Stderr, "headroom: daemon: usage: headroom daemon [--log FILE]\n")
+			return 2
+		}
+		logPath, a = a[1], a[1:]
+	}
+	// Open the log first, so a startup failure under launchd is in the log
+	// that `headroom logs` shows, not only in the crash log.
+	logOut := e.Stderr
+	if logPath != "" {
+		// Size-capped, so weeks under launchd cannot fill the disk.
+		f, err := logfile.Open(logPath, 5<<20)
+		if err != nil {
+			fmt.Fprintln(e.Stderr, "headroom:", err)
+			return 1
+		}
+		defer func() { _ = f.Close() }()
+		logOut = f
+		// launchd's crash log has no cap; a crash loop must not grow it forever.
+		if crash, ok := e.Stderr.(*os.File); ok {
+			trimCrashLog(crash, 1<<20)
+		}
+	}
+	log := slog.New(slog.NewTextHandler(logOut, nil))
+	fail := func(err error) int {
+		if logPath != "" {
+			log.Error("daemon failed to start", "err", err)
+		}
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
-	log := slog.New(slog.NewTextHandler(e.Stderr, nil))
+	cfg, err := config.Load(e.Getenv)
+	if err != nil {
+		return fail(err)
+	}
 	// Collectors register here as they land (#49). Docker and Tart
 	// share one VM process listing per tick.
 	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
@@ -159,8 +193,7 @@ func runDaemon(e Env) int {
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {
-		fmt.Fprintln(e.Stderr, "headroom:", err)
-		return 1
+		return fail(err)
 	}
 	params := cfg.Budget.Params()
 	d.SetDerive(func(s *protocol.Snapshot) {
@@ -171,8 +204,7 @@ func runDaemon(e Env) int {
 	})
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
-		fmt.Fprintln(e.Stderr, "headroom:", err)
-		return 1
+		return fail(err)
 	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -243,13 +275,20 @@ func usage(w io.Writer) {
   headroom --watch [--all]
                       observe view, redrawn in place; Ctrl-C to quit
   headroom config     print the effective config and its path
-  headroom daemon     run the collector daemon
+  headroom daemon [--log FILE]
+                      run the collector daemon; --log writes its log to FILE,
+                      rotated at 5 MB
   headroom status [--json]
                       print the daemon's raw snapshot as JSON
   headroom run -- <agent> [args]
                       launch an agent with the shim dir first on PATH
   headroom doctor     check PATH order and identity in this shell
-  headroom install    install the launchd agent and shims
+  headroom install [--bin PATH]
+                      run the daemon as a LaunchAgent; copies this binary to
+                      PATH (default ~/.local/bin/headroom)
+  headroom uninstall [--bin PATH]
+                      remove the agent and binary; keeps config, samples, logs
+  headroom logs [-f]  show (or follow) the daemon's log
   headroom version    print the version
 `)
 }

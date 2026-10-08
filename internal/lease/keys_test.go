@@ -1035,3 +1035,36 @@ func TestAStartIsCheckedAtTheCostItTakesOver(t *testing.T) {
 		t.Fatalf("reserved %d GiB, want the create's 8, once", reserved(b)>>30)
 	}
 }
+
+// docker create -m 8g x, its lease lapsed (a slow pull), then docker start
+// x: the start is weighed at the create's 8 GiB, released when it lapsed.
+func TestAStartTakingALapsedCreateIsCheckedAtItsCost(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	cr := labelled("w1", "x")
+	cr.Command, cr.CostBytes = "docker create x", 6*gib
+	created := b.Check(cr, snap(), cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(snap()) // lapses
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", Target: "x", ContainerID: "X",
+		TakesOver: created.LeaseID}, snap(), cfg); d.CostBytes != 6*gib {
+		t.Fatalf("decision %+v, want weighed at 6 GiB", d)
+	}
+}
+
+// compose up -d again while the first up's lease still reserves, the stack
+// running: it starts nothing, so it is not weighed at that reservation.
+func TestAnIdleRepeatUpIsWeighedAtAByte(t *testing.T) {
+	b, _, _ := book(t)
+	c := cfg
+	c.PerWorktreeCapBytes = 3 * gib
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Services: []string{"db"}}
+	b.Check(up, snap(), c)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	b.Observe(s)
+	if d := b.Check(up, s, c); !d.Allow || d.CostBytes != 1 {
+		t.Fatalf("decision %+v, want allowed at a byte", d)
+	}
+}

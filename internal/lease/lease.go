@@ -251,30 +251,6 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// they are no lease's.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
-	for _, e := range b.open {
-		if composeTakes(r, e) || startTakes(r, starts, e) {
-			// This call's lease takes it over, with what it reserves
-			// (below): counting it too would charge it twice.
-			continue
-		}
-		r.LeasedBytes += e.reserved()
-		if e.Worktree == r.Worktree {
-			r.WorktreeLeasedBytes += e.reserved()
-		}
-		if e.macOS && len(e.bound) == 0 {
-			r.PendingMacOS++ // once bound, its VM counts as running
-		}
-	}
-	est := cmp.Or(r.CostBytes, c.DefaultContainerBytes) // one container's, or the stack's
-	n := len(starts) + unresolved
-	if n > 1 {
-		// docker start a b c: each costs what one would.
-		per := cmp.Or(r.CostBytes, c.DefaultContainerBytes)
-		r.CostBytes = math.MaxUint64
-		if per <= math.MaxUint64/uint64(n) {
-			r.CostBytes = uint64(n) * per
-		}
-	}
 	// The project's running services in the caller's worktree: a compose
 	// up's lease holds them (below).
 	var stack []resource
@@ -302,29 +278,49 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			running[sv]--
 		}
 	}
-	if idle {
+	// What this call's lease takes over is part of what it will hold (see
+	// the takeovers below): the check weighs that in its cost, not twice.
+	// An idle up adds nothing: what it takes over stays counted as it is.
+	est := cmp.Or(r.CostBytes, c.DefaultContainerBytes) // one container's, or the stack's
+	var reservedTaken, surplus uint64
+	composeTook := false
+	for _, e := range b.open {
+		switch {
+		case !idle && composeTakes(r, e):
+			reservedTaken, composeTook = reservedTaken+e.reserved(), true
+			continue
+		case startTakes(r, starts, e):
+			surplus += max(est, e.cost) - est // that container's cost: the larger
+			continue
+		}
+		r.LeasedBytes += e.reserved()
+		if e.Worktree == r.Worktree {
+			r.WorktreeLeasedBytes += e.reserved()
+		}
+		if e.macOS && len(e.bound) == 0 {
+			r.PendingMacOS++ // once bound, its VM counts as running
+		}
+	}
+	for _, e := range b.lapsed {
+		if startTakes(r, starts, e) {
+			surplus += max(est, e.cost) - est // released when it lapsed: counted afresh
+		}
+	}
+	n := len(starts) + unresolved
+	switch {
+	case idle:
 		// Decided at a byte (0 means the default): the reading may be
 		// seconds old, so the pressure guard still holds.
 		r.CostBytes = 1
-	}
-	// What this call's lease takes over is part of what it will hold (see
-	// the takeovers below): the check sees that, not the estimate alone.
-	var reservedTaken, surplus uint64
-	composeTook := false
-	for _, o := range b.open {
-		switch {
-		case composeTakes(r, o):
-			reservedTaken, composeTook = reservedTaken+o.reserved(), true
-		case startTakes(r, starts, o):
-			surplus += max(est, o.cost) - est // that container's cost: the larger
+	case composeTook:
+		r.CostBytes = max(est, reservedTaken)
+	case n > 1 || surplus > 0:
+		// docker start a b c: each costs what one would, or what the run
+		// or create that made it reserved, if more.
+		r.CostBytes = math.MaxUint64
+		if est <= (math.MaxUint64-surplus)/uint64(max(n, 1)) {
+			r.CostBytes = uint64(max(n, 1))*est + surplus
 		}
-	}
-	if composeTook {
-		r.CostBytes = max(cmp.Or(r.CostBytes, c.DefaultContainerBytes), reservedTaken)
-	}
-	if surplus > 0 {
-		r.CostBytes = cmp.Or(r.CostBytes, c.DefaultContainerBytes)
-		r.CostBytes += min(surplus, math.MaxUint64-r.CostBytes)
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -802,7 +798,8 @@ func (b *Book) expire(now time.Time) {
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
-		case e.idle:
+		case e.idle && len(e.took) == 0:
+			// What a lease it took over waited for may still fail to come.
 			b.log.Debug("lease of an up that started nothing ended at its timeout", "lease", e.ID, "worktree", e.Worktree)
 			return true
 		case e.Worktree == "":

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -34,10 +33,46 @@ var errCannotCheck = errors.New("the daemon cannot check calls")
 // gated is how gate decided.
 type gated struct {
 	proceed bool
-	code    int    // the exit code when not proceeding
-	checked bool   // a daemon allowed the call: mark it for later shims
-	lease   string // the allow's lease, to release if the exec fails
+	code    int       // the exit code when not proceeding
+	signal  os.Signal // the signal that ended a wait, to die of
+	checked bool      // a daemon allowed the call: mark it for later shims
+	lease   string    // the allow's lease, to release if the exec fails
 	cfg     config.Config
+}
+
+// shimHooks are the shim's dealings with the world; tests replace them.
+type shimHooks struct {
+	exec      func(path string, argv, env []string) error
+	ask       func(config.Config, protocol.CheckRequest) (*protocol.Decision, error)
+	release   func(config.Config, string) error
+	ancestors func() []int
+	now       func() time.Time
+	wait      func(time.Duration) os.Signal // nil: register for signals when a wait starts
+	raise     func(os.Signal)
+}
+
+// hooks resolves e's test hooks, defaulting each to the real thing.
+func (e Env) hooks() shimHooks {
+	h := shimHooks{exec: e.exec, ask: e.ask, release: e.release, ancestors: e.ancestors, now: e.now, wait: e.wait, raise: e.raise}
+	if h.exec == nil {
+		h.exec = syscall.Exec
+	}
+	if h.ask == nil {
+		h.ask = askDaemon
+	}
+	if h.release == nil {
+		h.release = releaseLease
+	}
+	if h.ancestors == nil {
+		h.ancestors = shim.Ancestors
+	}
+	if h.now == nil {
+		h.now = time.Now
+	}
+	if h.raise == nil {
+		h.raise = reraise
+	}
+	return h
 }
 
 // gate asks the daemon whether call c may start (R5, #28). Calls that start
@@ -45,7 +80,7 @@ type gated struct {
 // about; nor, failing open (R7), is anything when the config or the daemon
 // cannot answer.
 func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
-	if c.Kind == "" || getenv(shimCheckedVar) == strconv.Itoa(os.Getpid()) ||
+	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() ||
 		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
 		return gated{proceed: true}
 	}
@@ -54,22 +89,13 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		fmt.Fprintf(e.Stderr, "headroom: %v; `%s` not gated\n", err, c.Command)
 		return gated{proceed: true}
 	}
-	ask, now, sleep := e.ask, e.now, e.sleep
-	if ask == nil {
-		ask = askDaemon
-	}
-	if now == nil {
-		now = time.Now
-	}
-	if sleep == nil {
-		sleep = sleepUnlessSignalled
-	}
-	req := callerRequest(getenv, e.ancestors)
+	h := e.hooks()
+	req := callerRequest(getenv, h.ancestors)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
 	for {
-		d, err := ask(cfg, req)
+		d, err := h.ask(cfg, req)
 		switch {
 		case errors.Is(err, errCannotCheck):
 			fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install. `%s` not gated\n", err, c.Command)
@@ -93,16 +119,26 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 			fmt.Fprintln(e.Stderr, denyHint(d))
 			return gated{code: exitDenied}
 		case deadline.IsZero():
-			deadline = now().Add(cfg.Policy.WaitTimeout.Duration)
+			deadline = h.now().Add(cfg.Policy.WaitTimeout.Duration)
+			if h.wait == nil {
+				// One registration for the whole wait, asks included.
+				w := newSignalWait()
+				defer w.stop()
+				h.wait = w.sleep
+			}
 			fmt.Fprintf(e.Stderr, "headroom: waiting for room for `%s`%s, up to %s (BUDGET_WAIT)\n",
 				c.Command, why(d), cfg.Policy.WaitTimeout.Duration)
-		case !now().Before(deadline):
+		case !h.now().Before(deadline):
 			fmt.Fprintln(e.Stderr, d.Message)
 			fmt.Fprintf(e.Stderr, "headroom: gave up after waiting %s (policy.wait_timeout)\n", cfg.Policy.WaitTimeout.Duration)
 			return gated{code: exitDenied}
 		}
-		if code := sleep(waitPoll); code != 0 {
-			return gated{code: code}
+		if sig := h.wait(waitPoll); sig != nil {
+			code := 128
+			if n, ok := sig.(syscall.Signal); ok {
+				code += int(n)
+			}
+			return gated{code: code, signal: sig}
 		}
 	}
 }
@@ -117,9 +153,6 @@ func callerRequest(getenv func(string) string, ancestors func() []int) protocol.
 	}
 	if r.Worktree != "" {
 		return r
-	}
-	if ancestors == nil {
-		ancestors = shim.Ancestors
 	}
 	r.Cwd, _ = os.Getwd()
 	if resolved, err := filepath.EvalSymlinks(r.Cwd); err == nil && resolved != r.Cwd {
@@ -152,28 +185,41 @@ func releaseLease(cfg config.Config, id string) error {
 	return err
 }
 
-// sleepUnlessSignalled sleeps for d. A SIGINT or SIGTERM first ends it with
-// the shell's exit code for that signal (130, 143); one the shim was started
-// ignoring (a background job's SIGINT) stays ignored.
-func sleepUnlessSignalled(d time.Duration) int {
-	var sigs []os.Signal
+// signalWait sleeps between asks unless SIGINT or SIGTERM comes. A signal
+// the shim was started ignoring (a background job's SIGINT) stays ignored.
+type signalWait struct{ ch chan os.Signal }
+
+func newSignalWait() *signalWait {
+	w := &signalWait{ch: make(chan os.Signal, 1)}
 	for _, s := range []os.Signal{syscall.SIGINT, syscall.SIGTERM} {
 		if !signal.Ignored(s) {
-			sigs = append(sigs, s)
+			signal.Notify(w.ch, s)
 		}
 	}
-	ch := make(chan os.Signal, 1)
-	if len(sigs) > 0 {
-		signal.Notify(ch, sigs...)
-		defer signal.Stop(ch)
-	}
+	return w
+}
+
+func (w *signalWait) stop() { signal.Stop(w.ch) }
+
+// sleep waits d; it returns the signal that cut it short, or nil.
+func (w *signalWait) sleep(d time.Duration) os.Signal {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
-		return 0
-	case s := <-ch:
-		return 128 + int(s.(syscall.Signal))
+		return nil
+	case s := <-w.ch:
+		return s
+	}
+}
+
+// reraise dies of sig with its default action, so the parent sees the
+// signal and not just an exit code.
+func reraise(sig os.Signal) {
+	if n, ok := sig.(syscall.Signal); ok {
+		signal.Reset(n)
+		_ = syscall.Kill(os.Getpid(), n)
+		time.Sleep(100 * time.Millisecond) // delivery is asynchronous
 	}
 }
 

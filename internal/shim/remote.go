@@ -17,6 +17,9 @@ func Remote(name, endpoint string, getenv func(string) string) bool {
 	if endpoint == "" {
 		endpoint = getenv(map[string]string{"docker": "DOCKER_HOST", "podman": "CONTAINER_HOST"}[name])
 	}
+	if endpoint != "" && !strings.Contains(endpoint, "://") && strings.Contains(endpoint, ":") {
+		endpoint = "tcp://" + endpoint // docker reads a bare host:port as TCP
+	}
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "tcp" && u.Scheme != "ssh") || u.Hostname() == "" {
 		return false

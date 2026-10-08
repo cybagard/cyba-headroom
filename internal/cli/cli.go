@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -71,7 +70,8 @@ type Env struct {
 	release    func(config.Config, string) error                                      // releaseLease
 	ancestors  func() []int                                                           // shim.Ancestors
 	now        func() time.Time                                                       // time.Now
-	sleep      func(time.Duration) int                                                // sleepUnlessSignalled
+	wait       func(time.Duration) os.Signal                                          // signalWait.sleep
+	raise      func(os.Signal)                                                        // reraise
 	fallbacks  map[string][]string                                                    // shim.Fallbacks
 	watchEvery time.Duration                                                          // poll interval (1s)
 	suspend    chan os.Signal                                                         // delivers Ctrl-Z (SIGTSTP)
@@ -329,33 +329,31 @@ func runShim(e Env, name string) int {
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
+	h := e.hooks()
 	g := gate(e, name, c, getenv)
+	if g.signal != nil {
+		// Die of it, as the real binary would have, so a shell loop
+		// around the call stops too.
+		h.raise(g.signal)
+	}
 	if !g.proceed {
 		return g.code
 	}
 	if g.checked {
-		env = setEnv(env, shimCheckedVar, strconv.Itoa(os.Getpid()))
+		env = setEnv(env, shimCheckedVar, shim.Self())
 	}
 	env = setEnv(env, shimSelvesVar, strings.Join(selves, string(filepath.ListSeparator)))
 	// argv[0] is the bare name, as the shell passes a command found on PATH:
 	// the shim's own path would point the real binary back at the shim dir.
 	argv := append([]string{name}, e.Args[1:]...)
-	exec := e.exec
-	if exec == nil {
-		exec = syscall.Exec
-	}
 	// On success this never returns: the real binary takes over the
 	// process, with its PID, terminal, signals and exit code.
-	if err := exec(target, argv, env); err != nil {
+	if err := h.exec(target, argv, env); err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", target, err)
 		if g.lease != "" {
 			// Nothing started: hand the lease back rather than hold the
 			// budget until it times out.
-			release := e.release
-			if release == nil {
-				release = releaseLease
-			}
-			_ = release(g.cfg, g.lease)
+			_ = h.release(g.cfg, g.lease)
 		}
 		if errors.Is(err, syscall.ENOENT) {
 			return 127 // gone since it was found (an upgrade): not found
@@ -431,7 +429,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 // decides with the lease book.
 func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
-		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, Ancestors: r.Ancestors})
+		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d

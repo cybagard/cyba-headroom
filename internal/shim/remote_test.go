@@ -32,6 +32,9 @@ func TestRemote(t *testing.T) {
 		{"podman", "", "ssh://dev@build-box", "", false},
 		{"docker", "unix:///x.sock", "ssh://dev@build-box", "", false}, // the flag wins
 		{"docker", "ssh://", "", "", false},
+		{"docker", "10.0.0.5:2375", "", "", true}, // docker reads host:port as tcp://
+		{"docker", "", "build-box:2375", "", true},
+		{"docker", "localhost:2375", "", "", false},
 		{"docker", "::bad", "", "", false},
 	} {
 		env := map[string]string{"DOCKER_HOST": c.dockerHost, "CONTAINER_HOST": c.containerHost}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cybagard/cyba-headroom/internal/config"
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
 // exitDenied is the shim's exit code for a denied call: 75, EX_TEMPFAIL (R5).
@@ -16,8 +17,7 @@ const exitDenied = 75
 // headroom check [--worktree ID] [--cost 2G] [--kind container] -- cmd...
 // It exits 0 on allow and 75 on deny.
 func runCheck(e Env) int {
-	req := callerRequest(e.Getenv, e.ancestors)
-	req.Kind = "container"
+	req := protocol.CheckRequest{Kind: "container"}
 	a := e.Args[2:]
 	for len(a) > 0 && a[0] != "--" {
 		if len(a) < 2 {
@@ -47,6 +47,11 @@ func runCheck(e Env) int {
 		return checkUsage(e) // no -- or nothing after it
 	}
 	req.Command = strings.Join(a[1:], " ")
+	if req.Worktree == "" {
+		// Identify the caller as the shim does.
+		who := callerRequest(e.Getenv, e.hooks().ancestors)
+		req.Worktree, req.Cwd, req.RealCwd, req.Ancestors = who.Worktree, who.Cwd, who.RealCwd, who.Ancestors
+	}
 
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {

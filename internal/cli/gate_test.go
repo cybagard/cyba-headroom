@@ -63,6 +63,10 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 	if d.Worktree != "repo::/Users/dev/src/project-a" || d.IdentifiedBy != protocol.IdentifiedByProcess {
 		t.Fatalf("by ancestry: %+v", d)
 	}
+	d = check(&protocol.CheckRequest{Kind: "container", Command: "docker run s", Cwd: "/Users/dev/link/sub", RealCwd: "/Users/dev/src/project-a/sub"}, s)
+	if d.Worktree != "repo::/Users/dev/src/project-a" || d.IdentifiedBy != protocol.IdentifiedByCwd {
+		t.Fatalf("by resolved cwd: %+v", d)
+	}
 	d = check(&protocol.CheckRequest{Kind: "container", Command: "docker run c", Cwd: "/Users/dev"}, s)
 	if !d.Allow || d.Worktree != "" || d.LeaseID != "" {
 		t.Fatalf("manual: %+v", d)

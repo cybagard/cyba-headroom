@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +18,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/shim"
 )
 
 // shimRig runs the shim against a fake daemon (ask) and records what it
@@ -37,6 +37,7 @@ type shimRig struct {
 	stop     bool          // the wait is interrupted
 	execErr  error         // what exec returns
 	released []string
+	raised   os.Signal
 }
 
 func newShimRig(t *testing.T) *shimRig {
@@ -76,14 +77,15 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 		},
 		ancestors: func() []int { return []int{4321, 1} },
 		now:       func() time.Time { return r.now },
-		sleep: func(time.Duration) int {
+		wait: func(time.Duration) os.Signal {
 			r.sleeps++
 			r.now = r.now.Add(r.sleepFor)
 			if r.stop {
-				return 130
+				return syscall.SIGINT
 			}
-			return 0
+			return nil
 		},
+		raise: func(s os.Signal) { r.raised = s },
 	})
 	return code, errb.String()
 }
@@ -108,7 +110,7 @@ func TestShimGateAllows(t *testing.T) {
 	}
 	// The marker is this process's PID, which the real binary keeps: only
 	// a binary it execs in its place skips the check, not its children.
-	if !slices.Contains(r.execEnv, "HEADROOM_SHIM_CHECKED="+strconv.Itoa(os.Getpid())) {
+	if !slices.Contains(r.execEnv, "HEADROOM_SHIM_CHECKED="+shim.Self()) {
 		t.Fatalf("child env lacks the checked marker: %q", r.execEnv)
 	}
 }
@@ -182,7 +184,7 @@ func TestShimGateDoesNotAsk(t *testing.T) {
 		env  []string
 	}{
 		"a call that starts nothing": {[]string{"docker", "ps"}, nil},
-		"already checked":            {[]string{"docker", "run", "alpine"}, []string{"HEADROOM_SHIM_CHECKED=" + strconv.Itoa(os.Getpid())}},
+		"already checked":            {[]string{"docker", "run", "alpine"}, []string{"HEADROOM_SHIM_CHECKED=" + shim.Self()}},
 		"a remote engine":            {[]string{"docker", "run", "alpine"}, []string{"DOCKER_HOST=ssh://dev@build-box"}},
 		"a remote engine by flag":    {[]string{"docker", "-H", "tcp://10.0.0.5:2376", "run", "alpine"}, nil},
 	} {
@@ -290,8 +292,9 @@ func TestShimGateWaitInterrupted(t *testing.T) {
 	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
 		return &protocol.Decision{Retry: true, Message: "headroom: not starting it"}, nil
 	}
-	if code, _ := r.run("docker", "run", "alpine"); code != 130 || r.execed != "" {
-		t.Fatalf("exit %d, exec %q", code, r.execed)
+	// It dies of the signal, so a shell loop around it stops too.
+	if code, _ := r.run("docker", "run", "alpine"); code != 130 || r.execed != "" || r.raised != syscall.SIGINT {
+		t.Fatalf("exit %d, exec %q, raised %v", code, r.execed, r.raised)
 	}
 }
 

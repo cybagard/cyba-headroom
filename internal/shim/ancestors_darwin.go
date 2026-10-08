@@ -3,7 +3,9 @@
 package shim
 
 import (
+	"fmt"
 	"os"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -28,4 +30,15 @@ func Ancestors() []int {
 		pid = int(k.Eproc.Ppid)
 	}
 	return out
+}
+
+// Self names this process for HEADROOM_SHIM_CHECKED: its PID and start
+// time, which an exec keeps and a reused PID does not.
+func Self() string {
+	pid := os.Getpid()
+	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return strconv.Itoa(pid)
+	}
+	return fmt.Sprintf("%d@%d.%06d", pid, k.Proc.P_starttime.Sec, k.Proc.P_starttime.Usec)
 }

@@ -762,7 +762,13 @@ func TestComposeProjectOfStdin(t *testing.T) {
 // names already runs.
 func TestComposeIdleIsComposesOwnPlan(t *testing.T) {
 	for out, want := range map[string]bool{
-		" Container app-db-1 Running \n Container app-web-1 Running \n":                          true,
+		" Container app-db-1 Running \n Container app-web-1 Running \n": true,
+		// depends_on service_healthy, or --wait: waiting starts nothing.
+		" Container app-db-1 Running \n Container app-web-1 Running \n Container app-db-1 Waiting \n Container app-db-1 Healthy \n": true,
+		// Older Compose v2 prefixes its plain lines; a tty one colours them.
+		"DRY-RUN MODE -  Container app-db-1 Running \n":                                          true,
+		"\x1b[32m\u2714\x1b[0m Container app-db-1 \x1b[32mRunning\x1b[0m\n":                      true,
+		"DRY-RUN MODE -  Container app-db-1 Starting \n":                                         false,
 		" Container app-db-1 Running \n Container app-web-1 Recreate \n":                         false,
 		" Network app_default Created \n Container app-db-1 Creating \n":                         false,
 		" Container app-db-1 Restarting \n Container app-db-1 Started \n":                        false,
@@ -785,5 +791,27 @@ func TestComposeIdleIsComposesOwnPlan(t *testing.T) {
 	}
 	if composeIdle("/d", []string{"compose", "up"}, failing) {
 		t.Fatal("a failed dry run says nothing")
+	}
+}
+
+// BUDGET_WAIT: each ask asks Compose again. A stack that stopped during the
+// wait is no idle up.
+func TestAWaitingComposeUpAsksComposeEachTime(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "BUDGET_WAIT=1")
+	plans := []string{" Container x-a-1 Running \n", " Container x-a-1 Starting \n"}
+	r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { p := plans[0]; plans = plans[1:]; return []byte(p), nil }
+	n := 0
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		if n++; n < 2 {
+			return &protocol.Decision{Retry: true, Message: "headroom: not starting it: memory pressure",
+				Reasons: []protocol.Reason{{Code: "pressure", Text: "memory pressure", Retry: true}}}, nil
+		}
+		return allow(protocol.CheckRequest{})
+	}
+	r.run("docker", "compose", "up", "-d")
+	if len(r.asked) != 2 || !r.asked[0].Idle || r.asked[1].Idle {
+		t.Fatalf("asked %+v: want idle, then not", r.asked)
 	}
 }

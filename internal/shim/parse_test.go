@@ -346,6 +346,11 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "run", "web"}, nil},
 		{[]string{"compose", "-f", "-", "up"}, nil},
 		{[]string{"run", "alpine"}, nil},
+		// A call that sets --dry-run itself is not dry-run: the last value
+		// wins, so --dry-run=false after ours would make it a real up.
+		{[]string{"compose", "--dry-run=false", "up", "-d"}, nil},
+		{[]string{"compose", "up", "--dry-run=0", "-d"}, nil},
+		{[]string{"compose", "--dry-run", "up"}, nil},
 	} {
 		got, ok := DryRun(tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {

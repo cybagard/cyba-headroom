@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -134,9 +135,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		} else {
 			req.Target = composeProject(bin, c, h.composeAsk)
 		}
-		if c.Op == "up" || c.Op == "restart" {
-			req.Idle = composeIdle(bin, e.Args[1:], h.composeDry)
-		}
+	}
+	var idle func() bool
+	if c.Kind == "compose" && name == "docker" && (c.Op == "up" || c.Op == "restart") {
+		idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -159,6 +161,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
 	for {
+		if idle != nil {
+			// Asked afresh each time: a wait may outlast what it said.
+			req.Idle = idle()
+		}
 		d, err := h.ask(cfg, req)
 		if h.wait != nil {
 			// A Ctrl-C during the ask cancels the call, even one now allowed.
@@ -273,6 +279,9 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	return cfg.Name
 }
 
+// ansi matches a terminal's colour codes.
+var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 // composeIdle reports whether Compose's own dry run of the call (args,
 // with --dry-run added) says it creates, recreates and starts nothing:
 // compose up -d of a stack that runs as configured. Asking Compose, rather
@@ -289,17 +298,22 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 		return false
 	}
 	running := false
-	for line := range strings.Lines(string(out)) {
+	for line := range strings.Lines(ansi.ReplaceAllString(string(out), "")) {
+		// " Container app-db-1 Running", also after an older Compose's
+		// "DRY-RUN MODE -" or a tty's tick.
 		f := strings.Fields(line)
-		if len(f) < 3 || f[0] != "Container" {
+		i := slices.Index(f, "Container")
+		if i < 0 || len(f) < i+3 {
 			continue
 		}
-		switch f[len(f)-1] {
-		case "Running":
+		switch status := f[len(f)-1]; {
+		case status == "Running":
 			running = true
-		default:
-			return false // Creating, Recreate, Starting, Restarting, ...
+		case strings.HasPrefix(status, "Creat"), strings.HasPrefix(status, "Recreat"),
+			strings.HasPrefix(status, "Start"), strings.HasPrefix(status, "Restart"):
+			return false
 		}
+		// Waiting, Healthy: a healthcheck it waits for starts nothing.
 	}
 	return running
 }
@@ -363,7 +377,8 @@ func askComposeDry(bin string, args, env []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env, cmd.WaitDelay = env, 500*time.Millisecond
+	// Its plan as plain lines, whatever the call's environment asks for.
+	cmd.Env, cmd.WaitDelay = append(slices.Clone(env), "COMPOSE_PROGRESS=plain", "COMPOSE_ANSI=never"), 500*time.Millisecond
 	return cmd.CombinedOutput()
 }
 

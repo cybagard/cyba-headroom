@@ -292,7 +292,7 @@ func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]st
 }
 
 // EventsPath streams container starts, stops and exits (#67).
-var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","die"],"type":["container"]}`}}.Encode()
+var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die"],"type":["container"]}`}}.Encode()
 
 // Events streams Docker's container start and die events to fn, with the
 // container's ID and attributes (its labels, and name), until ctx ends or
@@ -328,7 +328,7 @@ func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs ma
 		if err := dec.Decode(&ev); err != nil {
 			return fmt.Errorf("docker: events: %w", err)
 		}
-		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "die") {
+		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die") {
 			fn(ev.Action, ev.Actor.ID, ev.Actor.Attributes)
 		}
 	}

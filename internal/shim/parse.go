@@ -166,12 +166,17 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 
 // DryRun returns a docker compose call's args with --dry-run added as a
 // compose option, so Compose says what the call would do and does none of
-// it. ok is false for any other call, and for a compose run (its one-off
-// container is always new) or one whose file is on stdin (the call needs
-// it).
+// it. ok is false for any other call, for a compose run (its one-off
+// container is always new), one whose file is on stdin (the call needs it)
+// and one that sets --dry-run itself.
 func DryRun(args []string) (out []string, ok bool) {
 	c, at := parseEngine("docker", args)
 	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
+		return nil, false
+	}
+	if slices.ContainsFunc(args, func(a string) bool { return a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") }) {
+		// It sets --dry-run itself, and the last value wins: with
+		// --dry-run=false after ours, the dry run would be the real call.
 		return nil, false
 	}
 	out = append(out, args[:at]...)

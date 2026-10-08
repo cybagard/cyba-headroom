@@ -711,8 +711,8 @@ func (e *entry) boundIDs() int {
 type seen struct {
 	at   time.Time
 	gone bool
-	// stopped: by docker stop or compose stop (a stop event), not a
-	// restart policy's restart or a crash.
+	// stopped: by docker stop or kill, or compose stop or kill (a stop or
+	// kill event), not a restart policy's restart or a crash.
 	stopped bool
 }
 
@@ -740,7 +740,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	r := containerResource(id, name, labels)
 	now := b.now()
 	switch action {
-	case "stop":
+	case "stop", "kill":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: true}
 	case "start":
 		stopped := b.seen[r.key].stopped

@@ -236,3 +236,94 @@ func TestAnImageMismatchStillBinds(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+func TestAnImageNamesOnlyInItsOwnWorktree(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(named("w1", "", "postgres"), snap(), cfg) // w1's, still pulling
+	c.t = c.t.Add(time.Second)
+	// An SDK in w2 starts postgres through the socket.
+	b.Observe(withNamed(snap(), "sdk", "sdk-pg", "postgres", "w2"))
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:sdk" {
+		t.Fatalf("ungated = %v, want w2's SDK container", got)
+	}
+	// w1's own container then binds w1's lease.
+	b.Observe(withNamed(withNamed(snap(), "sdk", "sdk-pg", "postgres", "w2"), "own", "eager_turing", "postgres", "w1"))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAManualLeaseTakesOnlyWhatItNames(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	// docker run --rm hello-world by hand: gone before any tick sees it.
+	b.Check(named("", "", "hello-world"), snap(), cfg)
+	// Testcontainers in w1, through the socket, within the lease timeout.
+	b.Observe(withNamed(snap(), "tc", "tc-redis", "redis", "w1"))
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:tc" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAContainerMissingForATickIsNotUngated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(withNamed(snap(), "db", "db", "postgres", "w1"))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // its stats failed, or it crashed and restarts
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(withNamed(snap(), "db", "db", "postgres", "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestComposeServicesOnLaterTicksAreGated(t *testing.T) {
+	for name, wt := range map[string]string{"manual": "", "worktree": "w1"} {
+		t.Run(name, func(t *testing.T) {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			b.Check(policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib}, snap(), cfg)
+			app := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
+				return addContainer(s, protocol.Container{ID: id, Name: "app-" + id, MemoryBytes: 2 * gib,
+					Labels: map[string]string{"com.docker.compose.project": "app"}}, wt)
+			}
+			b.Observe(app(snap(), "db")) // uses the whole cost at once
+			c.t = c.t.Add(30 * time.Second)
+			b.Observe(app(app(snap(), "db"), "web")) // depends_on db: later
+			c.t = c.t.Add(3 * time.Minute)           // past the lease timeout
+			b.Observe(app(app(app(snap(), "db"), "web"), "worker"))
+			if got := ungatedKeys(b); len(got) != 0 {
+				t.Fatalf("ungated = %v", got)
+			}
+		})
+	}
+}
+
+func TestAnImageIsNotAContainerID(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(named("w1", "", "cafe"), snap(), cfg) // docker run cafe
+	b.Observe(withNamed(snap(), "cafe1234", "x", "redis", "w2"))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v: an image matched a container ID", got)
+	}
+}
+
+func TestManualLeasesAreNotListed(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(named("", "", "alpine"), snap(), cfg)
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v", l)
+	}
+}
+
+func TestAnUngatedContainerFollowsItsAttribution(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Observe(withNamed(snap(), "x", "x", "alpine", "w1"))
+	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
+	if u := b.Ungated(); len(u) != 1 || u[0].Worktree != "" {
+		t.Fatalf("ungated = %+v", u)
+	}
+}

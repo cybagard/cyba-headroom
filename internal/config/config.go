@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/cybagard/cyba-headroom/internal/budget"
+	"github.com/cybagard/cyba-headroom/internal/policy"
 )
 
 // FileName is the config file inside the config directory.
@@ -96,6 +97,34 @@ type Policy struct {
 	PerWorktreeCapGB float64  `toml:"per_worktree_cap_gb"`
 	LeaseTimeout     Duration `toml:"lease_timeout"`
 	DaemonTimeout    Duration `toml:"daemon_timeout"`
+	// PressureGuard denies requests at this memory pressure level, whatever
+	// headroom says: off, warn or critical (#24).
+	PressureGuard string `toml:"pressure_guard"`
+	// PressureGuardRising also denies at warn while the trend is rising.
+	PressureGuardRising bool `toml:"pressure_guard_rising"`
+	// DefaultContainerGB is the cost of a container request that gives none,
+	// until learned estimates (#36).
+	DefaultContainerGB float64 `toml:"default_container_gb"`
+	// DefaultTartGB is the cost of a Tart VM request that gives none.
+	DefaultTartGB float64 `toml:"default_tart_gb"`
+	// IdleGrace is how long all of a worktree's agents must have been out of
+	// the working state before it counts as an idle holder; Orca's state
+	// lags the agent's tool shells.
+	IdleGrace Duration `toml:"idle_grace"`
+}
+
+// Config converts the settings to the policy engine's.
+func (p Policy) Config() policy.Config {
+	return policy.Config{
+		MinHeadroomBytes:      GiB(p.MinHeadroomGB),
+		PerWorktreeCapBytes:   GiB(p.PerWorktreeCapGB),
+		PressureGuard:         p.PressureGuard,
+		GuardRising:           p.PressureGuardRising,
+		DefaultContainerBytes: GiB(p.DefaultContainerGB),
+		DefaultTartBytes:      GiB(p.DefaultTartGB),
+		IdleGrace:             p.IdleGrace.Duration,
+		Now:                   time.Now,
+	}
 }
 
 // Budget holds inputs to the budget model (R2). GB means GiB, as macOS
@@ -159,6 +188,12 @@ func Defaults(dir string) Config {
 		Policy: Policy{
 			LeaseTimeout:  Duration{2 * time.Minute},
 			DaemonTimeout: Duration{500 * time.Millisecond},
+			// Calibrated from the baseline run (#63).
+			PressureGuard:       "critical",
+			PressureGuardRising: true,
+			DefaultContainerGB:  1,
+			DefaultTartGB:       4, // tart's default VM memory
+			IdleGrace:           Duration{2 * time.Minute},
 		},
 		// Overheads measured in spike #9 and #16; #23 refines them.
 		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
@@ -264,6 +299,20 @@ func (c Config) Validate() error {
 	}
 	if !(c.Policy.PerWorktreeCapGB >= 0) {
 		errs = append(errs, errors.New("policy.per_worktree_cap_gb must be >= 0"))
+	}
+	switch c.Policy.PressureGuard {
+	case "off", "warn", "critical":
+	default:
+		errs = append(errs, fmt.Errorf("policy.pressure_guard must be off, warn or critical, not %q", c.Policy.PressureGuard))
+	}
+	if g := c.Policy.DefaultContainerGB; !(g > 0) || g > maxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.default_container_gb must be > 0 and <= %d", maxBudgetGB))
+	}
+	if g := c.Policy.DefaultTartGB; !(g > 0) || g > maxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.default_tart_gb must be > 0 and <= %d", maxBudgetGB))
+	}
+	if c.Policy.IdleGrace.Duration < 0 {
+		errs = append(errs, errors.New("policy.idle_grace must be >= 0"))
 	}
 	if c.Policy.LeaseTimeout.Duration <= 0 {
 		errs = append(errs, errors.New("policy.lease_timeout must be > 0"))

@@ -146,6 +146,12 @@ func (d *Daemon) answer(c net.Conn) protocol.Reply {
 		return protocol.Reply{Error: fmt.Sprintf("unsupported protocol version %d, daemon speaks %d", req.V, protocol.Version)}
 	}
 	switch req.Op {
+	case protocol.OpCheck:
+		if d.check == nil || req.Check == nil {
+			return protocol.Reply{Error: "check: not supported by this daemon"}
+		}
+		dec := d.check(req.Check, d.Snapshot())
+		return protocol.Reply{OK: true, Decision: &dec}
 	case protocol.OpPing:
 		return protocol.Reply{OK: true, PID: os.Getpid()}
 	case protocol.OpStatus:

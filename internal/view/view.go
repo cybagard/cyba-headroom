@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
 )
 
 // Options shape one rendering.
@@ -340,9 +341,9 @@ func (r *renderer) paint(color, s string) string {
 }
 
 // num formats bytes as GB (GiB, as macOS reports memory) to one decimal.
-func num(b uint64) string { return fmt.Sprintf("%.1f", float64(b)/(1<<30)) }
+func num(b uint64) string { return units.GB(b) }
 
-func signed(b int64) string { return fmt.Sprintf("%.1f", float64(b)/(1<<30)) }
+func signed(b int64) string { return units.SignedGB(b) }
 
 // cut shortens s to width visible columns. ANSI escapes take no columns and
 // are kept whole; a cut line ends with a reset so colour cannot leak.

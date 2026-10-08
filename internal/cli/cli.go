@@ -24,6 +24,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/logfile"
+	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/samples"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
@@ -107,6 +108,8 @@ func Run(e Env) int {
 		return runLogs(e)
 	case "suggest":
 		return runSuggest(e)
+	case "check":
+		return runCheck(e)
 	case "run":
 		return notYet(e, "run", 31)
 	case "doctor":
@@ -204,6 +207,10 @@ func runDaemon(e Env) int {
 		at := attribution.Attribute(s)
 		s.Attribution = &at
 	})
+	pol := cfg.Policy.Config()
+	d.SetCheck(func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
+		return policy.Decide(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
+	})
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
@@ -280,6 +287,8 @@ func usage(w io.Writer) {
   headroom daemon [--log FILE]
                       run the collector daemon; --log writes its log to FILE,
                       rotated at 5 MB
+  headroom check [--worktree ID] [--cost 2G] [--kind container|compose|tart] -- cmd...
+                      ask the policy whether cmd may start; exit 0 allow, 75 deny
   headroom status [--json]
                       print the daemon's raw snapshot as JSON
   headroom run -- <agent> [args]

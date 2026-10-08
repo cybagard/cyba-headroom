@@ -31,11 +31,17 @@ func sockPath(t *testing.T) string {
 }
 
 // serve starts a daemon with no sources on a fresh socket and stops it at cleanup.
-func serve(t *testing.T, path string) *daemon.Daemon {
+func serve(t *testing.T, path string) *daemon.Daemon { return serveWith(t, path, nil) }
+
+// serveWith is serve with setup run before the daemon serves.
+func serveWith(t *testing.T, path string, setup func(*daemon.Daemon)) *daemon.Daemon {
 	t.Helper()
 	d, err := daemon.New(nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if setup != nil {
+		setup(d)
 	}
 	ln, err := daemon.Listen(path)
 	if err != nil {
@@ -273,5 +279,36 @@ func TestPingReportsThePID(t *testing.T) {
 	pid, err := client.Ping(context.Background(), path, time.Second)
 	if err != nil || pid != os.Getpid() {
 		t.Fatalf("pid = %d, %v; want %d", pid, err, os.Getpid())
+	}
+}
+
+func TestCheckRoundTrip(t *testing.T) {
+	path := sockPath(t)
+	var got *protocol.CheckRequest
+	serveWith(t, path, func(d *daemon.Daemon) {
+		d.SetCheck(func(r *protocol.CheckRequest, _ *protocol.Snapshot) protocol.Decision {
+			got = r
+			return protocol.Decision{Allow: false, Retry: true, Message: "no room", Reasons: []protocol.Reason{{Code: "headroom", Retry: true}}}
+		})
+	})
+	rep, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck,
+		Check: &protocol.CheckRequest{Worktree: "w1", Kind: "container", Command: "docker run x", CostBytes: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Worktree != "w1" || got.CostBytes != 1<<30 {
+		t.Fatalf("check saw %+v", got)
+	}
+	if rep.Decision == nil || rep.Decision.Allow || rep.Decision.Message != "no room" || !rep.Decision.Retry {
+		t.Fatalf("reply %+v", rep.Decision)
+	}
+}
+
+func TestCheckWithoutAChecker(t *testing.T) {
+	path := sockPath(t)
+	serve(t, path)
+	_, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck, Check: &protocol.CheckRequest{}})
+	if err == nil || !strings.Contains(err.Error(), "check") {
+		t.Fatalf("err = %v", err)
 	}
 }

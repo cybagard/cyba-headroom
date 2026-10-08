@@ -137,6 +137,8 @@ func TestLoadErrors(t *testing.T) {
 		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
 		{"NaN baseline", "[budget]\nhost_baseline_gb = nan\n", "budget.host_baseline_gb must be a number"},
 		{"NaN headroom", "[policy]\nmin_headroom_gb = nan\n", "policy.min_headroom_gb must be >= 0"},
+		{"bad pressure guard", "[policy]\npressure_guard = \"red\"\n", "policy.pressure_guard must be off, warn or critical"},
+		{"zero container cost", "[policy]\ndefault_container_gb = 0\n", "policy.default_container_gb must be > 0"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {
@@ -208,5 +210,23 @@ func TestSamplesSettings(t *testing.T) {
 	write(t, dir, "[samples]\nenabled = false\nretention = \"0s\"\n")
 	if _, err := LoadDir(dir); err != nil {
 		t.Fatalf("disabled samples with short retention: %v", err)
+	}
+}
+
+func TestPolicyConfig(t *testing.T) {
+	d := Defaults("/x").Policy
+	if d.PressureGuard != "critical" || !d.PressureGuardRising || d.DefaultContainerGB != 1 {
+		t.Fatalf("defaults = %+v", d)
+	}
+	p := Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5}.Config()
+	if p.MinHeadroomBytes != 6<<30 || p.PerWorktreeCapBytes != 12<<30 || p.PressureGuard != "warn" ||
+		p.GuardRising || p.DefaultContainerBytes != 1<<29 {
+		t.Fatalf("policy config = %+v", p)
+	}
+	dir := shortTempDir(t)
+	write(t, dir, "[policy]\npressure_guard_rising = false\npressure_guard = \"off\"\n")
+	cfg, err := LoadDir(dir)
+	if err != nil || cfg.Policy.PressureGuardRising || cfg.Policy.PressureGuard != "off" {
+		t.Fatalf("loaded %+v, %v", cfg.Policy, err)
 	}
 }

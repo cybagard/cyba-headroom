@@ -9,10 +9,13 @@ import "time"
 // Version is the protocol version every request and reply carries.
 const Version = 1
 
-// Ops understood by the daemon. check and lease arrive with #24 and #25.
+// Ops understood by the daemon. lease arrives with #25.
 const (
 	OpPing   = "ping"
 	OpStatus = "status"
+	// OpCheck asks the policy (#24) whether a resource-creating call may go
+	// ahead.
+	OpCheck = "check"
 )
 
 // MaxLine bounds a single request or reply line.
@@ -22,6 +25,46 @@ const MaxLine = 1 << 20
 type Request struct {
 	V  int    `json:"v"`
 	Op string `json:"op"`
+	// Check is the call to decide, for OpCheck.
+	Check *CheckRequest `json:"check,omitempty"`
+}
+
+// CheckRequest describes a resource-creating call (#24).
+type CheckRequest struct {
+	// Worktree is the Orca worktree ID; empty for a manual call.
+	Worktree string `json:"worktree,omitempty"`
+	// Kind is container, compose or tart.
+	Kind    string `json:"kind"`
+	Command string `json:"command"`
+	// CostBytes is the caller's estimate; 0 means the policy's default.
+	CostBytes uint64 `json:"cost_bytes,omitempty"`
+}
+
+// Decision is the policy's answer to a CheckRequest.
+type Decision struct {
+	Allow bool `json:"allow"`
+	// Retry is true when waiting may let the call through.
+	Retry   bool     `json:"retry,omitempty"`
+	Reasons []Reason `json:"reasons,omitempty"`
+	// Message explains the decision to an agent.
+	Message       string `json:"message"`
+	HeadroomBytes *int64 `json:"headroom_bytes,omitempty"`
+	CostBytes     uint64 `json:"cost_bytes"`
+	// Holding is the worktree's own containers and VMs.
+	Holding []Held `json:"holding,omitempty"`
+}
+
+// Reason is one policy rule's verdict.
+type Reason struct {
+	Code  string `json:"code"`
+	Text  string `json:"text"`
+	Retry bool   `json:"retry,omitempty"`
+}
+
+// Held is one of a worktree's containers or VMs.
+type Held struct {
+	Name  string `json:"name"`
+	Bytes uint64 `json:"bytes"`
 }
 
 // Reply is the daemon's answer to one Request.
@@ -30,6 +73,8 @@ type Reply struct {
 	OK       bool      `json:"ok"`
 	Error    string    `json:"error,omitempty"`
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	// Decision answers OpCheck.
+	Decision *Decision `json:"decision,omitempty"`
 	// PID is the daemon's process ID, on ping: install uses it to tell the
 	// launchd daemon from one started in a terminal.
 	PID int `json:"pid,omitempty"`

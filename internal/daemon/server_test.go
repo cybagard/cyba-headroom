@@ -275,3 +275,33 @@ func TestPingReportsThePID(t *testing.T) {
 		t.Fatalf("pid = %d, %v; want %d", pid, err, os.Getpid())
 	}
 }
+
+func TestCheckRoundTrip(t *testing.T) {
+	path := sockPath(t)
+	d := serve(t, path)
+	var got *protocol.CheckRequest
+	d.SetCheck(func(r *protocol.CheckRequest, _ *protocol.Snapshot) protocol.Decision {
+		got = r
+		return protocol.Decision{Allow: false, Retry: true, Message: "no room", Reasons: []protocol.Reason{{Code: "headroom", Retry: true}}}
+	})
+	rep, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck,
+		Check: &protocol.CheckRequest{Worktree: "w1", Kind: "container", Command: "docker run x", CostBytes: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Worktree != "w1" || got.CostBytes != 1<<30 {
+		t.Fatalf("check saw %+v", got)
+	}
+	if rep.Decision == nil || rep.Decision.Allow || rep.Decision.Message != "no room" || !rep.Decision.Retry {
+		t.Fatalf("reply %+v", rep.Decision)
+	}
+}
+
+func TestCheckWithoutAChecker(t *testing.T) {
+	path := sockPath(t)
+	serve(t, path)
+	_, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck, Check: &protocol.CheckRequest{}})
+	if err == nil || !strings.Contains(err.Error(), "check") {
+		t.Fatalf("err = %v", err)
+	}
+}

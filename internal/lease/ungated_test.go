@@ -695,3 +695,69 @@ func TestAShimmedRunWithAComposeLabelIsGated(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+func startOf(wt, name string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "container", Command: "docker start " + name, CostBytes: gib, Target: name}
+}
+
+func TestAStartAfterTheCreateLapsedTakesTheContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	cr := labelled("w1", "postgres")
+	cr.Command = "docker create postgres"
+	created := b.Check(cr, snap(), cfg)
+	c.t = c.t.Add(3 * time.Minute) // the create's lease lapsed
+	b.Observe(snap())
+	b.Check(startOf("w1", "db"), snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.LeaseLabel: created.LeaseID}}, "w1"))
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want the start's bound", l)
+	}
+}
+
+func TestAStartAfterAnUnboundRunTakesTheContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	r := labelled("w1", "img")
+	r.Name = "x"
+	run := b.Check(r, snap(), cfg) // its container exited before a tick
+	c.t = c.t.Add(30 * time.Second)
+	b.Check(startOf("w1", "x"), snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "x1", Name: "x", Image: "img", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.LeaseLabel: run.LeaseID}}, "w1"))
+	ls := b.List()
+	if len(ls) != 1 || ls[0].Command != "docker start x" || ls[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want only the start's, bound", ls)
+	}
+}
+
+func TestAReturningContainerIsNotTakenByAGuess(t *testing.T) {
+	b, c, _ := book(t)
+	old := func(s *protocol.Snapshot) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: "X", Name: "old-x", Labels: map[string]string{"com.docker.compose.project": "old"}}, "w1")
+	}
+	b.Observe(old(snap()))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // crash-looping
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(old(snap())) // back: must not take the new compose lease
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(addContainer(old(snap()), protocol.Container{ID: "N", Name: "new-web", Labels: map[string]string{"com.docker.compose.project": "new"}}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAStartPrefersAnExactNameToAnIDPrefix(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(startOf("w1", "db"), snap(), cfg)
+	s := withNamed(snap(), "db3f00", "impostor", "alpine", "") // first in the list
+	s = withNamed(s, "abc123", "db", "postgres", "w1")
+	b.Observe(s)
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:db3f00" {
+		t.Fatalf("ungated = %v", got)
+	}
+}

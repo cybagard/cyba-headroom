@@ -277,7 +277,11 @@ func (e *entry) takes(r resource) bool {
 // readable reports whether s holds a fresh reading of the source behind
 // resources of kind: absence from a failed read means nothing.
 func readable(s *protocol.Snapshot, kind string) bool {
-	return !s.Sources[map[string]string{"container": "docker", "vm": "tart"}[source(kind)]].Stale
+	src := "docker"
+	if source(kind) == "vm" {
+		src = "tart"
+	}
+	return !s.Sources[src].Stale
 }
 
 // Observe binds new resources in s to leases, ends leases whose resources
@@ -317,27 +321,37 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	var unbound []resource
 	for _, r := range fresh {
 		e, open := b.labelledLease(r)
-		switch {
-		case e == nil:
+		if e == nil {
 			unbound = append(unbound, r)
 			continue
-		case !open:
-			// Its lease lapsed while the image pulled: checked, but it
-			// reserves nothing any more.
-		case b.startNaming(e, r) != nil:
-			// docker create, then docker start: the start's lease takes the
-			// container, and the create's ends, having started nothing.
-			b.startNaming(e, r).bind(r)
-			b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
-			b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
-		default:
-			e.bind(r)
 		}
+		// A docker start after its run or create (open or lapsed) that
+		// bound nothing: the start's lease takes the container, and the
+		// labelled one ends, having started nothing still running.
+		if st := b.startNaming(e, r); st != nil {
+			st.bind(r)
+			if open {
+				b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
+				b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
+			}
+		} else if open {
+			e.bind(r)
+		} // else its lease lapsed while the image pulled: checked, reserving nothing
 		b.judge(r, gated, now)
 	}
-	for _, find := range []func(resource, time.Time, bool) *entry{b.named, b.match} {
+	// Exact names first, across every new resource, then looser ones (an
+	// ID prefix, an image), as Docker resolves a name before an ID prefix.
+	exact := func(r resource, now time.Time, ownOnly bool) *entry { return b.named(r, now, ownOnly, false) }
+	loose := func(r resource, now time.Time, ownOnly bool) *entry { return b.named(r, now, ownOnly, true) }
+	for pass, find := range []func(resource, time.Time, bool) *entry{exact, loose, b.match} {
 		var left []resource
 		for _, r := range unbound {
+			if v := b.verdicts[r.key]; pass == 2 && v != nil && r.kind != "vm" {
+				// Back after a tick or two away, with its verdict: only a
+				// lease that names it takes it, never a guess.
+				left = append(left, r)
+				continue
+			}
 			if e := find(r, now, !b.based[source(r.kind)]); e != nil {
 				e.bind(r)
 				b.judge(r, gated, now)
@@ -569,15 +583,13 @@ func (b *Book) labelledLease(r resource) (e *entry, open bool) {
 	return nil, false
 }
 
-// startNaming is an open docker start or restart lease of e's worktree
-// that names r, when e is a docker create's: the start runs what the create
-// made.
+// startNaming is an open docker start or restart lease of e's worktree,
+// taken after e, that names r: the start runs what e's run or create made.
+// One taken before e is not (docker start db || docker run --name db).
 func (b *Book) startNaming(e *entry, r resource) *entry {
-	if !isOp(e.Command, "create") {
-		return nil
-	}
 	for _, st := range unlabelled(b.open) {
-		if isStart(st.Command) && st.Worktree == e.Worktree && st.waitsFor() == "container" && st.takes(r) && st.names(r) {
+		if isStart(st.Command) && st.Worktree == e.Worktree && st.Created.After(e.Created) &&
+			st.waitsFor() == "container" && st.takes(r) && st.names(r, false) {
 			return st
 		}
 	}
@@ -600,7 +612,7 @@ func unlabelled(es []*entry) []*entry {
 // call names, or else one of r's own worktree.
 func (b *Book) lapsedFor(r resource) bool {
 	lapsed := unlabelled(b.lapsed)
-	i := slices.IndexFunc(lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
+	i := slices.IndexFunc(lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r, true) })
 	if i < 0 {
 		i = slices.IndexFunc(lapsed, func(e *entry) bool {
 			return e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
@@ -625,11 +637,11 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 // named finds the open lease whose call names r, live ones first: it is
 // r's, whatever the worktrees say. Without a baseline (ownOnly) only an
 // exact --name, or a lease of r's own worktree, names it.
-func (b *Book) named(r resource, now time.Time, ownOnly bool) *entry {
+func (b *Book) named(r resource, now time.Time, ownOnly, loose bool) *entry {
 	for _, live := range []bool{true, false} {
 		var other *entry
 		for _, e := range unlabelled(b.open) {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r, loose) {
 				continue
 			}
 			own := r.worktree != "" && e.Worktree == r.worktree
@@ -657,8 +669,9 @@ func (e *entry) bind(r resource) {
 }
 
 // names reports whether e's call names r: its --name, its container
-// (start), its image, or its VM.
-func (e *entry) names(r resource) bool {
+// (start), its VM or its compose project; loose also takes a start's ID
+// prefix and a run's image.
+func (e *entry) names(r resource, loose bool) bool {
 	switch {
 	case r.kind == "vm":
 		return e.target != "" && e.target == r.name
@@ -671,6 +684,9 @@ func (e *entry) names(r resource) bool {
 	}
 	if e.target == r.name {
 		return true
+	}
+	if !loose {
+		return false
 	}
 	if isStart(e.Command) {
 		// docker start takes a container's ID, or a unique prefix of it.

@@ -18,6 +18,8 @@ var t0 = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 func fullSnapshot() *protocol.Snapshot {
 	cpu := 12.5
 	headroom := int64(30 << 30)
+	ttl := time.Hour
+	lastUsed := t0.Add(-2 * time.Hour)
 	return &protocol.Snapshot{
 		Seq: 7, CollectedAt: t0,
 		Sources: map[string]protocol.SourceStatus{"host": {}, "docker": {Stale: true, Err: "timed out"}},
@@ -36,7 +38,8 @@ func fullSnapshot() *protocol.Snapshot {
 			RunPID: 4242, LaunchCwd: "/Users/dev/project-b", SharedDirs: []string{"/Users/dev/project-b"},
 		}}},
 		LMStudio: &protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(13 << 30),
-			Models: []protocol.LoadedModel{{Key: "some-model", SizeBytes: 12 << 30, Status: "idle"}}},
+			Models: []protocol.LoadedModel{{Key: "some-model", SizeBytes: 12 << 30, Status: "idle", TTL: &ttl, LastUsedAt: &lastUsed},
+				{Key: "pinned", SizeBytes: 1 << 30}}},
 		Orca: &protocol.Orca{Installed: true, Running: true, AppMemoryBytes: 2 << 30, Worktrees: []protocol.Worktree{{
 			ID: "00000000-0000-4000-8000-000000000001::/Users/dev/project-a", Path: "/Users/dev/project-a",
 			Name: "project-a", Branch: "dev/feature", MemoryBytes: 3 << 30, CPUPercent: 55,
@@ -76,6 +79,23 @@ func TestFromSnapshotKeepsAttributionKeys(t *testing.T) {
 	}
 	if !s.Stale["docker"] || s.Stale["host"] {
 		t.Errorf("stale = %v", s.Stale)
+	}
+}
+
+func TestFromSnapshotKeepsModelIdleness(t *testing.T) {
+	snap := fullSnapshot()
+	m := samples.FromSnapshot(snap).LMStudio.Models
+	if m[0].TTL == nil || *m[0].TTL != time.Hour || m[0].LastUsedAt == nil || !m[0].LastUsedAt.Equal(t0.Add(-2*time.Hour)) ||
+		m[0].Status != "idle" {
+		t.Fatalf("model = %+v", m[0])
+	}
+	// Copies, not the snapshot's pointers.
+	*snap.LMStudio.Models[0].TTL = time.Minute
+	if *m[0].TTL != time.Hour {
+		t.Fatal("sample shares the snapshot's TTL")
+	}
+	if m[1].TTL != nil || m[1].LastUsedAt != nil {
+		t.Fatalf("pinned model = %+v: want no TTL and no last use", m[1])
 	}
 }
 

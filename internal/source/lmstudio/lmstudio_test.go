@@ -278,3 +278,20 @@ func TestBackendReachedThroughASymlink(t *testing.T) {
 		t.Fatal("backend run through a symlinked path not recognised")
 	}
 }
+
+func TestTTLAndLastUse(t *testing.T) {
+	got := collect(t, running(t, "ps-ttl.json"))
+	if m := got.Models[0]; m.TTL == nil || *m.TTL != time.Hour {
+		t.Fatalf("ttl = %v, want 1h", m.TTL)
+	}
+	// LM Studio has no TTL to apply for 0 or negative: the model stays loaded.
+	for _, m := range got.Models[1:] {
+		if m.TTL != nil {
+			t.Errorf("%s: ttl = %v, want absent", m.Key, *m.TTL)
+		}
+	}
+	// Stored in UTC, like every other time headroom records.
+	if l := got.Models[0].LastUsedAt; l == nil || l.Location() != time.UTC {
+		t.Fatalf("last used = %v, want UTC", l)
+	}
+}

@@ -451,8 +451,8 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 		targets = []string{r.Target}
 	}
 	req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
-	// The docker CLI trims each (docker start " x" says "No such
-	// container: x"), and
+	// Trimmed here, as the docker CLI does (docker start " x" says "No such
+	// container: x"): Inspect takes a ref as given. And
 	// docker start db db is one container. The first stays first.
 	targets = slices.Clone(targets)
 	for i := range targets {

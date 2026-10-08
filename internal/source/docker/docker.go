@@ -267,7 +267,9 @@ var containerRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // Inspect resolves a container name, ID or ID prefix to its full ID, its
 // labels and whether it runs, as Docker resolves the target of a docker
-// start (#33).
+// start (#33). ref is taken as given: the caller trims it as the docker CLI
+// does, and anything but a plain name or ID is an error that is not
+// ErrNoSuchContainer.
 func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
 	if !containerRef.MatchString(ref) {
 		// Unknown, not missing: Docker may read it otherwise, and a start

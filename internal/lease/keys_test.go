@@ -999,3 +999,19 @@ func TestARepeatUpIsNotChargedTwice(t *testing.T) {
 		t.Fatalf("again: %+v", d)
 	}
 }
+
+// docker create x, then docker start x: the start takes the create's lease
+// over, so the create's reservation is not counted against it too.
+func TestAStartIsNotChargedForTheCreateItTakesOver(t *testing.T) {
+	b, _, _ := book(t)
+	c := cfg
+	c.PerWorktreeCapBytes = 2 * gib
+	b.Observe(snap())
+	cr := labelled("w1", "x")
+	cr.Command, cr.CostBytes = "docker create x", 2*gib
+	created := b.Check(cr, snap(), c)
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", CostBytes: 2 * gib, Target: "x", ContainerID: "X",
+		TakesOver: created.LeaseID}, snap(), c); !d.Allow {
+		t.Fatalf("start: %+v", d)
+	}
+}

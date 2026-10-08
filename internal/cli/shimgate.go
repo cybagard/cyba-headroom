@@ -266,8 +266,9 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	var cfg struct {
 		Name     string `json:"name"`
 		Services map[string]struct {
-			Scale  *int `json:"scale"`
-			Deploy struct {
+			Scale      *int   `json:"scale"`
+			PullPolicy string `json:"pull_policy"`
+			Deploy     struct {
 				Replicas *int `json:"replicas"`
 			} `json:"deploy"`
 		} `json:"services"`
@@ -291,6 +292,9 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 		}
 		if replicas > maxReplicas {
 			return name, nil // too many to list: the up keeps its estimate
+		}
+		if p := cfg.Services[sv].PullPolicy; p == "always" || p == "build" {
+			return name, nil // a pull or build on every up replaces its containers
 		}
 		for range replicas {
 			services = append(services, sv)

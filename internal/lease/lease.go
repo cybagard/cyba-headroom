@@ -174,6 +174,19 @@ func composeTakes(r policy.Request, o *entry) bool {
 	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && o.Kind == "compose" && !o.oneoff && o.project == r.Target && o.Worktree == r.Worktree
 }
 
+// startTakes reports whether a start of starts takes o over: the lease of
+// the run or create that made one of them (its label), which has not run.
+func startTakes(r policy.Request, starts []policy.Start, o *entry) bool {
+	return slices.ContainsFunc(starts, func(t policy.Start) bool { return t.TakesOver != "" && t.TakesOver == o.ID }) && takesCreate(r, o)
+}
+
+// takesCreate reports whether a start may take over o, a run's or
+// create's lease its target names: one that bound nothing yet, and a
+// worktree's only for a worktree's call (a manual call reserves nothing).
+func takesCreate(r policy.Request, o *entry) bool {
+	return o.labelled && len(o.bound) == 0 && (r.Worktree != "" || o.Worktree == "")
+}
+
 // freshDocker reports whether s's Docker reading is fresh and at most
 // idleFresh old: a snapshot is stamped each tick, whatever the age of the
 // reading it carries.
@@ -239,9 +252,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	for _, e := range b.open {
-		if composeTakes(r, e) {
+		if composeTakes(r, e) || startTakes(r, starts, e) {
 			// This call's lease takes it over, with what it reserves
-			// (below): counting it too would charge the stack twice.
+			// (below): counting it too would charge it twice.
 			continue
 		}
 		r.LeasedBytes += e.reserved()
@@ -374,7 +387,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// for that container.
 		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
 			*list = slices.DeleteFunc(*list, func(o *entry) bool {
-				if o.ID != t.TakesOver || !o.labelled || len(o.bound) > 0 || r.Worktree == "" && o.Worktree != "" {
+				if o.ID != t.TakesOver || !takesCreate(r, o) {
 					return false
 				}
 				if list == &b.open {

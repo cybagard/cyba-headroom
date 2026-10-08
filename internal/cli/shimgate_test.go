@@ -755,3 +755,24 @@ func TestComposeProjectOfStdin(t *testing.T) {
 		t.Fatalf("project = %q, want api", got)
 	}
 }
+
+// An up's profiles reach Compose, which lists their services; replicas
+// count, each a service's share.
+func TestComposeProjectListsProfilesAndReplicas(t *testing.T) {
+	var asked []string
+	ask := func(_ string, args []string) ([]byte, error) {
+		asked = args
+		return []byte(`{"name":"x","services":{"web":{"deploy":{"replicas":3}},"db":{"scale":2},"ml":{}}}`), nil
+	}
+	_, services := composeProject("/d", shim.Call{Op: "up", ComposeProfiles: []string{"heavy"}}, ask)
+	if !slices.Equal(services, []string{"db", "db", "ml", "web", "web", "web"}) {
+		t.Fatalf("services = %q", services)
+	}
+	if i := slices.Index(asked, "--profile"); i < 0 || asked[i+1] != "heavy" || i > slices.Index(asked, "config") {
+		t.Fatalf("asked %q, want --profile heavy before config", asked)
+	}
+	// --scale overrides what Compose would list: the up reserves its estimate.
+	if _, services := composeProject("/d", shim.Call{Op: "up", ComposeScaled: true}, ask); services != nil {
+		t.Fatalf("scaled: services = %q, want none", services)
+	}
+}

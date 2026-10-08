@@ -229,15 +229,22 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.Kind == "compose" && r.Op == "up" && len(r.Services) > 0 && r.Worktree != "" && s != nil {
 		// compose up -d of a stack that runs: only the services its
 		// worktree does not run yet start, each its share of the estimate.
-		running := map[string]bool{}
+		// A service is listed once per replica.
+		running := map[string]int{}
 		for _, x := range resources(s) {
 			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree {
-				running[x.service] = true
+				running[x.service]++
 			}
 		}
-		services := slices.Compact(slices.Sorted(slices.Values(r.Services)))
-		missing := uint64(len(services) - len(slices.DeleteFunc(slices.Clone(services), func(sv string) bool { return !running[sv] })))
-		per := cmp.Or(r.CostBytes, c.DefaultContainerBytes) / uint64(len(services))
+		var missing uint64
+		for _, sv := range r.Services {
+			if running[sv] > 0 {
+				running[sv]--
+			} else {
+				missing++
+			}
+		}
+		per := cmp.Or(r.CostBytes, c.DefaultContainerBytes) / uint64(len(r.Services))
 		r.CostBytes = max(1, missing*per) // 0 means the default
 		idle = missing == 0
 	}

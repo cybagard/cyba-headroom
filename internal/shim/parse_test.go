@@ -75,6 +75,8 @@ func TestParse(t *testing.T) {
 		{"docker --unknown ps", Call{}},
 		// Compose.
 		{"docker compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
+		{"docker compose --profile heavy up --profile gpu -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProfiles: []string{"heavy", "gpu"}}},
+		{"docker compose up -d --scale web=10", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeScaled: true}},
 		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}}},
 		{"docker compose -f sub/c.yml -f other/d.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"sub/c.yml", "other/d.yml"}}},
 		{"docker compose --project-directory /srv/app -f c.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProjectDir: "/srv/app", ComposeFiles: []string{"c.yml"}}},
@@ -84,7 +86,7 @@ func TestParse(t *testing.T) {
 		{"docker --context x compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Endpoint: "x"}},
 		{"docker compose start", Call{Kind: "compose", Op: "start", Command: "docker compose start"}},
 		{"docker compose restart -t 5 web", Call{Kind: "compose", Op: "restart", Command: "docker compose restart"}},
-		{"docker compose create --scale web=3", Call{Kind: "compose", Op: "create", Command: "docker compose create"}},
+		{"docker compose create --scale web=3", Call{Kind: "compose", Op: "create", Command: "docker compose create", ComposeScaled: true}},
 		{"docker compose --dry-run up", Call{}},
 		{"docker compose --dry-run=0 up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
 		{"docker compose up --dry-run=FALSE", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},

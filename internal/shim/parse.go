@@ -31,6 +31,10 @@ type Call struct {
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
+	// ComposeProfiles are a compose call's --profiles, which decide its
+	// services; ComposeScaled is set for an up or create with --scale.
+	ComposeProfiles []string
+	ComposeScaled   bool
 	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
 	// --project-directory, as given: the shim finds the project's name
 	// from them as Compose does (#33).
@@ -164,8 +168,8 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 
 func parseCompose(endpoint string, words, args []string) Call {
 	var project, projectDir string
-	var files, envFiles []string
-	dryRun, noUp := false, false
+	var files, envFiles, profiles []string
+	dryRun, noUp, scaled := false, false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
@@ -176,6 +180,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 			envFiles = append(envFiles, v)
 		case "-f", "--file":
 			files = append(files, v)
+		case "--profile":
+			profiles = append(profiles, v)
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		}
@@ -199,6 +205,10 @@ func parseCompose(endpoint string, words, args []string) Call {
 			projectDir = v
 		case "--env-file":
 			envFiles = append(envFiles, v)
+		case "--profile":
+			profiles = append(profiles, v)
+		case "--scale":
+			scaled = true
 		case "--file":
 			files = append(files, v)
 		case "-f":
@@ -221,7 +231,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeScaled: scaled, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

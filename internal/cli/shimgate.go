@@ -257,18 +257,48 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	for _, f := range c.ComposeEnvFiles {
 		args = append(args, "--env-file", f)
 	}
+	for _, p := range c.ComposeProfiles {
+		args = append(args, "--profile", p) // its services
+	}
 	out, err := ask(bin, append(args, "config", "--format", "json"))
 	var cfg struct {
-		Name     string              `json:"name"`
-		Services map[string]struct{} `json:"services"`
+		Name     string `json:"name"`
+		Services map[string]struct {
+			Scale  *int `json:"scale"`
+			Deploy struct {
+				Replicas *int `json:"replicas"`
+			} `json:"deploy"`
+		} `json:"services"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
 		return c.Target, nil
 	}
-	// An up's services: those already running start nothing new.
-	services := slices.Sorted(maps.Keys(cfg.Services))
+	if c.ComposeScaled {
+		return cmp.Or(c.Target, cfg.Name), nil // --scale: not what Compose lists
+	}
+	// An up's services, a name per replica: those already running start
+	// nothing new.
+	var services []string
+	for _, name := range slices.Sorted(maps.Keys(cfg.Services)) {
+		sv := cfg.Services[name]
+		n := cmp.Or(sv.Deploy.Replicas, sv.Scale)
+		replicas := 1
+		if n != nil {
+			replicas = min(max(*n, 0), maxReplicas)
+		}
+		for range replicas {
+			services = append(services, name)
+		}
+	}
+	if len(services) == 0 {
+		return cmp.Or(c.Target, cfg.Name), nil
+	}
 	return cmp.Or(c.Target, cfg.Name), services
 }
+
+// maxReplicas bounds the replicas a service is listed with: past it, the
+// up's share per replica only shrinks.
+const maxReplicas = 64
 
 // composeStdinProject names the project of compose -f - as Compose does
 // when its file is on stdin: -p, else COMPOSE_PROJECT_NAME, else the

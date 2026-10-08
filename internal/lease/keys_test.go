@@ -877,3 +877,16 @@ func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
 		}
 	}
 }
+
+// A service with three replicas of which one runs still starts two.
+func TestComposeUpCountsReplicas(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "w-1", Name: "w-1",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "web"}}, "w1")
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 3 * gib, Target: "app",
+		Services: []string{"web", "web", "web"}}, s, cfg)
+	if reserved(b) != 2*gib {
+		t.Fatalf("reserved %d MiB, want two replicas' 2048", reserved(b)>>20)
+	}
+}

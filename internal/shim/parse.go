@@ -38,15 +38,18 @@ type Call struct {
 func Parse(name string, args []string) Call {
 	switch name {
 	case "docker", "podman":
-		return parseEngine(name, args)
+		c, _ := parseEngine(name, args)
+		return c
 	case "tart":
 		return parseTart(args)
 	}
 	return Call{}
 }
 
-func parseEngine(name string, args []string) Call {
-	var c Call
+// parseEngine parses a docker or podman call. at is the index in args of
+// its subcommand (run, create, ...), or -1.
+func parseEngine(name string, all []string) (c Call, at int) {
+	args := all
 	version := false
 	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
@@ -57,15 +60,16 @@ func parseEngine(name string, args []string) Call {
 		}
 	})
 	if res == askedHelp || version || len(args) == 0 {
-		return Call{}
+		return Call{}, -1
 	}
 	words := []string{name}
 	if args[0] == "container" {
 		words, args = append(words, "container"), args[1:]
 		if len(args) == 0 || args[0] == "compose" {
-			return Call{}
+			return Call{}, -1
 		}
 	}
+	at = len(all) - len(args) // args is what is left of all
 	c.Op = args[0]
 	var flags flagSet
 	switch c.Op {
@@ -75,11 +79,11 @@ func parseEngine(name string, args []string) Call {
 		flags = containerStart
 	case "compose":
 		if len(words) > 1 {
-			return Call{}
+			return Call{}, -1
 		}
-		return parseCompose(c.Endpoint, append(words, "compose"), args[1:])
+		return parseCompose(c.Endpoint, append(words, "compose"), args[1:]), -1
 	default:
-		return Call{}
+		return Call{}, -1
 	}
 	var mem, cname string
 	seen := func(f, v string) {
@@ -99,7 +103,7 @@ func parseEngine(name string, args []string) Call {
 		pos, res, guessed = scanAll(args[1:], flags, seen) // start db --help
 	}
 	if res == askedHelp {
-		return Call{}
+		return Call{}, -1
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
 	if c.Op == "run" || c.Op == "create" {
@@ -108,7 +112,24 @@ func parseEngine(name string, args []string) Call {
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
 	}
-	return c.named(append(words, c.Op))
+	return c.named(append(words, c.Op)), at
+}
+
+// Labelled returns a docker or podman run or create call's args with a
+// --label key=value added after its subcommand, so the container it
+// creates carries it. ok is false for any other call, which creates no
+// container (start, compose, tart) or none at all; args is not changed.
+func Labelled(name string, args []string, key, value string) (out []string, ok bool) {
+	if name != "docker" && name != "podman" {
+		return nil, false
+	}
+	c, at := parseEngine(name, args)
+	if c.Kind != "container" || (c.Op != "run" && c.Op != "create") || at < 0 {
+		return nil, false
+	}
+	out = append(out, args[:at+1]...)
+	out = append(out, "--label", key+"="+value)
+	return append(out, args[at+1:]...), true
 }
 
 func parseCompose(endpoint string, words, args []string) Call {

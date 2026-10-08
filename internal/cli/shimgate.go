@@ -105,6 +105,8 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name = c.Target, c.Name
+	// A run or create carries its lease as a label: see runShim.
+	req.Labelled = c.Kind == "container" && (c.Op == "run" || c.Op == "create")
 	if c.Kind == "tart" {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
 		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {

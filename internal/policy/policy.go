@@ -84,6 +84,8 @@ type Request struct {
 	// Target and Name identify what the call starts (the image, container,
 	// compose project or VM, and a --name), for its lease to bind (#33).
 	Target, Name string
+	// Labelled means the container will carry the lease's ID (#33).
+	Labelled bool
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

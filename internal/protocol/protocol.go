@@ -63,7 +63,14 @@ type CheckRequest struct {
 	// bind its own container (#33); they are never shown or logged.
 	Target string `json:"target,omitempty"`
 	Name   string `json:"name,omitempty"`
+	// Labelled is set when the shim adds the lease's ID to the container
+	// as LeaseLabel (a run or create): its lease binds that container only.
+	Labelled bool `json:"labelled,omitempty"`
 }
+
+// LeaseLabel carries a gated run's lease ID on its container, so the
+// daemon tells it from one started past the shim (#33).
+const LeaseLabel = "dev.headroom.lease"
 
 // How a check's worktree was found (Decision.IdentifiedBy).
 const (

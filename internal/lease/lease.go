@@ -99,6 +99,9 @@ type entry struct {
 	// target and name are what the call starts (shim.Call), so the lease
 	// binds its own resource when several appear at once (#33).
 	target, name string
+	// labelled is set when its container carries the lease's ID
+	// (protocol.LeaseLabel): it binds that container and no other.
+	labelled bool
 }
 
 // How a resource started (#33).
@@ -183,7 +186,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			Created: now, Expires: now.Add(b.timeout),
 		},
 		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
-		target: r.Target, name: r.Name,
+		target: r.Target, name: r.Name, labelled: r.Labelled,
 	}
 	if r.Kind == "compose" {
 		e.project = r.Target // -p, when given: the lease waits for that project
@@ -203,6 +206,7 @@ type resource struct {
 	key      string // "container:<id>" or "vm:<name>"
 	name     string
 	image    string // a container's image
+	lease    string // the lease ID its LeaseLabel carries
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
 	worktree string // "" when unattributed
@@ -229,7 +233,8 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
 			k := "container:" + c.ID
-			r := resource{key: k, name: c.Name, image: c.Image, kind: "container", worktree: owner[k], bytes: c.MemoryBytes}
+			r := resource{key: k, name: c.Name, image: c.Image, kind: "container", worktree: owner[k], bytes: c.MemoryBytes,
+				lease: c.Labels[protocol.LeaseLabel]}
 			if p := c.Labels[protocol.ComposeProjectLabel]; p != "" {
 				r.kind, r.project = "compose", p
 			}
@@ -305,7 +310,20 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// worktree. Without a baseline (a lease taken before the first
 	// reading), any resource may have been there already: only one of the
 	// lease's own worktree is taken as its call's.
-	unbound := fresh
+	// A container that carries its lease's ID went through the shim: it
+	// binds that lease, or, when the lease is gone (it ended, or was an
+	// earlier daemon run's), is gated all the same.
+	var unbound []resource
+	for _, r := range fresh {
+		if r.lease == "" {
+			unbound = append(unbound, r)
+			continue
+		}
+		if i := slices.IndexFunc(b.open, func(e *entry) bool { return e.ID == r.lease }); i >= 0 {
+			b.open[i].bind(r)
+		}
+		b.judge(r, gated, now)
+	}
 	for _, find := range []func(resource, time.Time, bool) *entry{b.named, b.match} {
 		var left []resource
 		for _, r := range unbound {
@@ -492,7 +510,7 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	for _, live := range []bool{true, false} {
 		var other, manual *entry
 		for _, e := range b.open {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.namesOther(r) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.labelled || e.namesOther(r) {
 				continue
 			}
 			switch {
@@ -523,10 +541,12 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 // lapsedFor reports whether a lapsed lease is r's, and spends it: one its
 // call names, or else one of r's own worktree.
 func (b *Book) lapsedFor(r resource) bool {
-	i := slices.IndexFunc(b.lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
+	// A labelled lease's container carries its ID: it never lapses into
+	// another.
+	i := slices.IndexFunc(b.lapsed, func(e *entry) bool { return !e.labelled && e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
 	if i < 0 {
 		i = slices.IndexFunc(b.lapsed, func(e *entry) bool {
-			return e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
+			return !e.labelled && e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
 		})
 	}
 	if i < 0 {
@@ -551,7 +571,7 @@ func (b *Book) named(r resource, now time.Time, ownOnly bool) *entry {
 	for _, live := range []bool{true, false} {
 		var other *entry
 		for _, e := range b.open {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.labelled || !e.names(r) {
 				continue
 			}
 			own := r.worktree != "" && e.Worktree == r.worktree

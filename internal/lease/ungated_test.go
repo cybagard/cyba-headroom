@@ -521,3 +521,66 @@ func TestACatchAllManualLeaseMatchesOnlyBriefly(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+func labelled(wt, image string) policy.Request {
+	r := named(wt, "", image)
+	r.Labelled = true
+	return r
+}
+
+func withLabel(s *protocol.Snapshot, id, image, lease, wt string) *protocol.Snapshot {
+	c := protocol.Container{ID: id, Name: id, Image: image, MemoryBytes: gib / 2}
+	if lease != "" {
+		c.Labels = map[string]string{protocol.LeaseLabel: lease}
+	}
+	return addContainer(s, c, wt)
+}
+
+// Two unnamed containers of one image in one tick, one through the shim:
+// its label says which.
+func TestTheLabelSaysWhichContainerIsGated(t *testing.T) {
+	for _, order := range [][2]string{{"gated", "direct"}, {"direct", "gated"}} {
+		b, _, _ := book(t)
+		b.Observe(snap())
+		d := b.Check(labelled("w1", "alpine"), snap(), cfg)
+		s := snap()
+		for _, id := range order {
+			lease := ""
+			if id == "gated" {
+				lease = d.LeaseID
+			}
+			s = withLabel(s, id, "alpine", lease, "")
+		}
+		b.Observe(s)
+		if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:direct" {
+			t.Fatalf("order %v: ungated = %v", order, got)
+		}
+	}
+}
+
+func TestALabelledContainerWhoseLeaseIsGoneIsGated(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	// From an earlier daemon run, or long after its lease ended.
+	b.Observe(withLabel(snap(), "x", "alpine", "lease-0ld-1", ""))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestALabelledLeaseBindsOnlyItsLabel(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(labelled("w1", "alpine"), snap(), cfg)
+	b.Observe(withLabel(snap(), "direct", "alpine", "", "w1"))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v", got)
+	}
+	// Nor through lapsing.
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(withLabel(snap(), "direct", "alpine", "", "w1"))
+	b.Observe(withLabel(withLabel(snap(), "direct", "alpine", "", "w1"), "late", "alpine", "", "w1"))
+	if got := ungatedKeys(b); len(got) != 2 {
+		t.Fatalf("ungated = %v", got)
+	}
+}

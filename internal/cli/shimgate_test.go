@@ -30,6 +30,7 @@ type shimRig struct {
 	ask      func(protocol.CheckRequest) (*protocol.Decision, error)
 	asked    []protocol.CheckRequest
 	execed   string
+	execArgv []string
 	execEnv  []string
 	sleeps   int
 	now      time.Time
@@ -62,8 +63,8 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 	code = Run(Env{Args: argv, Stdout: io.Discard, Stderr: &errb,
 		Getenv:  func(string) string { return "" },
 		Environ: func() []string { return r.env },
-		exec: func(path string, _, env []string) error {
-			r.execed, r.execEnv = path, env
+		exec: func(path string, argv, env []string) error {
+			r.execed, r.execArgv, r.execEnv = path, argv, env
 			return r.execErr
 		},
 		release: func(_ config.Config, id string) error {
@@ -521,5 +522,31 @@ func TestEnvOfReadsTheFirstOfDuplicates(t *testing.T) {
 	_, getenv := Env{Environ: func() []string { return []string{"A=1", "A=2"} }}.envOf()
 	if got := getenv("A"); got != "1" {
 		t.Fatalf("A = %q", got)
+	}
+}
+
+// An allowed run carries its lease, so the daemon tells its container from
+// one started past the shim (#33).
+func TestShimLabelsAllowedRuns(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	if code, stderr := r.run("docker", "run", "--rm", "alpine", "true"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	want := []string{"docker", "run", "--label", protocol.LeaseLabel + "=lease-7", "--rm", "alpine", "true"}
+	if !slices.Equal(r.execArgv, want) {
+		t.Fatalf("argv = %q, want %q", r.execArgv, want)
+	}
+	if !r.asked[0].Labelled {
+		t.Fatal("the check did not say the call is labelled")
+	}
+}
+
+func TestShimDoesNotLabelStart(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.run("docker", "start", "db")
+	if !slices.Equal(r.execArgv, []string{"docker", "start", "db"}) || r.asked[0].Labelled {
+		t.Fatalf("argv = %q, labelled %v", r.execArgv, r.asked[0].Labelled)
 	}
 }

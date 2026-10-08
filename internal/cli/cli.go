@@ -341,7 +341,15 @@ func runShim(e Env, name string) int {
 	env = setEnv(env, shimSelvesVar, strings.Join(selves, string(filepath.ListSeparator)))
 	// argv[0] is the bare name, as the shell passes a command found on PATH:
 	// the shim's own path would point the real binary back at the shim dir.
-	argv := append([]string{name}, e.Args[1:]...)
+	args := e.Args[1:]
+	if g.lease != "" {
+		// The container carries its lease, so the daemon tells it from one
+		// started past the shim (#33).
+		if la, ok := shim.Labelled(name, args, protocol.LeaseLabel, g.lease); ok {
+			args = la
+		}
+	}
+	argv := append([]string{name}, args...)
 	// On success this never returns: the real binary takes over the
 	// process, with its PID, terminal, signals and exit code.
 	if err := h.exec(target, argv, env); err != nil {
@@ -448,7 +456,7 @@ func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
-			Target: r.Target, Name: r.Name}, s, pol)
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

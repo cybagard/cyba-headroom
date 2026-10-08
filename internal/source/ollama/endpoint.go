@@ -1,0 +1,156 @@
+package ollama
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/cybagard/cyba-headroom/internal/binpath"
+)
+
+// Locations are where Ollama installs itself: Homebrew's ollama and
+// Ollama.app. Searched after PATH; "~/" is under HOME.
+var Locations = []string{
+	"/opt/homebrew/bin/ollama",
+	"/usr/local/bin/ollama",
+	"/Applications/Ollama.app",
+	"~/Applications/Ollama.app",
+}
+
+// Installed reports whether Ollama is installed: the configured binary, an
+// ollama binary on PATH, or one of locations (a binary or an app bundle).
+func Installed(configured string, getenv func(string) string, locations []string) bool {
+	var bins []string
+	for _, p := range locations {
+		if strings.HasSuffix(p, ".app") {
+			if rest, ok := strings.CutPrefix(p, "~/"); ok {
+				p = filepath.Join(getenv("HOME"), rest)
+			}
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() && filepath.IsAbs(p) {
+				return true
+			}
+			continue
+		}
+		bins = append(bins, p)
+	}
+	return binpath.Find(configured, "ollama", getenv, bins...) != ""
+}
+
+const defaultPort = "11434"
+
+// Endpoint returns the base URL of Ollama's API: the configured host, else
+// OLLAMA_HOST, else 127.0.0.1:11434, in any form Ollama accepts (host,
+// host:port, :port, scheme://host:port/path). ok is false when it is not on
+// this Mac: a remote engine's models do not use this Mac's memory, so
+// headroom never contacts it. A server listening on every address
+// (0.0.0.0, ::) is asked over loopback.
+func Endpoint(configured, ollamaHost string) (base string, ok bool) {
+	raw := configured
+	if raw == "" {
+		raw = ollamaHost
+	}
+	raw = strings.Trim(strings.TrimSpace(raw), `"'`)
+	if raw == "" {
+		raw = "127.0.0.1"
+	}
+	scheme, hostport, found := strings.Cut(raw, "://")
+	if !found {
+		scheme, hostport = "http", raw
+	}
+	port := defaultPort
+	switch scheme {
+	case "http":
+	case "https":
+		port = "443"
+	default:
+		return "", false
+	}
+	hostport, path, _ := strings.Cut(hostport, "/")
+	if strings.Contains(hostport, "@") {
+		return "", false
+	}
+	host := hostport
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		host, port = h, p
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", false
+	}
+	switch ip := net.ParseIP(host); {
+	case host == "":
+		host = "127.0.0.1"
+	case host == "localhost":
+	case ip == nil:
+		return "", false
+	case ip.IsUnspecified() && ip.To4() != nil:
+		host = "127.0.0.1"
+	case ip.IsUnspecified():
+		host = "::1"
+	case !ip.IsLoopback():
+		return "", false
+	}
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, port), Path: strings.TrimSuffix("/"+path, "/")}
+	return u.String(), true
+}
+
+// maxPS caps the /api/ps response: a few models' entries are a few KB.
+const maxPS = 1 << 20
+
+// HTTP reads /api/ps from Ollama's API at Base.
+type HTTP struct {
+	Base    string
+	Timeout time.Duration
+	client  *http.Client
+}
+
+// NewHTTP returns a client for the API at base, as Endpoint returns it. It
+// uses no proxy and follows no redirect: the API is on this Mac.
+func NewHTTP(base string) *HTTP {
+	return &HTTP{
+		Base:    base,
+		Timeout: 2 * time.Second,
+		client: &http.Client{
+			Transport: &http.Transport{Proxy: nil},
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// PS implements API.
+func (h *HTTP) PS(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, h.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.Base+"/api/ps", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/ps: %s", resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPS+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxPS {
+		return nil, errors.New("GET /api/ps: response over 1 MiB")
+	}
+	return b, nil
+}

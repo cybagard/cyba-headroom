@@ -15,6 +15,8 @@ type Params struct {
 	// LMStudioIdleBytes is LM Studio's footprint with no model loaded
 	// (~620 MiB in #16).
 	LMStudioIdleBytes uint64
+	// OllamaIdleBytes is the Ollama server's footprint with no model loaded.
+	OllamaIdleBytes uint64
 }
 
 // Compute returns the budget for s. A source with no reading yet is listed
@@ -56,6 +58,12 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		b.Unknown = append(b.Unknown, "lmstudio")
 		footprintsKnown = false
 	}
+	if s.Ollama != nil {
+		add(ollama(s.Ollama, p))
+	} else {
+		b.Unknown = append(b.Unknown, "ollama")
+		footprintsKnown = false
+	}
 
 	base := protocol.BudgetComponent{Name: "host_baseline", ReservedBytes: p.HostBaselineBytes}
 	// Footprints count compressed pages at full size, host used at their
@@ -70,7 +78,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
 
-	for _, name := range []string{"host", "docker", "tart", "lmstudio"} {
+	for _, name := range []string{"host", "docker", "tart", "lmstudio", "ollama"} {
 		if s.Sources[name].Stale {
 			b.Stale = append(b.Stale, name)
 		}
@@ -148,6 +156,26 @@ func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 		c.ReservedBytes += m.SizeBytes
 	}
 	if fp := l.FootprintBytes; fp != nil {
+		c.ReservedBytes = max(c.ReservedBytes, *fp)
+	}
+	return c
+}
+
+// ollama reserves the Ollama server plus its loaded models, even when idle
+// (R2), as lmstudio does: their sizes in memory, or the whole footprint when
+// that is more, or while the model list is unknown.
+func ollama(o *protocol.Ollama, p Params) protocol.BudgetComponent {
+	c := protocol.BudgetComponent{Name: "ollama"}
+	if !o.Running {
+		c.UsedBytes = new(uint64)
+		return c
+	}
+	c.UsedBytes = o.FootprintBytes
+	c.ReservedBytes = p.OllamaIdleBytes
+	for _, m := range o.Models {
+		c.ReservedBytes += m.SizeBytes
+	}
+	if fp := o.FootprintBytes; fp != nil {
 		c.ReservedBytes = max(c.ReservedBytes, *fp)
 	}
 	return c

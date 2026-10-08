@@ -470,7 +470,7 @@ func worktreeName(s *protocol.Snapshot, id string) string {
 // staleSources lists the policy's inputs whose latest read failed.
 func staleSources(s *protocol.Snapshot) []string {
 	var out []string
-	for _, n := range []string{"host", "docker", "tart", "lmstudio", "orca"} {
+	for _, n := range []string{"host", "docker", "tart", "lmstudio", "ollama", "orca"} {
 		if s.Sources[n].Stale {
 			out = append(out, n)
 		}

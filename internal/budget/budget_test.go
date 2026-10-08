@@ -15,7 +15,7 @@ func TestEmptySnapshotMarksEverySourceUnknown(t *testing.T) {
 	if b.TotalBytes != 0 || b.ReservedBytes != 0 || b.HeadroomBytes != nil {
 		t.Fatalf("got total=%d reserved=%d headroom=%v, want zeros and unknown headroom", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
 	}
-	want := []string{"host", "docker", "tart", "lmstudio"}
+	want := []string{"host", "docker", "tart", "lmstudio", "ollama"}
 	if !slices.Equal(b.Unknown, want) {
 		t.Fatalf("unknown = %v, want %v", b.Unknown, want)
 	}
@@ -157,6 +157,49 @@ func TestLMStudioReservesLoadedModels(t *testing.T) {
 	}
 }
 
+func TestOllamaReservesLoadedModels(t *testing.T) {
+	p := budget.Params{OllamaIdleBytes: gib / 4}
+	models := func(sizes ...uint64) []protocol.OllamaModel {
+		var ms []protocol.OllamaModel
+		for _, s := range sizes {
+			ms = append(ms, protocol.OllamaModel{Name: "m", SizeBytes: s})
+		}
+		return ms
+	}
+	cases := map[string]struct {
+		o        *protocol.Ollama
+		reserved uint64
+		used     *uint64
+	}{
+		"not running":     {&protocol.Ollama{Installed: true}, 0, u64(0)},
+		"no model loaded": {&protocol.Ollama{Installed: true, Running: true, FootprintBytes: u64(12 << 20)}, gib / 4, u64(12 << 20)},
+		"idle models, size wins": {
+			&protocol.Ollama{Installed: true, Running: true, Models: models(4*gib, 2*gib), FootprintBytes: u64(3 * gib)},
+			6*gib + gib/4, u64(3 * gib),
+		},
+		"footprint above sizes": {
+			&protocol.Ollama{Installed: true, Running: true, Models: models(4 * gib), FootprintBytes: u64(5 * gib)},
+			5 * gib, u64(5 * gib),
+		},
+		"models unknown": {
+			&protocol.Ollama{Installed: true, Running: true, ModelsError: "remote", FootprintBytes: u64(7 * gib)},
+			7 * gib, u64(7 * gib),
+		},
+		"footprint unknown": {
+			&protocol.Ollama{Installed: true, Running: true, Models: models(4 * gib), FootprintError: "boom"},
+			4*gib + gib/4, nil,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := component(t, budget.Compute(&protocol.Snapshot{Ollama: tc.o}, p), "ollama")
+			if c.ReservedBytes != tc.reserved || !usedEq(c.UsedBytes, tc.used) {
+				t.Fatalf("got reserved=%d used=%v, want %d %v", c.ReservedBytes, c.UsedBytes, tc.reserved, tc.used)
+			}
+		})
+	}
+}
+
 func i64(v int64) *int64 { return &v }
 
 // busyMac is a 64 GiB Mac with every source reporting.
@@ -172,33 +215,35 @@ func busyMac() *protocol.Snapshot {
 		}},
 		LMStudio: &protocol.LMStudio{Installed: true, Running: true,
 			Models: []protocol.LoadedModel{{SizeBytes: 12 * gib}}, FootprintBytes: u64(13 * gib)},
+		Ollama: &protocol.Ollama{Installed: true, Running: true,
+			Models: []protocol.OllamaModel{{SizeBytes: 3 * gib}}, FootprintBytes: u64(2 * gib)},
 	}
 }
 
 func TestTotalsAndHeadroom(t *testing.T) {
-	p := budget.Params{HostBaselineBytes: 10 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: 1 * gib}
+	p := budget.Params{HostBaselineBytes: 10 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: 1 * gib, OllamaIdleBytes: 1 * gib}
 	b := budget.Compute(busyMac(), p)
 
-	// docker 6 + tart 8 + lmstudio max(12+1, 13) + baseline 10
-	if b.TotalBytes != 64*gib || b.ReservedBytes != 37*gib || b.HeadroomBytes == nil || *b.HeadroomBytes != int64(27*gib) {
+	// docker 6 + tart 8 + lmstudio max(12+1, 13) + ollama max(3+1, 2) + baseline 10
+	if b.TotalBytes != 64*gib || b.ReservedBytes != 41*gib || b.HeadroomBytes == nil || *b.HeadroomBytes != int64(23*gib) {
 		t.Fatalf("got total=%d reserved=%d headroom=%v", b.TotalBytes, b.ReservedBytes, b.HeadroomBytes)
 	}
 	if b.Unknown != nil {
 		t.Errorf("unknown = %v, want none", b.Unknown)
 	}
-	// 40 used − 1 compressor + 4 compressed − (6 docker + 5 tart + 13 lmstudio)
-	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(19*gib) {
-		t.Errorf("unaccounted = %v, want 19 GiB", b.UnaccountedBytes)
+	// 40 used − 1 compressor + 4 compressed − (6 docker + 5 tart + 13 lmstudio + 2 ollama)
+	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(17*gib) {
+		t.Errorf("unaccounted = %v, want 17 GiB", b.UnaccountedBytes)
 	}
 	names := []string{}
 	for _, c := range b.Components {
 		names = append(names, c.Name)
 	}
-	if want := []string{"docker", "tart", "lmstudio", "host_baseline"}; !slices.Equal(names, want) {
+	if want := []string{"docker", "tart", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
 		t.Errorf("components = %v, want %v", names, want)
 	}
-	if c := component(t, b, "host_baseline"); c.ReservedBytes != 10*gib || !usedEq(c.UsedBytes, u64(19*gib)) {
-		t.Errorf("host_baseline = %d used %v, want 10 GiB used 19 GiB", c.ReservedBytes, c.UsedBytes)
+	if c := component(t, b, "host_baseline"); c.ReservedBytes != 10*gib || !usedEq(c.UsedBytes, u64(17*gib)) {
+		t.Errorf("host_baseline = %d used %v, want 10 GiB used 17 GiB", c.ReservedBytes, c.UsedBytes)
 	}
 }
 
@@ -227,8 +272,13 @@ func TestUnaccounted(t *testing.T) {
 		"compressed unknown":     {func(s *protocol.Snapshot) { s.Host.CompressedBytes = nil }, nil},
 		"tart footprint unknown": {func(s *protocol.Snapshot) { s.Tart.VMs[0].FootprintBytes = nil }, nil},
 		"no docker reading":      {func(s *protocol.Snapshot) { s.Docker = nil }, nil},
+		"no ollama reading":      {func(s *protocol.Snapshot) { s.Ollama = nil }, nil},
+		"ollama footprint unknown": {
+			func(s *protocol.Snapshot) { s.Ollama.FootprintBytes, s.Ollama.FootprintError = nil, "boom" }, nil,
+		},
+		// 20 − 1 + 4 − 26
 		"negative from skew": {
-			func(s *protocol.Snapshot) { s.Host.UsedBytes = u64(20 * gib) }, i64(-int64(1 * gib)),
+			func(s *protocol.Snapshot) { s.Host.UsedBytes = u64(20 * gib) }, i64(-int64(3 * gib)),
 		},
 	}
 	for name, tc := range cases {

@@ -1,6 +1,6 @@
 # headroom
 
-Admission control for a fleet of parallel coding agents on one Mac. `headroom` shows what each agent costs across Docker/Podman, Tart and LM Studio, and lets agents ask before they spawn more. Display alone is not the product; the gate is.
+Admission control for a fleet of parallel coding agents on one Mac. `headroom` shows what each agent costs across Docker/Podman, Tart, LM Studio and Ollama, and lets agents ask before they spawn more. Display alone is not the product; the gate is.
 
 **Status:** observe view, daemon and gate shim work; the gate takes effect for agents launched through `headroom run` (below).
 
@@ -36,7 +36,7 @@ headroom uninstall
 
 The view leads with headroom and memory pressure. Below that is one row per worktree, showing its agents, containers, Tart VMs, CPU and the agents' own memory, then anything that matches no worktree. `⚑` marks a worktree that holds containers or VMs while none of its agents is working. `?` means unknown, never 0. `≤` before headroom means some source has not reported yet. Colour is used only on a terminal, and never when `NO_COLOR` is set.
 
-Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds and the host baseline default to 0 (unset) until the observe baseline (#23); the Docker and LM Studio overheads default to the spike measurements. GB means GiB.
+Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds and the host baseline default to 0 (unset) until the observe baseline (#23); the Docker, LM Studio and Ollama overheads default to the spike measurements. GB means GiB.
 
 ```toml
 [policy]
@@ -48,7 +48,13 @@ lease_timeout = "2m"
 host_baseline_gb = 10      # macOS, Orca, agents
 docker_overhead_gb = 1.6   # Docker VM beyond its containers
 lmstudio_idle_gb = 0.6     # LM Studio with no model loaded
+ollama_idle_gb = 0.1       # Ollama server with no model loaded
+
+[ollama]
+host = "127.0.0.1:11434"   # default: OLLAMA_HOST, then this; launchd does not see your shell's OLLAMA_HOST
 ```
+
+headroom reads Ollama's `/api/ps` only while an `ollama serve` process runs, and never contacts a host that is not this Mac.
 
 The daemon records each tick to `samples/YYYY-MM-DD.jsonl` in the config directory (mode 0600). `headroom suggest` (#23) learns thresholds from these samples. Finished days are gzipped, and days past `retention` are deleted. A sample is about 2.7 KB with eight worktrees (measured). At the default 5 s interval that is about 47 MB for the current day and about 3 MB for each gzipped day, so 30 days take about 150 MB at most. Samples hold memory figures, worktree names and paths, container names and images, and bind-mount paths. They never hold container labels, environment or command lines.
 

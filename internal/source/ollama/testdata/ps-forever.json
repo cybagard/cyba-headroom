@@ -1,0 +1,1 @@
+{"models":[{"name":"qwen3:8b","model":"qwen3:8b","size":6200000000,"digest":"0000","details":{"format":"gguf"},"expires_at":"2318-01-16T23:46:39.123+01:00","size_vram":6200000000,"context_length":8192}]}

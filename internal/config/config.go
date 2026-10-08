@@ -39,6 +39,7 @@ type Config struct {
 	Tart     Tart     `toml:"tart"`
 	Orca     Orca     `toml:"orca"`
 	LMStudio LMStudio `toml:"lmstudio"`
+	Ollama   Ollama   `toml:"ollama"`
 	Policy   Policy   `toml:"policy"`
 	Budget   Budget   `toml:"budget"`
 	Samples  Samples  `toml:"samples"`
@@ -89,6 +90,17 @@ type Orca struct {
 type LMStudio struct {
 	// Path is the lms CLI. Empty means: PATH, then ~/.lmstudio/bin/lms.
 	Path string `toml:"path"`
+}
+
+// Ollama locates Ollama and its API.
+type Ollama struct {
+	// Path is the ollama binary. Empty means: PATH, then Homebrew's, then
+	// Ollama.app.
+	Path string `toml:"path"`
+	// Host is the API's address, as OLLAMA_HOST takes it. Empty means
+	// OLLAMA_HOST, then 127.0.0.1:11434. The launchd agent does not inherit
+	// a shell's OLLAMA_HOST, so set it here when Ollama listens elsewhere.
+	Host string `toml:"host"`
 }
 
 // Policy is the fixed-threshold policy (R8) and lease settings (R10).
@@ -151,6 +163,8 @@ type Budget struct {
 	DockerOverheadGB float64 `toml:"docker_overhead_gb"`
 	// LMStudioIdleGB is LM Studio's footprint with no model loaded.
 	LMStudioIdleGB float64 `toml:"lmstudio_idle_gb"`
+	// OllamaIdleGB is the Ollama server's footprint with no model loaded.
+	OllamaIdleGB float64 `toml:"ollama_idle_gb"`
 	// MaxMacOSVMs is the macOS VM slot count (R6); Apple's licence allows two.
 	MaxMacOSVMs int `toml:"max_macos_vms"`
 }
@@ -161,6 +175,7 @@ func (b Budget) Params() budget.Params {
 		HostBaselineBytes:   gib(b.HostBaselineGB),
 		DockerOverheadBytes: gib(b.DockerOverheadGB),
 		LMStudioIdleBytes:   gib(b.LMStudioIdleGB),
+		OllamaIdleBytes:     gib(b.OllamaIdleGB),
 	}
 }
 
@@ -211,8 +226,9 @@ func Defaults(dir string) Config {
 			DefaultTartGB:       4, // tart's default VM memory
 			IdleGrace:           Duration{2 * time.Minute},
 		},
-		// Overheads measured in spike #9 and #16; #23 refines them.
-		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
+		// Overheads measured in spike #9, #16 and docs/spikes/ollama.md; #23
+		// refines them.
+		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, OllamaIdleGB: 0.1, MaxMacOSVMs: 2},
 		Samples: Samples{Enabled: true, Retention: Duration{30 * 24 * time.Hour}},
 	}
 }
@@ -294,6 +310,7 @@ func LoadDir(dir string) (Config, error) {
 	cfg.Tart.Path = expandHome(cfg.Tart.Path)
 	cfg.Orca.Path = expandHome(cfg.Orca.Path)
 	cfg.LMStudio.Path = expandHome(cfg.LMStudio.Path)
+	cfg.Ollama.Path = expandHome(cfg.Ollama.Path)
 	return cfg, cfg.Validate()
 }
 
@@ -353,6 +370,7 @@ func (c Config) Validate() error {
 		{"host_baseline_gb", c.Budget.HostBaselineGB},
 		{"docker_overhead_gb", c.Budget.DockerOverheadGB},
 		{"lmstudio_idle_gb", c.Budget.LMStudioIdleGB},
+		{"ollama_idle_gb", c.Budget.OllamaIdleGB},
 	} {
 		switch {
 		case math.IsNaN(v.gb):

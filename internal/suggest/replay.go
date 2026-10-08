@@ -54,5 +54,17 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 			}
 		}
 	}
+	if known("ollama") {
+		out.Ollama = &protocol.Ollama{}
+		if o := s.Ollama; o != nil {
+			out.Ollama = &protocol.Ollama{Installed: true, Running: true, FootprintBytes: o.FootprintBytes}
+			if o.ModelsUnknown {
+				out.Ollama.ModelsError = "unknown when recorded"
+			}
+			for _, m := range o.Models {
+				out.Ollama.Models = append(out.Ollama.Models, protocol.OllamaModel{Name: m.Name, SizeBytes: m.SizeBytes})
+			}
+		}
+	}
 	return out
 }

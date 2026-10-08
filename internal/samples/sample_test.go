@@ -40,6 +40,8 @@ func fullSnapshot() *protocol.Snapshot {
 		LMStudio: &protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(13 << 30),
 			Models: []protocol.LoadedModel{{Key: "some-model", SizeBytes: 12 << 30, Status: "idle", TTL: &ttl, LastUsedAt: &lastUsed},
 				{Key: "pinned", SizeBytes: 1 << 30}}},
+		Ollama: &protocol.Ollama{Installed: true, Running: true, FootprintBytes: u64(3 << 30),
+			Models: []protocol.OllamaModel{{Name: "llama3.2:1b", SizeBytes: 2 << 30, VRAMBytes: 2 << 30, ContextLength: 4096, ExpiresAt: &lastUsed}}},
 		Orca: &protocol.Orca{Installed: true, Running: true, AppMemoryBytes: 2 << 30, Worktrees: []protocol.Worktree{{
 			ID: "00000000-0000-4000-8000-000000000001::/Users/dev/project-a", Path: "/Users/dev/project-a",
 			Name: "project-a", Branch: "dev/feature", MemoryBytes: 3 << 30, CPUPercent: 55,
@@ -73,6 +75,10 @@ func TestFromSnapshotKeepsAttributionKeys(t *testing.T) {
 	if s.LMStudio == nil || *s.LMStudio.FootprintBytes != 13<<30 || s.LMStudio.Models[0].SizeBytes != 12<<30 {
 		t.Errorf("lmstudio = %+v", s.LMStudio)
 	}
+	if o := s.Ollama; o == nil || *o.FootprintBytes != 3<<30 || len(o.Models) != 1 || o.Models[0].Name != "llama3.2:1b" ||
+		o.Models[0].SizeBytes != 2<<30 || o.Models[0].ExpiresAt == nil || !o.Models[0].ExpiresAt.Equal(t0.Add(-2*time.Hour)) {
+		t.Errorf("ollama = %+v", s.Ollama)
+	}
 	if s.OrcaAppBytes == nil || *s.OrcaAppBytes != 2<<30 || len(s.Worktrees) != 1 ||
 		s.Worktrees[0].Path != "/Users/dev/project-a" || s.Worktrees[0].Agents[0] != "working" {
 		t.Errorf("orca = %v %+v", s.OrcaAppBytes, s.Worktrees)
@@ -96,6 +102,14 @@ func TestFromSnapshotKeepsModelIdleness(t *testing.T) {
 	}
 	if m[1].TTL != nil || m[1].LastUsedAt != nil {
 		t.Fatalf("pinned model = %+v: want no TTL and no last use", m[1])
+	}
+}
+
+func TestOllamaNotRunningIsLeftOut(t *testing.T) {
+	snap := fullSnapshot()
+	snap.Ollama = &protocol.Ollama{Installed: true}
+	if o := samples.FromSnapshot(snap).Ollama; o != nil {
+		t.Fatalf("ollama = %+v, want absent", o)
 	}
 }
 

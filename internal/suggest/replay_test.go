@@ -15,7 +15,7 @@ import (
 // A snapshot recorded as a sample and replayed gives the budget the daemon
 // computed from the original.
 func TestReplayGivesTheDaemonsBudget(t *testing.T) {
-	p := budget.Params{HostBaselineBytes: 8 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: gib / 2}
+	p := budget.Params{HostBaselineBytes: 8 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: gib / 2, OllamaIdleBytes: gib / 8}
 	snaps := map[string]*protocol.Snapshot{
 		"everything running": {
 			Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(30 * gib), CompressorBytes: u64(gib), CompressedBytes: u64(3 * gib)},
@@ -24,10 +24,13 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 			Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{{Name: "ci", MemoryBytes: 8 * gib, FootprintBytes: u64(9 * gib)}}},
 			LMStudio: &protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(13 * gib),
 				Models: []protocol.LoadedModel{{Key: "m", SizeBytes: 12 * gib}}},
+			Ollama: &protocol.Ollama{Installed: true, Running: true, FootprintBytes: u64(3 * gib),
+				Models: []protocol.OllamaModel{{Name: "o", SizeBytes: 2 * gib}}},
 		},
 		"nothing running": {
 			Host:   &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(18 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
 			Docker: &protocol.Docker{}, Tart: &protocol.Tart{Installed: true}, LMStudio: &protocol.LMStudio{Installed: true},
+			Ollama: &protocol.Ollama{Installed: true},
 		},
 		"sources unknown": {
 			Host: &protocol.Host{TotalBytes: 64 * gib},
@@ -36,12 +39,17 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 			Host: &protocol.Host{TotalBytes: 64 * gib},
 			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib, VMError: "lsof: timed out",
 				Containers: []protocol.Container{{Name: "db", MemoryBytes: 3 * gib}}},
-			Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
+			Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
 		},
 		"docker VM stopped by Resource Saver": {
 			Host:   &protocol.Host{TotalBytes: 64 * gib},
 			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib},
-			Tart:   &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
+			Tart:   &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
+		},
+		"ollama models unknown": {
+			Host:   &protocol.Host{TotalBytes: 64 * gib},
+			Docker: &protocol.Docker{}, Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
+			Ollama: &protocol.Ollama{Installed: true, Running: true, ModelsError: "remote", FootprintBytes: u64(5 * gib)},
 		},
 	}
 	for name, s := range snaps {
@@ -58,6 +66,17 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 
 // warnAt makes the sample at index i of each day a warn onset, with the
 // Docker VM holding footprint GiB then.
+// Samples recorded before the Ollama source existed replay as Ollama not
+// running, not as unknown: their unaccounted memory stays known.
+func TestReplayOfASampleWithoutOllama(t *testing.T) {
+	s := samples.Sample{Host: &samples.Host{TotalBytes: 64 * gib, UsedBytes: u64(20 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
+		Budget: &protocol.Budget{}}
+	b := budget.Compute(suggest.Snapshot(s), budget.Params{})
+	if b.UnaccountedBytes == nil {
+		t.Fatalf("unaccounted unknown; unknown = %v", b.Unknown)
+	}
+}
+
 func TestMinHeadroomFromWarnOnsets(t *testing.T) {
 	onset := map[int]uint64{100: 10, 200: 11, 300: 12, 400: 13}
 	ss := threeDays(func(s *samples.Sample, i int) {

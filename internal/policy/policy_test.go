@@ -258,6 +258,15 @@ func TestStaleReadingsAreNamed(t *testing.T) {
 	}
 }
 
+func TestAStaleOllamaReadingIsNamed(t *testing.T) {
+	s := snap()
+	s.Sources = map[string]protocol.SourceStatus{"ollama": {Stale: true}}
+	d := policy.Decide(req("busy", gib), s, cfg)
+	if !strings.Contains(d.Message, "stale") || !strings.Contains(d.Message, "ollama") {
+		t.Fatalf("message = %q", d.Message)
+	}
+}
+
 func TestAbsurdCostsCannotWrapTheArithmetic(t *testing.T) {
 	r := req("busy", ^uint64(0)) // 2^64 − 1 bytes
 	if d := policy.Decide(r, snap(), cfg); d.Allow {

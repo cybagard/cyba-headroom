@@ -135,6 +135,7 @@ func TestLoadErrors(t *testing.T) {
 		{"socket too long", "socket = \"/" + strings.Repeat("s", 110) + "\"\n", "socket path is"},
 		{"negative docker overhead", "[budget]\ndocker_overhead_gb = -1\n", "budget.docker_overhead_gb must be >= 0"},
 		{"negative lmstudio idle", "[budget]\nlmstudio_idle_gb = -0.5\n", "budget.lmstudio_idle_gb must be >= 0"},
+		{"negative ollama idle", "[budget]\nollama_idle_gb = -0.5\n", "budget.ollama_idle_gb must be >= 0"},
 		{"absurd baseline", "[budget]\nhost_baseline_gb = 1e10\n", "budget.host_baseline_gb must be <= 1024"},
 		{"absurd docker overhead", "[budget]\ndocker_overhead_gb = 5000\n", "budget.docker_overhead_gb must be <= 1024"},
 		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
@@ -189,11 +190,11 @@ func write(t *testing.T, dir, body string) {
 
 func TestBudgetParams(t *testing.T) {
 	d := Defaults("/x").Budget
-	if d.DockerOverheadGB != 1.6 || d.LMStudioIdleGB != 0.6 || d.HostBaselineGB != 0 {
-		t.Fatalf("defaults = %+v, want docker 1.6, lmstudio 0.6, baseline 0 (set by #23)", d)
+	if d.DockerOverheadGB != 1.6 || d.LMStudioIdleGB != 0.6 || d.OllamaIdleGB != 0.1 || d.HostBaselineGB != 0 {
+		t.Fatalf("defaults = %+v, want docker 1.6, lmstudio 0.6, ollama 0.1, baseline 0 (set by #23)", d)
 	}
-	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, LMStudioIdleGB: 0.25}.Params()
-	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.LMStudioIdleBytes != 1<<28 {
+	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, LMStudioIdleGB: 0.25, OllamaIdleGB: 0.5}.Params()
+	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.LMStudioIdleBytes != 1<<28 || p.OllamaIdleBytes != 1<<29 {
 		t.Fatalf("params = %+v; GB means GiB, as macOS reports memory", p)
 	}
 }
@@ -270,5 +271,18 @@ func TestRelativeConfigDirIsMadeAbsolute(t *testing.T) {
 	cfg, err := Load(env(map[string]string{"HEADROOM_CONFIG_DIR": "cfg"}))
 	if err != nil || !filepath.IsAbs(cfg.ShimDir) {
 		t.Fatalf("shim dir %q, %v", cfg.ShimDir, err)
+	}
+}
+
+func TestOllamaSection(t *testing.T) {
+	dir := shortTempDir(t)
+	write(t, dir, "[ollama]\npath = \"~/bin/ollama\"\nhost = \"127.0.0.1:5000\"\n")
+	t.Setenv("HOME", "/Users/dev")
+	cfg, err := LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ollama.Path != "/Users/dev/bin/ollama" || cfg.Ollama.Host != "127.0.0.1:5000" {
+		t.Fatalf("ollama = %+v", cfg.Ollama)
 	}
 }

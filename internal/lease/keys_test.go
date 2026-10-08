@@ -1297,3 +1297,72 @@ func TestAStartOfAContainerAnUpFoundRunningIsChecked(t *testing.T) {
 		t.Fatalf("allowed under critical pressure: %+v", d)
 	}
 }
+
+// A held container still runs when the stack misses it (attribution lost
+// for a tick): it stays held, and the new up keeps its estimate.
+func TestAHeldContainerTheStackMissesStaysHeld(t *testing.T) {
+	b, c, _ := book(t)
+	s := withComposeContainer(snap(), "db", "w1", 3*gib)
+	b.Observe(s)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
+	b.Check(up, s, cfg) // db held
+	c.t = c.t.Add(time.Second)
+	lost := withComposeContainer(snap(), "db", "", 3*gib)
+	b.Observe(lost)
+	b.Check(up, lost, cfg)
+	b.Observe(lost)
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB, want 1024", r>>20)
+	}
+}
+
+// A held container stopped before a takeover is no longer the lease's: a
+// plain docker start of it later is checked.
+func TestAHeldContainerStoppedBeforeATakeoverIsNotCovered(t *testing.T) {
+	b, c, _ := book(t)
+	s := withComposeContainer(snap(), "db", "w1", gib)
+	b.Observe(s)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
+	b.Check(up, s, cfg)
+	b.Observe(snap()) // compose stop db
+	c.t = c.t.Add(time.Second)
+	b.Check(up, snap(), cfg) // compose up -d web
+	critical := snap()
+	critical.Host.Pressure = "critical"
+	b.Observe(critical)
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, critical, cfg); d.Allow {
+		t.Fatalf("allowed under critical pressure: %+v", d)
+	}
+}
+
+// An image committed from a gated container in this daemon's run: its
+// lease is over, so its label marks nothing, and the service is its
+// project's.
+func TestALabelOfAnEndedLeaseDoesNotKeepAServiceFromItsLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	old := b.Check(req("w1", gib), snap(), cfg)
+	b.Release(old.LeaseID)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib, Labels: map[string]string{
+		protocol.ComposeProjectLabel: "app", protocol.ComposeConfigHashLabel: "1", protocol.LeaseLabel: old.LeaseID}}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A start's container ID is surer than a compose project's name: docker
+// start of a stopped service while an up of its project is open binds the
+// start's lease.
+func TestAStartsContainerIDBeatsTheProjectsName(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, snap(), cfg)
+	start := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, snap(), cfg)
+	b.Observe(withComposeContainer(snap(), "db", "w1", gib/2))
+	for _, l := range b.List() {
+		if l.ID == start.LeaseID && l.Bytes != gib/2 {
+			t.Fatalf("the start's lease did not bind db: %+v", b.List())
+		}
+	}
+}

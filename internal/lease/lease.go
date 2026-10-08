@@ -340,21 +340,31 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost:
 		// what they use stays counted, so a start of one stopped is
-		// covered. Those it held stay held while they run; one stopped
-		// since is started by this call, which its estimate is for.
-		running := map[string]bool{}
-		for _, x := range stack {
-			running[x.key] = true
-		}
+		// covered. Those it held stay held while they run, whoever the
+		// reading says runs them; one stopped since is no longer this
+		// lease's: Compose starting it binds it afresh, and a plain start
+		// of it is checked.
+		var running map[string]bool
 		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
 			if !composeTakes(r, o) {
 				return false
 			}
+			if running == nil {
+				running = map[string]bool{}
+				if s != nil {
+					for _, x := range resources(s) {
+						running[x.key] = !b.seen[x.key].gone
+					}
+				}
+			}
 			e.took = append(e.took, o)
 			reserved, used = reserved+o.reserved(), used+o.used
 			for k := range o.bound {
-				e.bound[k], e.held[k] = true, o.held[k] && running[k]
+				if o.held[k] && !running[k] {
+					continue
+				}
+				e.bound[k], e.held[k] = true, o.held[k]
 			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
@@ -431,10 +441,11 @@ type resource struct {
 	name  string
 	id    string // a container's ID
 	lease string // the lease ID its LeaseLabel carries
-	// mark is the LeaseLabel it carries, counted or not (protocol.LeaseOf).
-	// One of this daemon's leases: the shim made it, or it is forged, and
-	// it is no compose lease's service. Another run's is inherited from an
-	// image committed from a gated container.
+	// mark is the LeaseLabel it carries, counted or not (protocol.LeaseOf),
+	// once Book.unmark keeps it only for a live lease's: the shim made it,
+	// or it is forged, and it is no compose lease's service. One of a lease
+	// that is over is inherited from an image committed from a gated
+	// container.
 	mark     string
 	dir      string // a compose container's project directory
 	kind     string // container, compose (a compose project's container) or vm
@@ -567,7 +578,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		for _, id := range e.containerIDs {
 			// A container whose label names an open lease is that lease's:
 			// the label outranks an ID.
-			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, r, true) == e {
+			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, b.unmark(r), true) == e {
 				e.bind(r)
 				b.judge(r, gated, now)
 				bound[r.key] = true
@@ -576,8 +587,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	var fresh []resource // new this tick, and bound to no lease yet
 	for _, r := range res {
-		if !b.prev[r.key] && !b.boundAnywhere(r.key) {
-			fresh = append(fresh, r)
+		if !b.prev[r.key] && !bound[r.key] {
+			fresh = append(fresh, b.unmark(r))
 		}
 	}
 	// Compose services before one-off containers: a compose run's
@@ -778,6 +789,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		if b.boundAnywhere(r.key) {
 			return
 		}
+		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
 		switch {
 		case e == nil:
@@ -896,24 +908,35 @@ func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
 
-// sameRun reports whether lease IDs a and b are of one run of the daemon:
-// lease-<run>-<n>.
-func sameRun(a, b string) bool {
-	i, j := strings.LastIndexByte(a, '-'), strings.LastIndexByte(b, '-')
-	return i > 0 && j > 0 && a[:i] == b[:j]
+// live reports whether id is an open or lapsed lease's.
+func (b *Book) live(id string) bool {
+	is := func(e *entry) bool { return e.ID == id }
+	return id != "" && (slices.ContainsFunc(b.open, is) || slices.ContainsFunc(b.lapsed, is))
 }
 
-// rank is how sure e's key for r is: a label, then a start's container ID
-// or a compose project's name, then a name, or a compose run's lease for a
-// service (after any up's).
+// unmark drops the mark of a resource whose label names no live lease
+// (resource.mark).
+func (b *Book) unmark(r resource) resource {
+	if !b.live(r.mark) {
+		r.mark = ""
+	}
+	return r
+}
+
+// rank is how sure e's key for r is: a label, then a start's container ID,
+// then a compose project's name (or a start's first target, by its name,
+// not resolved), then a name, or a compose run's lease for a service
+// (after any up's).
 func rank(e *entry, r resource) int {
 	switch {
 	case e.labelled:
 		return 0
+	case slices.Contains(e.containerIDs, r.id):
+		return 1 // docker start of a stopped service: its own lease
 	case len(e.containerIDs) > 0, e.Kind == "compose" && (!e.oneoff || r.oneoff):
-		return 1
+		return 2
 	}
-	return 2
+	return 3
 }
 
 // tied reports whether another worktree's lease in es keys r as surely as
@@ -970,7 +993,7 @@ func (e *entry) key(r resource, based bool) bool {
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
 		switch {
-		case !based || e.project == "" || e.project != r.project || sameRun(r.mark, e.ID):
+		case !based || e.project == "" || e.project != r.project || r.mark != "":
 			// mark: a shim run dressed as Compose's (its config hash and
 			// project) must not take a project's lease by its name.
 			return false

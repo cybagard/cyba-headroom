@@ -615,7 +615,7 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 	// --context or -H on the call: before DOCKER_HOST, as the CLI takes it.
 	for endpoint, want := range map[string]string{
 		"desktop-linux":   "unix:///Users/dev/.docker/run/docker.sock",
-		"default":         "unix:///var/run/docker.sock",
+		"default":         "unix:///x.sock", // the default context is DOCKER_HOST
 		"unix:///y.sock":  "unix:///y.sock",
 		"tcp://host:2375": "tcp://host:2375",
 	} {

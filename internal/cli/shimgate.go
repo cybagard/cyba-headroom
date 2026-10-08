@@ -477,6 +477,9 @@ func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) st
 		}
 		name = cfg.CurrentContext
 	}
+	if name == "default" && getenv("DOCKER_HOST") != "" {
+		return getenv("DOCKER_HOST") // --context default: DOCKER_HOST's
+	}
 	if name == "" || name == "default" {
 		return "unix:///var/run/docker.sock"
 	}

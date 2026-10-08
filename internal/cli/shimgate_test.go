@@ -25,7 +25,7 @@ import (
 // shimRig runs the shim against a fake daemon (ask) and records what it
 // would exec.
 type shimRig struct {
-	t        *testing.T
+	t        testing.TB
 	dir      string // PATH dir with fake docker and tart, and the config dir
 	env      []string
 	ask      func(protocol.CheckRequest) (*protocol.Decision, error)
@@ -42,7 +42,7 @@ type shimRig struct {
 	pending  os.Signal // a signal that came during an ask
 }
 
-func newShimRig(t *testing.T) *shimRig {
+func newShimRig(t testing.TB) *shimRig {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {

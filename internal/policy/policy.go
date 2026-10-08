@@ -24,6 +24,9 @@ const (
 	WorktreeCap = "worktree_cap"
 	Headroom    = "headroom"
 	VMSlots     = "vm_slots"
+	// StaleSnapshot: the collector has not refreshed the snapshot in
+	// MaxSnapshotAge, so nothing current is known (R7, #30).
+	StaleSnapshot = "stale_snapshot"
 )
 
 // Config is the policy's settings, in bytes.
@@ -48,6 +51,9 @@ type Config struct {
 	// MaxMacOSVMs is how many macOS VMs may run at once (R6); Apple's
 	// licence allows two.
 	MaxMacOSVMs int
+	// MaxSnapshotAge is how old the snapshot may be before decisions treat
+	// it as unknown: the collector has stalled. 0 means no limit.
+	MaxSnapshotAge time.Duration
 }
 
 // Request describes one resource-creating call.
@@ -115,6 +121,14 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Message = "headroom: allowed (manual call)"
 		return d
 	}
+	if age, ok := snapshotAge(s, c); ok && age > c.MaxSnapshotAge {
+		// Fail open (R7): decide on nothing rather than on old readings.
+		d.Allow = true
+		d.Reasons = []Reason{{Code: StaleSnapshot, Text: fmt.Sprintf(
+			"the daemon's readings are %s old (its collector has stalled), so headroom cannot gate this call", shortDuration(age))}}
+		d.Message = message(r, s, d)
+		return d
+	}
 	use, held := worktreeUse(s, r.Worktree)
 	d.Holding = held
 	// Count first, memory second (R6).
@@ -160,6 +174,15 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	}
 	d.Message = message(r, s, d)
 	return d
+}
+
+// snapshotAge is how old s is; ok is false when that is not known or not
+// limited.
+func snapshotAge(s *protocol.Snapshot, c Config) (time.Duration, bool) {
+	if c.MaxSnapshotAge <= 0 || c.Now == nil || s.CollectedAt.IsZero() {
+		return 0, false
+	}
+	return c.Now().Sub(s.CollectedAt), true
 }
 
 // slots is the macOS VM slot rule: running plus starting macOS VMs must

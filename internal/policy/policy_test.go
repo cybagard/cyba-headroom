@@ -269,3 +269,21 @@ func TestAbsurdCostsCannotWrapTheArithmetic(t *testing.T) {
 		t.Fatalf("allowed with absurd leases: %+v", d)
 	}
 }
+
+// A snapshot the collector stopped refreshing says nothing current: the
+// call is allowed as unknown rather than decided on old readings (R7, #30).
+func TestAnOldSnapshotIsUnknown(t *testing.T) {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(0) // would deny
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	s.CollectedAt = now.Add(-30 * time.Second)
+	if d := policy.Decide(req("busy", gib), s, c); d.Allow {
+		t.Fatalf("a fresh snapshot must decide: %+v", d)
+	}
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	d := policy.Decide(req("busy", gib), s, c)
+	if !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot || !strings.Contains(d.Message, "2m") {
+		t.Fatalf("an old snapshot: %+v", d)
+	}
+}

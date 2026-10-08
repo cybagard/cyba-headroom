@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,7 +77,7 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	}
 	cfg, err := config.Load(getenv)
 	if err != nil {
-		fmt.Fprintf(e.Stderr, "headroom: %v; `%s` not gated\n", err, c.Command)
+		notGated(e, "config: "+oneLine(err), c.Command)
 		return gated{proceed: true}
 	}
 	h := e.withDefaults()
@@ -110,13 +112,10 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 			}
 		}
 		switch {
-		case errors.Is(err, errCannotCheck):
-			fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install. `%s` not gated\n", err, c.Command)
-			return gated{proceed: true}
 		case err != nil:
 			// Also while waiting: a daemon that went away must not hold
 			// the call (R7).
-			fmt.Fprintf(e.Stderr, "headroom: daemon not reachable (%v); `%s` not gated\n", err, c.Command)
+			notGated(e, "daemon "+daemonCause(err, cfg.Policy.DaemonTimeout.Duration), c.Command)
 			return gated{proceed: true}
 		case d.Allow:
 			if getenv("HEADROOM_SHIM_DEBUG") != "" {
@@ -178,6 +177,34 @@ func callerRequest(getenv func(string) string, ancestors func() []int) protocol.
 	}
 	r.Ancestors = ancestors()
 	return r
+}
+
+// notGated warns, in one line, that a call runs without a check (R7).
+func notGated(e Env, cause, command string) {
+	fmt.Fprintf(e.Stderr, "headroom: not gated (%s); running `%s` anyway. See: headroom status\n", cause, command)
+}
+
+// daemonCause says briefly why the daemon gave no decision.
+func daemonCause(err error, timeout time.Duration) string {
+	var ne net.Error
+	switch {
+	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion):
+		return "is another version: restart it with this build: headroom install"
+	case errors.Is(err, client.ErrBadReply):
+		return "gave a bad reply"
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return fmt.Sprintf("gave no answer in %s", timeout)
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "socket not accessible"
+	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.ENOTSOCK):
+		return "not running"
+	}
+	return "unreachable: " + oneLine(err)
+}
+
+// oneLine is err's text on one line.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 // askDaemon sends one check to the daemon. errCannotCheck means it

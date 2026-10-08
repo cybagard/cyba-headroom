@@ -121,6 +121,8 @@ type Policy struct {
 func (c Config) PolicyConfig() policy.Config {
 	p := c.Policy.config()
 	p.MaxMacOSVMs = c.Budget.MaxMacOSVMs
+	// Three missed ticks mean the collector has stalled (#30).
+	p.MaxSnapshotAge = max(3*c.Daemon.Interval.Duration, 30*time.Second)
 	return p
 }
 

@@ -136,6 +136,10 @@ type Attribution struct {
 // its project directory.
 const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
 
+// ComposeProjectLabel is the label Docker Compose sets on a container to its
+// project name.
+const ComposeProjectLabel = "com.docker.compose.project"
+
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {
 	ID   string `json:"id"`

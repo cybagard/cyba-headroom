@@ -443,3 +443,48 @@ func TestLeasesKeepOnlyWhatTheCallWas(t *testing.T) {
 		t.Fatalf("lease command = %q", got)
 	}
 }
+
+func TestARestartedVMBindsItsNewLease(t *testing.T) {
+	b, c, log := book(t)
+	running := snap()
+	running.Tart.VMs = []protocol.TartVM{{Name: "ci-vm", MemoryBytes: 4 * gib}}
+	b.Observe(running) // ci-vm runs
+	b.Observe(snap())  // stopped
+	c.t = c.t.Add(5 * time.Minute)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run ci-vm", CostBytes: 4 * gib}, snap(), cfg)
+	b.Observe(running) // started again by that call
+	if len(b.List()) != 0 {
+		t.Fatalf("the restarted VM did not settle its lease: %+v (%s)", b.List(), log)
+	}
+}
+
+func TestACheckBeforeTheFirstTickBindsItsContainer(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(req("w1", gib), &protocol.Snapshot{}, cfg) // the daemon has no reading yet
+	s := withContainer(snap(), "c2", "w1")             // "old" existed before; c2 is this call's
+	b.Observe(s)
+	if len(b.List()) != 0 {
+		t.Fatalf("its container did not settle the lease: %+v", b.List())
+	}
+}
+
+func TestWithoutABaselineOnlyTheWorktreesOwnContainerBinds(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(req("w1", gib), &protocol.Snapshot{}, cfg)
+	b.Observe(snap()) // only "old", unattributed: not this call's
+	if len(b.List()) != 1 {
+		t.Fatal("an unattributed container that may have been there before bound the lease")
+	}
+}
+
+func TestExpiredLeasesStopCountingWithoutObserve(t *testing.T) {
+	b, c, log := book(t)
+	b.Check(req("w1", 6*gib), snap(), cfg)
+	c.t = c.t.Add(10 * time.Minute) // derive stalled: no Observe since
+	if d := b.Check(req("w2", 6*gib), snap(), cfg); !d.Allow {
+		t.Fatalf("an expired lease still counted: %+v", d)
+	}
+	if !strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("expiry not logged: %s", log)
+	}
+}

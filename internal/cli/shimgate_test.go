@@ -668,7 +668,7 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
-	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "--profile", "*", "config", "--format", "json"}
+	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
@@ -850,5 +850,21 @@ func TestAnAttachedUpIsNotDryRun(t *testing.T) {
 		if dry != want {
 			t.Errorf("%s: dry run %d times, want %d", args, dry, want)
 		}
+	}
+}
+
+// The config the shim reads for a dry run is the call's own project: its
+// global flags (-p, -f, --env-file, --config) as given, which Compose
+// interpolates (include: ${COMPOSE_PROJECT_NAME}.yml).
+func TestComposeConfigIsTheCallsOwnProject(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	var asked []string
+	r.composeAsk = func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"evil"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { return []byte(" Container evil-a-1 Running \n"), nil }
+	r.run("docker", "--config", "/work/.docker", "compose", "-p", "evil", "-f", "c.yml", "up", "-d", "web")
+	want := []string{"--config", "/work/.docker", "compose", "-p", "evil", "-f", "c.yml", "--profile", "*", "config", "--format", "json"}
+	if !slices.Equal(asked, want) {
+		t.Fatalf("config asked with %q, want %q", asked, want)
 	}
 }

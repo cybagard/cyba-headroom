@@ -187,6 +187,23 @@ func DryRun(args []string) (out []string, ok bool) {
 	return append(out, args[at:]...), true
 }
 
+// ComposeConfig returns the args that ask Compose for a docker compose
+// call's project as JSON, every profile's services included: the call's
+// own global options (-p, -f, --env-file, --config, --context), which
+// Compose interpolates, then config. ok is false for any other call.
+func ComposeConfig(args []string) (out []string, ok bool) {
+	c, at := parseEngine("docker", args)
+	if c.Kind != "compose" || at < 0 {
+		return nil, false
+	}
+	rest, res, _ := scanPast(args[at:], composeGlobal, isComposeCommand, nil)
+	if res == askedHelp || len(rest) == 0 {
+		return nil, false
+	}
+	out = slices.Clone(args[:len(args)-len(rest)])
+	return append(out, "--profile", "*", "config", "--format", "json"), true
+}
+
 func parseCompose(endpoint string, words, args []string) Call {
 	var project, projectDir string
 	var files, envFiles []string

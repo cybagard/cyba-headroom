@@ -36,6 +36,9 @@ type CheckRequest struct {
 	// Kind is container, compose or tart.
 	Kind    string `json:"kind"`
 	Command string `json:"command"`
+	// Args is the command's argv. Leases keep it redacted per argument, so
+	// a quoted secret with spaces is redacted whole.
+	Args []string `json:"args,omitempty"`
 	// CostBytes is the caller's estimate; 0 means the policy's default.
 	CostBytes uint64 `json:"cost_bytes,omitempty"`
 }

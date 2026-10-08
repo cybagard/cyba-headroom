@@ -109,7 +109,18 @@ func withContainer(s *protocol.Snapshot, id, wt string) *protocol.Snapshot {
 }
 
 func withContainerMem(s *protocol.Snapshot, id, wt string, mem uint64) *protocol.Snapshot {
-	s.Docker.Containers = append(s.Docker.Containers, protocol.Container{ID: id, Name: id, MemoryBytes: mem})
+	return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: mem}, wt)
+}
+
+// withComposeContainer adds a container of a compose project.
+func withComposeContainer(s *protocol.Snapshot, id, wt string, mem uint64) *protocol.Snapshot {
+	return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: mem,
+		Labels: map[string]string{"com.docker.compose.project": "app"}}, wt)
+}
+
+func addContainer(s *protocol.Snapshot, c protocol.Container, wt string) *protocol.Snapshot {
+	id := c.ID
+	s.Docker.Containers = append(s.Docker.Containers, c)
 	if wt != "" {
 		for i := range s.Attribution.Worktrees {
 			if s.Attribution.Worktrees[i].ID == wt {
@@ -188,9 +199,9 @@ func TestOneResourceSettlesOneLease(t *testing.T) {
 func TestComposeSettlesOnItsFirstContainer(t *testing.T) {
 	b, _, _ := book(t)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
-	b.Observe(withContainer(snap(), "db", "w1"))
+	b.Observe(withComposeContainer(snap(), "db", "w1", 3*gib))
 	if len(b.List()) != 0 {
-		t.Fatal("compose lease still open after its first container")
+		t.Fatal("compose lease still open after its containers used its cost")
 	}
 }
 
@@ -268,12 +279,12 @@ func TestALeaseKeepsWhatItsContainerHasNotUsedYet(t *testing.T) {
 func TestComposeBindsAllItsNewContainers(t *testing.T) {
 	b, _, _ := book(t)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
-	s := withContainerMem(snap(), "db", "w1", gib)
+	s := withComposeContainer(snap(), "db", "w1", gib)
 	b.Observe(s)
 	if r := reserved(b); r != 2*gib {
 		t.Fatalf("reserved %d after db, want 2 GiB", r)
 	}
-	b.Observe(withContainerMem(withContainerMem(snap(), "db", "w1", gib), "web", "w1", 2*gib))
+	b.Observe(withComposeContainer(withComposeContainer(snap(), "db", "w1", gib), "web", "w1", 2*gib))
 	if len(b.List()) != 0 {
 		t.Fatal("compose lease open after its containers used it")
 	}
@@ -324,5 +335,68 @@ func TestCommandsAreRedacted(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "AWS_SECRET_ACCESS_KEY=…") || !strings.Contains(cmd, "-e PLAIN") || !strings.Contains(cmd, "img") {
 		t.Errorf("redacted too much: %q", cmd)
+	}
+}
+
+func TestComposeAndPlainLeasesTakeTheirOwnContainers(t *testing.T) {
+	b, c, _ := book(t)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.Check(req("w1", 2*gib), snap(), cfg)
+	b.Observe(withContainerMem(snap(), "x", "w1", 2*gib)) // the plain docker run's container
+	ls := b.List()
+	if len(ls) != 1 || ls[0].Kind != "compose" {
+		t.Fatalf("open leases = %+v, want only the compose lease", ls)
+	}
+}
+
+func TestAnExpiredLeaseDoesNotTakeALiveLeasesContainer(t *testing.T) {
+	b, c, log := book(t)
+	b.Check(req("w1", gib), snap(), cfg) // its call failed: no container
+	c.t = t0.Add(time.Minute)
+	b.Check(req("w1", gib), snap(), cfg)
+	c.t = t0.Add(2 * time.Minute) // the first expires as the second's container appears
+	b.Observe(withContainer(snap(), "c2", "w1"))
+	if len(b.List()) != 0 {
+		t.Fatalf("open leases = %+v", b.List())
+	}
+	if !strings.Contains(log.String(), "never appeared") || !strings.Contains(log.String(), "lease-1") {
+		t.Fatalf("the expired lease was not logged: %s", log)
+	}
+}
+
+func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	b.Observe(withComposeContainer(snap(), "migrate", "w1", gib/10))
+	b.Observe(snap()) // migrate exited; db and app not up yet
+	if r := reserved(b); r != 3*gib {
+		t.Fatalf("reserved %d, want the full 3 GiB until the services come up", r)
+	}
+}
+
+func TestArgsAreRedactedWhole(t *testing.T) {
+	got := lease.RedactArgs([]string{"docker", "run", "-e", "API_KEY=abc def ghi", "--env=TOKEN=x y",
+		"-e", "PLAIN", "img", "git", "clone", "https://user:pa ss@host/repo", "sh", "-c", "echo hi there"})
+	for _, secret := range []string{"abc", "def", "ghi", "x y", "pa ss", "user:"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("%q leaked: %s", secret, got)
+		}
+	}
+	for _, kept := range []string{"API_KEY=…", "--env=TOKEN=…", "-e PLAIN", "img", "https://…@host/repo", `"echo hi there"`} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("lost %q: %s", kept, got)
+		}
+	}
+}
+
+func TestLeasesRedactTheArgsWhenGiven(t *testing.T) {
+	b, _, _ := book(t)
+	r := req("w1", gib)
+	r.Command = "docker run -e API_KEY=abc def img"
+	r.Args = []string{"docker", "run", "-e", "API_KEY=abc def", "img"}
+	b.Check(r, snap(), cfg)
+	if cmd := b.List()[0].Command; strings.Contains(cmd, "def") {
+		t.Fatalf("command = %q", cmd)
 	}
 }

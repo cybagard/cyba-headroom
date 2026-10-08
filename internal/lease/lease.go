@@ -15,7 +15,9 @@ package lease
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,14 +39,14 @@ type Book struct {
 	// Checks decide on it, so leases and the resources that replaced them
 	// are always seen together.
 	latest *protocol.Snapshot
+	// prev are the resources in latest. A resource not among them is new:
+	// it can bind a lease.
+	prev map[string]bool
 }
 
 type entry struct {
 	protocol.Lease
 	cost uint64
-	// seen are resources that existed, or had their chance to bind, while
-	// this lease was open: containers by ID, VMs by name.
-	seen map[string]bool
 	// bound are this lease's own resources, and used what they use now.
 	bound map[string]bool
 	used  uint64
@@ -61,14 +63,18 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 
 // Check decides r, counting what every open lease still reserves, and leases
 // the cost of an allow. It decides on the snapshot the leases were last
-// settled against (s only until the first Observe), and the whole step holds
-// the book's lock: concurrent checks run one after another, and the second
-// sees the first's lease.
-func (b *Book) Check(r policy.Request, s *protocol.Snapshot, c policy.Config) protocol.Decision {
+// settled against; fallback is used only before the first Observe. The whole
+// step holds the book's lock: concurrent checks run one after another, and
+// the second sees the first's lease.
+func (b *Book) Check(r policy.Request, fallback *protocol.Snapshot, c policy.Config) protocol.Decision {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.latest != nil {
-		s = b.latest
+	s := b.latest
+	if s == nil {
+		s = fallback
+		if b.prev == nil {
+			b.prev = keys(resources(s))
+		}
 	}
 	var leased uint64
 	for _, e := range b.open {
@@ -82,15 +88,16 @@ func (b *Book) Check(r policy.Request, s *protocol.Snapshot, c policy.Config) pr
 	}
 	b.nextID++
 	at := b.now()
+	command := Redact(r.Command)
+	if len(r.Args) > 0 {
+		command = RedactArgs(r.Args)
+	}
 	e := &entry{
 		Lease: protocol.Lease{
-			ID: fmt.Sprintf("lease-%d", b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Redact(r.Command),
+			ID: fmt.Sprintf("lease-%d", b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: command,
 			Created: at, Expires: at.Add(b.timeout),
 		},
-		cost: d.CostBytes, seen: map[string]bool{}, bound: map[string]bool{},
-	}
-	for _, res := range resources(s) {
-		e.seen[res.key] = true
+		cost: d.CostBytes, bound: map[string]bool{},
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
@@ -100,7 +107,7 @@ func (b *Book) Check(r policy.Request, s *protocol.Snapshot, c policy.Config) pr
 // resource is a container or VM in a snapshot.
 type resource struct {
 	key      string // "container:<id>" or "vm:<name>"
-	kind     string // container or vm
+	kind     string // container, compose (a compose project's container) or vm
 	worktree string // "" when unattributed
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
@@ -123,7 +130,11 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
 			k := "container:" + c.ID
-			out = append(out, resource{key: k, kind: "container", worktree: owner[k], bytes: c.MemoryBytes})
+			kind := "container"
+			if c.Labels[composeProjectLabel] != "" {
+				kind = "compose"
+			}
+			out = append(out, resource{key: k, kind: kind, worktree: owner[k], bytes: c.MemoryBytes})
 		}
 	}
 	if s.Tart != nil {
@@ -135,36 +146,51 @@ func resources(s *protocol.Snapshot) []resource {
 	return out
 }
 
-// waitsFor is the resource kind a lease binds.
-func (e *entry) waitsFor() string {
-	if e.Kind == "tart" {
-		return "vm"
+// composeProjectLabel marks a container that Docker Compose created.
+const composeProjectLabel = "com.docker.compose.project"
+
+func keys(rs []resource) map[string]bool {
+	m := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		m[r.key] = true
 	}
-	return "container" // container and compose
+	return m
+}
+
+// waitsFor is the resource kind a lease binds: a VM for tart, a compose
+// container for compose, a plain container otherwise.
+func (e *entry) waitsFor() string {
+	switch e.Kind {
+	case "tart":
+		return "vm"
+	case "compose":
+		return "compose"
+	}
+	return "container"
 }
 
 // takes reports whether e can bind another resource: compose binds every
-// new container of its project, the rest bind one.
+// new compose container, the rest bind one.
 func (e *entry) takes() bool { return e.Kind == "compose" || len(e.bound) == 0 }
 
 // Observe binds new resources in s to leases, ends leases whose resources
-// use their cost or are gone, and expires those past their timeout. Call it
-// on every snapshot before it is published; checks then decide on s.
+// use their cost, and expires those past their timeout. Call it on every
+// snapshot before it is published; checks then decide on s.
 func (b *Book) Observe(s *protocol.Snapshot) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.latest = s
+	now := b.now()
 	res := resources(s)
 	present := map[string]uint64{}
 	for _, r := range res {
 		present[r.key] = r.bytes
-		if !b.boundAnywhere(r.key) {
-			if e := b.match(r); e != nil {
+		if b.prev != nil && !b.prev[r.key] && !b.boundAnywhere(r.key) {
+			if e := b.match(r, now); e != nil {
 				e.bound[r.key] = true
 			}
 		}
 	}
-	now := b.now()
+	b.latest, b.prev = s, keys(res)
 	b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 		e.used = 0
 		alive := 0
@@ -175,12 +201,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			}
 		}
 		switch {
-		case len(e.bound) > 0 && (alive == 0 || e.used >= e.cost):
-			return true // its resources use the cost, or are gone
+		case len(e.bound) > 0 && e.used >= e.cost:
+			return true // its resources use the cost
+		case len(e.bound) > 0 && alive == 0 && e.Kind != "compose":
+			// Its container or VM is gone. A compose project's first
+			// container may be a one-shot; the services come after it.
+			return true
 		case now.Before(e.Expires):
-			for _, r := range res {
-				e.seen[r.key] = true // it had its chance to bind
-			}
 			return false
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
@@ -196,29 +223,36 @@ func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
 
-// match finds the lease r binds to: the oldest open lease of its kind that
-// has not seen r and can take it. A lease of r's own worktree comes first,
-// then a manual call's lease (a command typed in a worktree's directory),
-// and an unattributed r may bind any such lease.
-func (b *Book) match(r resource) *entry {
-	var manual, other *entry
-	for _, e := range b.open {
-		if e.seen[r.key] || e.waitsFor() != r.kind || !e.takes() {
-			continue
+// match finds the lease a new resource r binds to: the oldest open lease of
+// its kind that can take it. A lease of r's own worktree comes first, then a
+// manual call's lease (a command typed in a worktree's directory), and an
+// unattributed r may bind any such lease. Leases still within their time
+// come before expired ones, so a lease whose own call failed cannot take a
+// newer lease's resource on its last tick.
+func (b *Book) match(r resource, now time.Time) *entry {
+	for _, live := range []bool{true, false} {
+		var manual, other *entry
+		for _, e := range b.open {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes() {
+				continue
+			}
+			switch {
+			case r.worktree != "" && e.Worktree == r.worktree:
+				return e
+			case e.Worktree == "" && manual == nil:
+				manual = e
+			case r.worktree == "" && other == nil:
+				other = e
+			}
 		}
-		switch {
-		case r.worktree != "" && e.Worktree == r.worktree:
-			return e
-		case e.Worktree == "" && manual == nil:
-			manual = e
-		case r.worktree == "" && other == nil:
-			other = e
+		if manual != nil {
+			return manual
+		}
+		if other != nil {
+			return other
 		}
 	}
-	if manual != nil {
-		return manual
-	}
-	return other
+	return nil
 }
 
 // List returns the open leases, oldest first, each with what it still
@@ -236,6 +270,39 @@ func (b *Book) List() []protocol.Lease {
 
 // valueFlags take a value that may carry a secret: -e TOKEN=x.
 var valueFlags = map[string]bool{"-e": true, "--env": true, "--build-arg": true, "--secret": true}
+
+// credentials matches user:password@ in a URL.
+var credentials = regexp.MustCompile(`://[^/@]+@`)
+
+// RedactArgs is Redact for an argv: each argument is redacted whole, so a
+// quoted secret with spaces cannot leak its tail, and URLs lose their
+// credentials. Arguments with spaces are shown quoted.
+func RedactArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		a = credentials.ReplaceAllString(a, "://…@")
+		flag, value, hasEq := strings.Cut(a, "=")
+		switch {
+		case hasEq && valueFlags[flag]: // --env=TOKEN=x
+			if k, _, ok := strings.Cut(value, "="); ok {
+				a = flag + "=" + k + "=…"
+			}
+		case hasEq && !strings.Contains(flag, " "):
+			a = flag + "=…"
+		case i > 0 && valueFlags[args[i-1]] && hasEq:
+			a = flag + "=…"
+		}
+		if strings.ContainsAny(a, " \t") {
+			a = strconv.Quote(a)
+		}
+		out[i] = a
+	}
+	s := strings.Join(out, " ")
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:299]) + "…"
+	}
+	return s
+}
 
 // Redact drops what a command may carry in the clear before it is kept in a
 // lease, the snapshot and the log: every KEY=value becomes KEY=…, including

@@ -52,6 +52,9 @@ type Request struct {
 	Kind string
 	// Command is what was run, for messages.
 	Command string
+	// Args is the command's argv, when the caller has it: what a lease
+	// keeps, redacted argument by argument.
+	Args []string
 	// CostBytes is the caller's estimate; 0 means the default for Kind.
 	CostBytes uint64
 	// LeasedBytes is memory promised to earlier allows that has not shown

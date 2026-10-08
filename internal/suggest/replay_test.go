@@ -32,6 +32,12 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 		"sources unknown": {
 			Host: &protocol.Host{TotalBytes: 64 * gib},
 		},
+		"docker VM unreadable": {
+			Host: &protocol.Host{TotalBytes: 64 * gib},
+			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib, VMError: "lsof: timed out",
+				Containers: []protocol.Container{{Name: "db", MemoryBytes: 3 * gib}}},
+			Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
+		},
 		"docker VM stopped by Resource Saver": {
 			Host:   &protocol.Host{TotalBytes: 64 * gib},
 			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib},

@@ -31,6 +31,9 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 		if d := s.Docker; d != nil {
 			out.Docker = &protocol.Docker{Running: true, VMRunning: d.VMRunning,
 				VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes}
+			if d.VMUnknown {
+				out.Docker.VMError = "unknown when recorded"
+			}
 			for _, c := range s.Containers {
 				out.Docker.Containers = append(out.Docker.Containers, protocol.Container{Name: c.Name, MemoryBytes: c.MemoryBytes})
 			}

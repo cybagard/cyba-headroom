@@ -124,7 +124,10 @@ func (b Budget) Params() budget.Params {
 // cannot overflow when converted to bytes.
 const maxBudgetGB = 1024
 
-func gib(v float64) uint64 { return uint64(v * (1 << 30)) }
+func gib(v float64) uint64 { return GiB(v) }
+
+// GiB converts a size in GB (GiB) to bytes, as the budget takes it.
+func GiB(v float64) uint64 { return uint64(v * (1 << 30)) }
 
 // Duration is a time.Duration that reads TOML strings such as "2m".
 type Duration struct{ time.Duration }

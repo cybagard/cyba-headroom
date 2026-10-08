@@ -76,3 +76,15 @@ func TestMergeRefusesArraysOfTables(t *testing.T) {
 		t.Fatal("want an error for [[budget]]")
 	}
 }
+
+func TestMergeKeepsAKeyAboveTheNextSectionsComment(t *testing.T) {
+	in := "[budget]\nhost_baseline_gb = 4\n\n# --- admission policy ---\n[policy]\n"
+	out, err := Merge([]byte(in), []Setting{{"budget", "docker_overhead_gb", "1.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[budget]\nhost_baseline_gb = 4\ndocker_overhead_gb = 1.7\n\n# --- admission policy ---\n[policy]\n"
+	if string(out) != want {
+		t.Fatalf("got:\n%s", out)
+	}
+}

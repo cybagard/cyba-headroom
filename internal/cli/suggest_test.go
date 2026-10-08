@@ -85,7 +85,11 @@ func TestSuggestAndWrite(t *testing.T) {
 	if !strings.Contains(string(b), "host_baseline_gb = 6 # old guess") || !strings.HasPrefix(string(b), "# mine\n") {
 		t.Fatalf("config:\n%s", b)
 	}
-	if bak, _ := os.ReadFile(filepath.Join(dir, "config.toml.bak")); string(bak) != orig {
+	baks, _ := filepath.Glob(filepath.Join(dir, "config.toml.bak-*"))
+	if len(baks) != 1 {
+		t.Fatalf("backups = %v", baks)
+	}
+	if bak, _ := os.ReadFile(baks[0]); string(bak) != orig {
 		t.Fatalf("backup = %q", bak)
 	}
 	cfg, err := config.LoadDir(dir)
@@ -112,10 +116,32 @@ func TestSuggestSinceLeavesOutOlderDays(t *testing.T) {
 
 func TestSuggestArgs(t *testing.T) {
 	_, env := suggestEnv(t)
-	for _, args := range [][]string{{"--since"}, {"--since", "soon"}, {"--since", "-1d"}, {"--bogus"}} {
+	for _, args := range [][]string{{"--since"}, {"--since", "soon"}, {"--since", "-1d"}, {"--since", "200000d"}, {"--bogus"}} {
 		code, _, stderr := run(t, env, append([]string{"headroom", "suggest"}, args...)...)
 		if code != 2 {
 			t.Errorf("%v: exit %d, %s", args, code, stderr)
 		}
+	}
+}
+
+func TestSecondWriteKeepsTheOriginalBackup(t *testing.T) {
+	dir, env := suggestEnv(t)
+	writeSamples(t, dir, []int{3, 2, 1}, 2)
+	orig := "# hand-written\n"
+	_ = os.WriteFile(filepath.Join(dir, "config.toml"), []byte(orig), 0o600)
+	for i := 0; i < 2; i++ {
+		if code, _, stderr := run(t, env, "headroom", "suggest", "--write"); code != 0 {
+			t.Fatalf("run %d: %s", i, stderr)
+		}
+	}
+	baks, _ := filepath.Glob(filepath.Join(dir, "config.toml.bak-*"))
+	found := false
+	for _, b := range baks {
+		if data, _ := os.ReadFile(b); string(data) == orig {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the hand-written config is lost; backups %v", baks)
 	}
 }

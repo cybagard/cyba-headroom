@@ -20,7 +20,7 @@ var (
 // user's other keys, comments and layout stay as they are (#23):
 //   - a key already in its section gets the new value, keeping its trailing
 //     comment;
-//   - a missing key goes after the last line of its section;
+//   - a missing key goes after the last key of its section;
 //   - a missing section is appended.
 //
 // Values are written as given: callers pass TOML literals. The result should
@@ -68,13 +68,15 @@ func set(lines []string, s Setting) []string {
 		}
 		return append(lines, "["+s.Section+"]", s.Key+" = "+s.Value)
 	}
-	last := start - 1 // the section's last non-blank line
+	// A new key goes after the section's last key, not after comments that
+	// may introduce the next section.
+	last := start - 1
 	for i := start; i < end; i++ {
 		if m := keyLine.FindStringSubmatch(lines[i]); m != nil {
 			lines[i] = m[1] + s.Value + m[3]
 			return lines
 		}
-		if strings.TrimSpace(lines[i]) != "" {
+		if t := strings.TrimSpace(lines[i]); t != "" && !strings.HasPrefix(t, "#") {
 			last = i
 		}
 	}

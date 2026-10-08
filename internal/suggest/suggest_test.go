@@ -1,6 +1,7 @@
 package suggest_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +252,47 @@ func TestConcurrencyAdvice(t *testing.T) {
 	a := advice(aggregate(ss))
 	if !strings.Contains(a, "Up to 3 agents worked in parallel at normal pressure") || !strings.Contains(a, "a median of 4 agents working") {
 		t.Fatalf("advice = %s", a)
+	}
+}
+
+func TestValuesHaveNoFloatNoise(t *testing.T) {
+	// 1.63 GiB of overhead rounds up to 1.7, which 17 × 0.1 gets wrong.
+	ss := threeDays(func(s *samples.Sample, _ int) {
+		s.Docker = &samples.Docker{VMRunning: true, VMFootprintBytes: gib * 163 / 100}
+	})
+	if v := value(t, aggregate(ss), "docker_overhead_gb"); v.GB != 1.7 || fmt.Sprint(v.GB) != "1.7" {
+		t.Fatalf("docker overhead = %v", v.GB)
+	}
+}
+
+func TestNoAdviceToLowerDockerToWhatItIs(t *testing.T) {
+	ss := threeDays(func(s *samples.Sample, _ int) {
+		s.Docker = &samples.Docker{VMRunning: true, VMLimitBytes: 2 * gib, VMFootprintBytes: gib * 9 / 10}
+	})
+	if a := advice(aggregate(ss)); strings.Contains(a, "Docker Desktop") {
+		t.Fatalf("advice = %s", a)
+	}
+}
+
+func TestSamplesCountForTheTimeTheyCover(t *testing.T) {
+	// Recorded every 30 s, read with a 5 s interval configured: 2 h of
+	// samples are 2 h, not 20 min.
+	ss := series(day0.Add(9*time.Hour), 240, func(_ int, at time.Time) samples.Sample {
+		return sample(at, []string{"working"}, 5*gib)
+	})
+	for i := range ss {
+		ss[i].T = day0.Add(9*time.Hour + time.Duration(i)*30*time.Second)
+	}
+	d := aggregate(ss).Days[0]
+	if d.WorkingHours < 1.9 || d.WorkingHours > 2.1 {
+		t.Fatalf("working hours = %v, want 2", d.WorkingHours)
+	}
+	// A long gap (sleep) counts as one interval, not as the gap.
+	ss = append(workingHours(0, 1, 5*gib), workingHours(0, 1, 5*gib)...)
+	for i := len(ss) / 2; i < len(ss); i++ {
+		ss[i].T = ss[i].T.Add(8 * time.Hour)
+	}
+	if d := aggregate(ss).Days[0]; d.WorkingHours > 2.1 {
+		t.Fatalf("a gap was counted: %v h", d.WorkingHours)
 	}
 }

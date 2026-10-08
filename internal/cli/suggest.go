@@ -80,6 +80,9 @@ func parseSince(s string) (time.Duration, error) {
 		if err != nil {
 			return 0, errors.New("want e.g. 14d or 72h")
 		}
+		if days > 10000 {
+			return 0, errors.New("at most 10000d")
+		}
 		d = time.Duration(days) * 24 * time.Hour
 	} else {
 		var err error
@@ -161,8 +164,12 @@ func writeSuggestion(e Env, cfg config.Config, r suggest.Result) int {
 		fmt.Fprintln(e.Stderr, "headroom: not writing the config:", err)
 		return 1
 	}
+	// A new backup each time: a later --write must not overwrite the copy of
+	// the hand-written config an earlier one kept.
+	bak := ""
 	if old != nil {
-		if err := writeFile(path+".bak", old, 0o600); err != nil {
+		bak = backupPath(path)
+		if err := writeFile(bak, old, 0o600); err != nil {
 			fmt.Fprintln(e.Stderr, "headroom:", err)
 			return 1
 		}
@@ -172,11 +179,24 @@ func writeSuggestion(e Env, cfg config.Config, r suggest.Result) int {
 		return 1
 	}
 	fmt.Fprintf(e.Stdout, "\nwrote %d setting(s) to %s", len(set), path)
-	if old != nil {
-		fmt.Fprintf(e.Stdout, " (the old file is %s.bak)", path)
+	if bak != "" {
+		fmt.Fprintf(e.Stdout, " (the old file is %s)", bak)
 	}
 	fmt.Fprintln(e.Stdout, "; restart the daemon to use them: headroom install")
 	return 0
+}
+
+// backupPath is a backup name for path that no file has yet:
+// config.toml.bak-20261008-061500, with -2, -3, ... if taken.
+func backupPath(path string) string {
+	base := path + ".bak-" + time.Now().Format("20060102-150405")
+	p := base
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+			return p
+		}
+		p = fmt.Sprintf("%s-%d", base, i)
+	}
 }
 
 // checkConfig loads data as a config file, in a scratch directory.

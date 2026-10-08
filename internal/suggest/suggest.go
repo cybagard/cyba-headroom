@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/budget"
+	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/samples"
 )
 
@@ -54,6 +56,9 @@ type Day struct {
 	WarnMinutes float64
 	CritMinutes float64
 	PeakSwap    uint64
+
+	// How much time the samples cover, all and working.
+	span, workSpan time.Duration
 }
 
 // Value is one suggested setting.
@@ -91,14 +96,19 @@ type Aggregator struct {
 	// LM Studio's footprint with no model loaded.
 	lmIdle []float64
 
-	// prev is the previous sample, for pressure onsets.
+	// prev is the previous sample, for pressure onsets and sample weights.
 	prev *samples.Sample
+	// How long the Docker VM ran, and LM Studio ran with no model loaded,
+	// in working samples.
+	dockerSpan, lmIdleSpan time.Duration
 	// Samples at which pressure turned warn, or critical, from normal.
 	warnOnsets, critOnsets []samples.Sample
 
 	// worktreePeak is each worktree's peak use (containers + Tart VMs'
 	// configured memory) per day.
 	worktreePeak map[worktreeDay]uint64
+	matcherKey   string
+	matcherFor   *attribution.Matcher
 
 	// For advice: the Docker VM's footprint and largest limit, each model's
 	// idle-and-loaded time per day, and the most agents working at normal
@@ -130,20 +140,23 @@ var budgetSources = []string{"host", "docker", "tart", "lmstudio"}
 // Add takes one sample.
 func (a *Aggregator) Add(s samples.Sample) {
 	onset := a.onset(s)
+	dt := a.weight(s)
 	a.prev = &s
 	day := a.day(s.T)
 	day.Samples++
+	day.span += dt
 	working := countWorking(s)
 	if working > 0 {
 		day.Working++
+		day.workSpan += dt
 	}
 	day.PeakWorking = max(day.PeakWorking, working)
 	if h := s.Host; h != nil {
 		switch h.Pressure {
 		case "warn":
-			day.WarnMinutes += a.o.Interval.Minutes()
+			day.WarnMinutes += dt.Minutes()
 		case "critical":
-			day.CritMinutes += a.o.Interval.Minutes()
+			day.CritMinutes += dt.Minutes()
 		}
 		day.PeakSwap = max(day.PeakSwap, h.SwapUsedBytes)
 	}
@@ -171,13 +184,14 @@ func (a *Aggregator) Add(s samples.Sample) {
 			// Loaded, not busy, unused for over an hour, and nothing will
 			// unload it.
 			if m.TTL == nil && m.Status != "generating" && m.LastUsedAt != nil && s.T.Sub(*m.LastUsedAt) > idleModelAfter {
-				a.idleModel[modelDay{m.Key, day.Date}] += a.o.Interval
+				a.idleModel[modelDay{m.Key, day.Date}] += dt
 				a.modelSize[m.Key] = m.SizeBytes
 			}
 		}
 	}
 	if d := s.Docker; d != nil && d.VMRunning {
 		a.dockerFootprint = append(a.dockerFootprint, float64(d.VMFootprintBytes))
+		a.dockerSpan += dt
 		a.dockerLimit = max(a.dockerLimit, d.VMLimitBytes)
 		var payload uint64
 		for _, c := range s.Containers {
@@ -187,6 +201,7 @@ func (a *Aggregator) Add(s samples.Sample) {
 	}
 	if l := s.LMStudio; l != nil && len(l.Models) == 0 && l.FootprintBytes != nil {
 		a.lmIdle = append(a.lmIdle, float64(*l.FootprintBytes))
+		a.lmIdleSpan += dt
 	}
 	a.addWorktreeUse(s, day.Date)
 	if s.Budget != nil && s.Budget.UnaccountedBytes != nil {
@@ -207,7 +222,7 @@ func (a *Aggregator) Add(s samples.Sample) {
 // what came before is unknown.
 func (a *Aggregator) onset(s samples.Sample) string {
 	p := a.prev
-	if p == nil || p.Host == nil || s.Host == nil || s.T.Sub(p.T) > 3*a.o.Interval {
+	if p == nil || p.Host == nil || s.Host == nil || !a.contiguous(*p, s) {
 		return ""
 	}
 	switch {
@@ -250,10 +265,9 @@ func (a *Aggregator) Result() Result {
 	workDays := 0
 	for _, date := range a.sortedDays() {
 		d := *a.days[date]
-		d.Hours = hours(d.Samples, a.o.Interval)
-		d.WorkingHours = hours(d.Working, a.o.Interval)
+		d.Hours, d.WorkingHours = hours(d.span), hours(d.workSpan)
 		r.Days = append(r.Days, d)
-		if time.Duration(float64(d.Working)*float64(a.o.Interval)) >= minWorkingPerDay {
+		if d.workSpan >= minWorkingPerDay {
 			workDays++
 		}
 	}
@@ -283,7 +297,7 @@ func (a *Aggregator) params(vs []Value) budget.Params {
 		if !v.OK {
 			continue
 		}
-		b := uint64(v.GB * (1 << 30))
+		b := config.GiB(v.GB) // the conversion the daemon applies to config
 		switch v.Key {
 		case "host_baseline_gb":
 			p.HostBaselineBytes = b
@@ -343,7 +357,7 @@ func (a *Aggregator) concurrencyAdvice() []string {
 // dockerAdvice suggests a smaller Docker Desktop VM when its limit is far
 // above what it used. headroom never changes it.
 func (a *Aggregator) dockerAdvice() []string {
-	if a.span(len(a.dockerFootprint)) < minDockerTime || a.dockerLimit == 0 {
+	if a.dockerSpan < minDockerTime || a.dockerLimit == 0 {
 		return nil
 	}
 	p99 := percentile(a.dockerFootprint, 99)
@@ -351,6 +365,9 @@ func (a *Aggregator) dockerAdvice() []string {
 		return nil
 	}
 	to := max(roundUp(p99*1.5/(1<<30), 1), 2)
+	if to >= float64(a.dockerLimit)/(1<<30) {
+		return nil // nothing smaller to suggest
+	}
 	return []string{fmt.Sprintf("Docker Desktop's memory limit is %.0f GB; its VM used at most %.1f GB (p99) while agents worked. Consider lowering it to %.0f GB in Docker Desktop's settings.",
 		float64(a.dockerLimit)/(1<<30), p99/(1<<30), to)}
 }
@@ -407,11 +424,7 @@ func (a *Aggregator) addWorktreeUse(s samples.Sample, date string) {
 	if len(s.Worktrees) == 0 {
 		return
 	}
-	wts := make([]attribution.Worktree, len(s.Worktrees))
-	for i, w := range s.Worktrees {
-		wts[i] = attribution.Worktree{ID: w.ID, Path: w.Path}
-	}
-	m := attribution.NewMatcher(wts)
+	m := a.matcher(s.Worktrees)
 	use := map[string]uint64{}
 	for _, c := range s.Containers {
 		if r := m.Match(attribution.Keys{ComposeDir: c.ComposeDir, Mounts: c.Mounts}); r.WorktreeID != "" {
@@ -427,6 +440,26 @@ func (a *Aggregator) addWorktreeUse(s samples.Sample, date string) {
 		k := worktreeDay{id, date}
 		a.worktreePeak[k] = max(a.worktreePeak[k], b)
 	}
+}
+
+// matcher returns a Matcher for wts, rebuilt only when the set changes: it
+// rarely does from one sample to the next.
+func (a *Aggregator) matcher(wts []samples.Worktree) *attribution.Matcher {
+	var b strings.Builder
+	for _, w := range wts {
+		b.WriteString(w.ID)
+		b.WriteByte(0)
+		b.WriteString(w.Path)
+		b.WriteByte(0)
+	}
+	if k := b.String(); k != a.matcherKey || a.matcherFor == nil {
+		aw := make([]attribution.Worktree, len(wts))
+		for i, w := range wts {
+			aw[i] = attribution.Worktree{ID: w.ID, Path: w.Path}
+		}
+		a.matcherKey, a.matcherFor = k, attribution.NewMatcher(aw)
+	}
+	return a.matcherFor
 }
 
 // perWorktreeCap is the p95 of worktrees' daily peaks, with a quarter on top
@@ -452,7 +485,7 @@ func (a *Aggregator) perWorktreeCap() Value {
 // containers: guest kernel, dockerd, page cache from image pulls.
 func (a *Aggregator) dockerOverhead() Value {
 	v := Value{Section: "budget", Key: "docker_overhead_gb"}
-	if have := a.span(len(a.dockerExtra)); have < minDockerTime {
+	if have := a.dockerSpan.Round(time.Minute); have < minDockerTime {
 		v.Why = fmt.Sprintf("not enough data: the Docker VM ran for %s of working time, need %s", have, minDockerTime)
 		return v
 	}
@@ -466,7 +499,7 @@ func (a *Aggregator) dockerOverhead() Value {
 // lmStudioIdle is the p95 of LM Studio's footprint with no model loaded.
 func (a *Aggregator) lmStudioIdle() Value {
 	v := Value{Section: "budget", Key: "lmstudio_idle_gb"}
-	if have := a.span(len(a.lmIdle)); have < minLMIdleTime {
+	if have := a.lmIdleSpan.Round(time.Minute); have < minLMIdleTime {
 		v.Why = fmt.Sprintf("not enough data: LM Studio ran with no model loaded for %s of working time, need %s", have, minLMIdleTime)
 		return v
 	}
@@ -476,13 +509,31 @@ func (a *Aggregator) lmStudioIdle() Value {
 	return v
 }
 
-// span is how long n samples cover.
-func (a *Aggregator) span(n int) time.Duration { return time.Duration(n) * a.o.Interval }
+// maxGap is the longest gap between samples that still counts as one run.
+// A longer one (sleep, the daemon stopped) breaks it.
+func (a *Aggregator) maxGap() time.Duration { return max(3*a.o.Interval, time.Minute) }
+
+func (a *Aggregator) contiguous(prev, s samples.Sample) bool {
+	gap := s.T.Sub(prev.T)
+	return gap > 0 && gap <= a.maxGap()
+}
+
+// weight is how much time s stands for: the gap since the previous sample,
+// as recorded, so samples taken at another interval count right; after a
+// break, one configured interval.
+func (a *Aggregator) weight(s samples.Sample) time.Duration {
+	if a.prev != nil && a.contiguous(*a.prev, s) {
+		return s.T.Sub(a.prev.T)
+	}
+	return a.o.Interval
+}
 
 // dist returns the p50, p95 and maximum of xs, in GB.
 func dist(xs []float64) (p50, p95, top float64) {
+	slices.Sort(xs)
 	g := func(b float64) float64 { return b / (1 << 30) }
-	return g(percentile(xs, 50)), g(percentile(xs, 95)), g(xs[len(xs)-1])
+	p50, p95 = g(percentile(xs, 50)), g(percentile(xs, 95))
+	return p50, p95, g(xs[len(xs)-1])
 }
 
 // hostBaseline is the p95 of memory in use outside every component.
@@ -505,8 +556,8 @@ func (a *Aggregator) sortedDays() []string {
 	return out
 }
 
-func hours(n int, interval time.Duration) float64 {
-	return math.Round(float64(n)*interval.Hours()*100) / 100
+func hours(d time.Duration) float64 {
+	return math.Round(d.Hours()*100) / 100
 }
 
 // percentile is the p-th percentile (nearest rank) of xs; xs is sorted in
@@ -519,7 +570,9 @@ func percentile(xs []float64, p float64) float64 {
 
 // roundUp rounds x up to a multiple of step.
 func roundUp(x, step float64) float64 {
-	return math.Ceil(x/step-1e-9) * step
+	// Round off the float noise of n × step (17 × 0.1 = 1.7000000000000002):
+	// these values end up in config.toml.
+	return math.Round(math.Ceil(x/step-1e-9)*step*1e6) / 1e6
 }
 
 func plural(n int, word string) string {

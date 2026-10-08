@@ -815,3 +815,23 @@ func TestAWaitingComposeUpAsksComposeEachTime(t *testing.T) {
 		t.Fatalf("asked %+v: want idle, then not", r.asked)
 	}
 }
+
+// A project with model providers is never dry-run: Compose's dry run stubs
+// the Docker API but runs a provider for real.
+func TestComposeWithProvidersIsNotDryRun(t *testing.T) {
+	for _, cfg := range []string{
+		`{"name":"x","services":{"llm":{"provider":{"type":"model"}}}}`,
+		`{"name":"x","services":{"app":{"models":["llm"]}},"models":{"llm":{"model":"ai/smollm2"}}}`,
+		`{"name":"x","models":{"llm":{"model":"ai/smollm2"}}}`,
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(cfg), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run("docker", "compose", "-p", "x", "up", "-d")
+		if dry != 0 || r.asked[0].Idle || r.asked[0].Target != "x" {
+			t.Errorf("%s: dry run %d times, %+v", cfg, dry, r.asked[0])
+		}
+	}
+}

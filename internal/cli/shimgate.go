@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -124,21 +125,27 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
+	var idle func() bool
 	if c.Kind == "compose" && name == "docker" {
-		// Compose names the project (-p needs no asking; podman compose is
-		// not asked), and says whether an up or restart starts anything.
+		// Compose names the project (-p needs no asking but for an up or
+		// restart; podman compose is not asked), and says whether an up or
+		// restart starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
 		// down (R7).
-		if slices.Contains(c.ComposeFiles, "-") {
+		switch {
+		case slices.Contains(c.ComposeFiles, "-"):
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
-		} else {
+		case c.Op == "up" || c.Op == "restart":
+			// Config also says whether the project may be dry-run.
+			name, plain := composeConfig(bin, c, h.composeAsk)
+			req.Target = cmp.Or(c.Target, name)
+			if plain {
+				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
+			}
+		default:
 			req.Target = composeProject(bin, c, h.composeAsk)
 		}
-	}
-	var idle func() bool
-	if c.Kind == "compose" && name == "docker" && (c.Op == "up" || c.Op == "restart") {
-		idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -255,6 +262,16 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	if c.Target != "" {
 		return c.Target
 	}
+	name, _ := composeConfig(bin, c, ask)
+	return name
+}
+
+// composeConfig asks docker compose config, as composeProject says, for
+// the project's name, and whether it is plain: no model providers. A
+// provider (a service's provider or models, or top-level models) runs for
+// real even in a dry run, so only a plain project is dry-run. Config
+// itself runs none.
+func composeConfig(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) (name string, plain bool) {
 	var args []string
 	if c.ConfigDir != "" {
 		args = append(args, "--config", c.ConfigDir) // its plugins and settings
@@ -271,12 +288,30 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	}
 	out, err := ask(bin, append(args, "config", "--format", "json"))
 	var cfg struct {
-		Name string `json:"name"`
+		Name     string          `json:"name"`
+		Models   json.RawMessage `json:"models"`
+		Services map[string]struct {
+			Provider json.RawMessage `json:"provider"`
+			Models   json.RawMessage `json:"models"`
+		} `json:"services"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		return ""
+		return "", false
 	}
-	return cfg.Name
+	plain = noJSON(cfg.Models)
+	for _, sv := range cfg.Services {
+		plain = plain && noJSON(sv.Provider) && noJSON(sv.Models)
+	}
+	return cfg.Name, plain
+}
+
+// noJSON reports whether a JSON value is absent, null or empty.
+func noJSON(v json.RawMessage) bool {
+	switch strings.TrimSpace(string(v)) {
+	case "", "null", "{}", "[]":
+		return true
+	}
+	return false
 }
 
 // ansi matches a terminal's colour codes.

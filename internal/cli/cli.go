@@ -469,14 +469,6 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
 			Target: r.Target, Name: r.Name, Labelled: r.Labelled}
-		if r.ComposeDir != "" {
-			// Resolved here, outside the book's lock: Compose's labels are
-			// then compared as strings.
-			req.ComposeDirs = []string{filepath.Clean(r.ComposeDir)}
-			if resolved, err := filepath.EvalSymlinks(r.ComposeDir); err == nil && resolved != req.ComposeDirs[0] {
-				req.ComposeDirs = append(req.ComposeDirs, resolved)
-			}
-		}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" && docker != nil && sameSocket(r.Engine, socket) {
 			// The container exists: its ID is the lease's key, and a lease
 			// label on it names the run or create this start takes over.

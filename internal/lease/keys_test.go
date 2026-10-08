@@ -9,9 +9,9 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
-// compose stop, then compose up (no -p) in the same
-// worktree. The returning containers must bind the up's lease.
-func TestComposeUpAfterStopBindsByItsProjectDirectory(t *testing.T) {
+// compose stop, then compose up in the same worktree. The returning
+// containers bind the up's lease, keyed by the project the shim named.
+func TestComposeUpAfterStopBindsByItsProject(t *testing.T) {
 	b, c, _ := book(t)
 	app := func(s *protocol.Snapshot) *protocol.Snapshot {
 		return addContainer(s, protocol.Container{ID: "A1", Name: "app-db-1", MemoryBytes: gib / 2,
@@ -20,7 +20,7 @@ func TestComposeUpAfterStopBindsByItsProjectDirectory(t *testing.T) {
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(snap()) // docker compose stop
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/Users/dev/src/a"}}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // docker compose up -d: the same containers
 	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
@@ -81,7 +81,7 @@ func TestARunsReservationSurvivesAStart(t *testing.T) {
 func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b, c, log := book(t)
 	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/Users/dev/src/a"}}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "a"}
 	app := func(s *protocol.Snapshot) *protocol.Snapshot {
 		return addContainer(s, protocol.Container{ID: "A1", Name: "a-web-1", MemoryBytes: gib / 4,
 			Labels: map[string]string{"com.docker.compose.project": "a", protocol.ComposeWorkingDirLabel: "/Users/dev/src/a"}}, "w1")
@@ -107,13 +107,12 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 // directory. Two projects from one directory are two leases.
 func TestComposeProjectsFromOneDirectoryStayApart(t *testing.T) {
 	for name, second := range map[string]policy.Request{
-		"-p a then -p b": {Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "b", ComposeDirs: []string{"/repo"}},
-		"-p a then none": {Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/repo"}},
+		"-p a then -p b": {Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "b"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b, _, _ := book(t)
 			b.Observe(snap())
-			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "a", ComposeDirs: []string{"/repo"}}, snap(), cfg)
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "a"}, snap(), cfg)
 			b.Check(second, snap(), cfg)
 			if r := reserved(b); r != 2*gib {
 				t.Fatalf("reserved %d GiB, want both stacks' 2", r>>30)
@@ -149,30 +148,6 @@ func TestALaterCheckIsNoBaseline(t *testing.T) {
 	b.Observe(withVM)
 	if got := ungatedKeys(b); len(got) != 0 {
 		t.Fatalf("ungated = %v: before Tart's first reading, a VM is a baseline", got)
-	}
-}
-
-// A plain compose up and a -p other up from one directory: both projects'
-// containers carry that directory. The named project's lease takes its
-// own, and the directory's lease the default project's.
-func TestANamedProjectBeatsADirectoryKey(t *testing.T) {
-	b, c, log := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/repo"}}, snap(), cfg)
-	c.t = c.t.Add(time.Second)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "other"}, snap(), cfg)
-	ctr := func(s *protocol.Snapshot, id, project string) *protocol.Snapshot {
-		return addContainer(s, protocol.Container{ID: id, Name: project + "-web-1", MemoryBytes: gib / 4,
-			Labels: map[string]string{"com.docker.compose.project": project, protocol.ComposeWorkingDirLabel: "/repo"}}, "w1")
-	}
-	b.Observe(ctr(ctr(snap(), "o1", "other"), "r1", "repo")) // other's first
-	if l := b.List(); len(l) != 2 || l[0].Bytes != gib-gib/4 || l[1].Bytes != gib-gib/4 {
-		t.Fatalf("leases = %+v, want each bound to its own project", l)
-	}
-	c.t = c.t.Add(3 * time.Minute)
-	b.Observe(ctr(ctr(snap(), "o1", "other"), "r1", "repo"))
-	if strings.Contains(log.String(), "never appeared") {
-		t.Fatalf("logged: %s", log)
 	}
 }
 
@@ -353,18 +328,6 @@ func TestARunningTargetIsTakenNothingFrom(t *testing.T) {
 	}
 }
 
-// compose -p app up, then a plain compose up of the same stack (project
-// app by default, from /repo/app): one lease, not two.
-func TestAProjectAndADirectoryOfOneStackShareAKey(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/repo/app"}}, snap(), cfg)
-	if l := b.List(); len(l) != 1 {
-		t.Fatalf("leases = %+v, want the second to take the first over", l)
-	}
-}
-
 // Taking over several leases adds up what their containers use.
 func TestATakeoverAddsUpUse(t *testing.T) {
 	b, _, _ := book(t)
@@ -420,77 +383,18 @@ func TestAnExpiredLeaseCoversNoStart(t *testing.T) {
 	}
 }
 
-// Compose drops leading _ and - from a directory's name: /ws/_app is app.
-func TestADirectorysProjectNameIsNormalisedAsComposeDoes(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/ws/_app"}}, snap(), cfg)
-	if l := b.List(); len(l) != 1 {
-		t.Fatalf("leases = %+v, want one", l)
-	}
-}
-
-// A directory's lease that holds a project other than the directory's
-// default name (name: in the file) is not that default project's.
-func TestALockedProjectIsNotTheDirectorysDefault(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/repo/app"}}, snap(), cfg)
-	b.Observe(addContainer(snap(), protocol.Container{ID: "c1", Name: "custom-web-1", MemoryBytes: gib / 4,
-		Labels: map[string]string{"com.docker.compose.project": "custom", protocol.ComposeWorkingDirLabel: "/repo/app"}}, "w1"))
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
-	if l := b.List(); len(l) != 2 {
-		t.Fatalf("leases = %+v, want custom's and app's", l)
-	}
-}
-
-// A compose takeover keeps the project the old lease held.
-func TestATakeoverKeepsTheHeldProject(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	ctr := func(s *protocol.Snapshot, id, project string) *protocol.Snapshot {
-		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4,
-			Labels: map[string]string{"com.docker.compose.project": project, protocol.ComposeWorkingDirLabel: "/w/app"}}, "w1")
-	}
-	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/w/app"}}
-	b.Check(up, snap(), cfg)
-	b.Observe(ctr(snap(), "a1", "app"))
-	b.Check(up, snap(), cfg)                                // takes it over, and holds app
-	b.Observe(ctr(ctr(snap(), "a1", "app"), "o1", "other")) // another project from /w/app, past the shim
-	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:o1" {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-// Two compose files in one directory naming other projects (name: p1 and
-// the directory's default) are two leases, not one.
-func TestADirectoryLeaseHoldingAnotherProjectIsNotTakenOver(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/w/app"}}
-	b.Check(up, snap(), cfg)
-	b.Observe(addContainer(snap(), protocol.Container{ID: "p", Name: "p1-web-1", MemoryBytes: gib / 4,
-		Labels: map[string]string{"com.docker.compose.project": "p1", protocol.ComposeWorkingDirLabel: "/w/app"}}, "w1"))
-	b.Check(up, snap(), cfg)
-	if l := b.List(); len(l) != 2 {
-		t.Fatalf("leases = %+v, want p1's and the new call's", l)
-	}
-}
-
-// The held-container shortcut is the holding worktree's own: another
-// worktree's start of it is decided, against its own cap.
-func TestAnotherWorktreesHeldContainerIsDecided(t *testing.T) {
+// Another worktree's start of a container an open lease holds takes no
+// lease either: the holder's lease covers it and its worktree is charged
+// for it, so the starter adds nothing.
+func TestAnotherWorktreesStartOfAHeldContainerAddsNothing(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(snap())
 	run := b.Check(req("w1", 4*gib), snap(), cfg)
 	s := withRun(snap(), "x", "w1", gib, run.LeaseID)
 	b.Observe(s)
-	c := cfg
-	c.PerWorktreeCapBytes = gib / 2
-	d := b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker start x", CostBytes: gib, Target: "x", ContainerID: "x"}, s, c)
-	if d.Allow {
-		t.Fatalf("w2 skipped its cap: %+v", d)
+	d := b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker start x", CostBytes: gib, Target: "x", ContainerID: "x"}, s, cfg)
+	if !d.Allow || d.LeaseID != "" || reserved(b) != 3*gib {
+		t.Fatalf("decision %+v, reserved %d GiB, want no second reservation", d, reserved(b)>>30)
 	}
 }
 

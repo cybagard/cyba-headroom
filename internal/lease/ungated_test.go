@@ -220,8 +220,7 @@ func TestComposeServicesOnLaterTicksAreGated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b, c, _ := book(t)
 			b.Observe(snap())
-			// Without -p: its project directory is the key.
-			b.Check(policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/Users/dev/src/app"}}, snap(), cfg)
+			b.Check(policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 			app := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
 				return addContainer(s, protocol.Container{ID: id, Name: "app-" + id, MemoryBytes: 2 * gib,
 					Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: "/Users/dev/src/app"}}, wt)

@@ -31,7 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -108,8 +107,6 @@ type entry struct {
 	// resolved it. name: a run's --name, for a call the shim did not label.
 	// target: a start's container as given, when Docker could not resolve
 	// it, or a tart run's VM. composeDir: a compose call's project
-	// directories, when it names no project: as given and with symlinks
-	// resolved, both cleaned, so matching a label needs no filesystem call.
 	labelled bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
@@ -117,7 +114,6 @@ type entry struct {
 	containerID      string
 	name             string
 	target           string
-	composeDirs      []string
 }
 
 // How a resource started (#33).
@@ -178,11 +174,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
-	if h := b.holder("container:" + r.ContainerID); r.ContainerID != "" && !r.MultiTarget && h != nil && h.Worktree == r.Worktree {
-		// docker stop && docker start of the container an open lease of
-		// this worktree holds: that lease still covers it. Allowed, and no
-		// new lease. Not for docker start a b (the others are no lease's),
-		// nor for another worktree's container (its own cap applies).
+	if r.ContainerID != "" && !r.MultiTarget && b.boundAnywhere("container:"+r.ContainerID) {
+		// docker stop && docker start of the container an open lease holds:
+		// that lease still covers it, and its worktree is charged for it.
+		// Allowed, and no new lease. Not for docker start a b: the others
+		// are no lease's.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	for _, e := range b.open {
@@ -214,28 +210,21 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		labelled: r.Labelled, containerID: r.ContainerID, name: r.Name, target: r.Target,
 	}
 	if r.Kind == "compose" {
-		// One key: the project it names (-p, COMPOSE_PROJECT_NAME), else
-		// its directory, which Compose labels each container with.
-		e.target = ""
-		if r.Target != "" {
-			e.project = r.Target
-		} else {
-			e.composeDirs = r.ComposeDirs
-		}
+		// Its key: the project, as the shim named it the way Compose does
+		// (-p, COMPOSE_PROJECT_NAME, name: in the file, the directory).
+		// Compose labels each container with it.
+		e.target, e.project = "", r.Target
 		// compose up again for the project an open lease already waits
 		// for or holds (compose stop, then up): this call's lease takes that
 		// one over, with its containers, and keeps the larger cost.
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			if o.Kind != "compose" || !e.sameKey(o) || r.Worktree == "" && o.Worktree != "" {
+			if o.Kind != "compose" || e.project == "" || o.project != e.project || r.Worktree == "" && o.Worktree != "" {
 				return false // a manual call reserves nothing: it takes no worktree's lease
 			}
 			e.took = append(e.took, o)
 			e.cost, e.used = max(e.cost, o.cost), e.used+o.used
 			for k := range o.bound {
 				e.bound[k] = true
-			}
-			if e.project == "" {
-				e.project = o.project // the project its containers are
 			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
@@ -583,33 +572,21 @@ func kindOf(key string) string {
 	return "container"
 }
 
-// holder is the open lease that holds key, or nil.
-func (b *Book) holder(key string) *entry {
-	for _, e := range b.open {
-		if e.bound[key] {
-			return e
-		}
-	}
-	return nil
-}
-
 func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
 
 // keyed is the lease in es whose key r matches. The surest key wins: a
 // container's label names its lease outright, before a start's container ID
-// or a compose project's name, before a name or a compose directory
-// (docker start db || docker run --name db: the run's label beats the
-// start's name; compose -p other beats a plain compose up from the same
-// directory, whose containers all carry it). Without a baseline (based
-// false), only a label or a container ID counts.
+// or a compose project's name, before a name (docker start db || docker
+// run --name db: the run's label beats the start's name). Without a
+// baseline (based false), only a label or a container ID counts.
 func keyed(es []*entry, r resource, based bool) *entry {
 	rank := func(e *entry) int {
 		switch {
 		case e.labelled:
 			return 0
-		case e.containerID != "", e.Kind == "compose" && len(e.composeDirs) == 0:
+		case e.containerID != "", e.Kind == "compose":
 			return 1
 		}
 		return 2
@@ -638,16 +615,7 @@ func (e *entry) key(r resource, based bool) bool {
 		// have labelled it a project's too (a --label on run).
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
-		switch {
-		case len(e.composeDirs) > 0:
-			// Every project from that directory carries it: once the lease
-			// holds one, it takes that project's only.
-			return based && r.dir != "" && slices.Contains(e.composeDirs, filepath.Clean(r.dir)) &&
-				(e.project == "" || e.project == r.project)
-		case e.project != "":
-			return based && e.project == r.project
-		}
-		return false
+		return based && e.project != "" && e.project == r.project
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.containerID != "":
@@ -662,8 +630,7 @@ func (e *entry) key(r resource, based bool) bool {
 
 // hasKey reports whether e has anything a resource could match.
 func (e *entry) hasKey() bool {
-	return e.labelled || e.containerID != "" || e.name != "" || e.target != "" || e.project != "" ||
-		len(e.composeDirs) > 0 || e.pid > 0
+	return e.labelled || e.containerID != "" || e.name != "" || e.target != "" || e.project != "" || e.pid > 0
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
@@ -675,49 +642,6 @@ func (b *Book) lapsedFor(r resource) bool {
 	}
 	b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })
 	return true
-}
-
-// sameKey reports whether compose leases e and o have the same key: the
-// same named project, the same directory, or a named project and the
-// directory Compose names that project after by default.
-func (e *entry) sameKey(o *entry) bool {
-	switch {
-	case len(e.composeDirs) > 0 && len(o.composeDirs) > 0:
-		// The same directory, and the same project from it: two files
-		// there may name two projects.
-		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) }) &&
-			e.dirProject() == o.dirProject()
-	case len(e.composeDirs) > 0:
-		return o.project != "" && o.project == e.dirProject()
-	case len(o.composeDirs) > 0:
-		return e.project != "" && e.project == o.dirProject()
-	}
-	return e.project != "" && e.project == o.project
-}
-
-// dirProject is the project a directory's lease is for: the one it holds
-// (name: in the file may differ from the directory's), else the
-// directory's default.
-func (e *entry) dirProject() string {
-	if e.project != "" {
-		return e.project
-	}
-	return defaultProject(e.composeDirs[0])
-}
-
-// defaultProject is the project name Compose gives a directory: its base
-// name, lower case, keeping only letters, digits, - and _, and no leading
-// - or _.
-func defaultProject(dir string) string {
-	return strings.TrimLeft(strings.Map(func(c rune) rune {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
-			return c
-		case c >= 'A' && c <= 'Z':
-			return c + 'a' - 'A'
-		}
-		return -1
-	}, filepath.Base(dir)), "_-")
 }
 
 // judge records how r started.

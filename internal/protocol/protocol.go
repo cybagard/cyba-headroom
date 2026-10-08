@@ -68,9 +68,6 @@ type CheckRequest struct {
 	Labelled bool `json:"labelled,omitempty"`
 	// Op is the call's subcommand (run, create, start, restart, up, ...).
 	Op string `json:"op,omitempty"`
-	// ComposeDir is a compose call's project directory, absolute: the key
-	// of its lease when it names no project (Target).
-	ComposeDir string `json:"compose_dir,omitempty"`
 	// Engine is the endpoint a docker call talks to, as its CLI resolves
 	// it (DOCKER_HOST, else the context's): the daemon looks a start's
 	// container up only when that is its own socket. "" when unknown.

@@ -2,7 +2,6 @@ package shim
 
 import (
 	"math"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -30,10 +29,11 @@ type Call struct {
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
-	// ComposeDir is a compose call's project directory as given:
-	// --project-directory, else the first -f file's directory; "" for the
-	// working directory. Compose labels each container with it (#33).
-	ComposeDir string
+	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
+	// --project-directory, as given: the shim finds the project's name
+	// from them as Compose does (#33).
+	ComposeFiles      []string
+	ComposeProjectDir string
 	// Name is the container name given with --name, for run and create;
 	// "" if none. With Target it lets the daemon tell the call's container
 	// from others that appear at the same time (#33).
@@ -158,8 +158,8 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
-	var project, projectDir, file string
-	var envFiles []string
+	var project, projectDir string
+	var files, envFiles []string
 	dryRun, noUp := false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
@@ -170,9 +170,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		case "--env-file":
 			envFiles = append(envFiles, v)
 		case "-f", "--file":
-			if file == "" {
-				file = v // the first file's directory is the project's
-			}
+			files = append(files, v)
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		}
@@ -197,12 +195,10 @@ func parseCompose(endpoint string, words, args []string) Call {
 		case "--env-file":
 			envFiles = append(envFiles, v)
 		case "--file":
-			if file == "" {
-				file = v
-			}
+			files = append(files, v)
 		case "-f":
-			if file == "" && op != "run" && op != "restart" {
-				file = v // some commands' own -f is something else
+			if op != "run" && op != "restart" {
+				files = append(files, v) // some commands' own -f is something else
 			}
 		case "--dry-run":
 			dryRun = IsTrue(v)
@@ -219,10 +215,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
-	if projectDir == "" && file != "" && file != "-" {
-		projectDir = filepath.Dir(file)
-	}
-	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, ComposeEnvFiles: envFiles, Endpoint: endpoint}
+	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
+		ComposeEnvFiles: envFiles, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

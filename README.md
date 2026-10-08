@@ -84,4 +84,6 @@ kilo:   ~/.local/bin/headroom run -- kilo
 
 Agents that are already running keep their old PATH until they are restarted. The worktree is known from Orca's `ORCA_WORKTREE_ID`; set `HEADROOM_WORKTREE` to override it for agents launched outside Orca. `HEADROOM_SHIM_DEBUG=1` shows each call's verdict.
 
+**Check a shell with `headroom doctor`.** Run it in a worktree terminal, or have an agent run it in its tool shell. It checks the config, the shim links, that `docker`, `podman` and `tart` resolve to the shims on this PATH (and which real binary each runs), that the daemon is up, which worktree the calls are charged to and how that was found, and whether a login shell would put the real tools first. Each line says what to fix; it exits 1 if a check fails.
+
 License: AGPL-3.0-only

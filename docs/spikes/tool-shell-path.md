@@ -49,3 +49,17 @@ Kilo spawns `/bin/zsh -c` (non-login) directly from the `.kilo` process with its
 - `headroom doctor` (#32): from inside an agent tool shell, check that `command -v docker`, `podman` and `tart` resolve to the shim dir. If not, report "agent started before headroom was installed, or not launched via `headroom run`".
 
 **Phase 1 exit criterion:** attribution (`ORCA_WORKTREE_ID`) and the launch environment (wrapper-injected PATH) are confirmed to reach Claude and Kilo tool shells. ✅
+
+## Re-verified with `headroom doctor` (#32)
+
+Claude Code 2.1.294 · Kilo CLI 7.8.3 · Orca 1.4.222 · 2026-10-08
+
+Each agent was launched with `headroom run -- <agent>` from an Orca worktree terminal and ran `headroom doctor` in its own tool shell:
+
+| Agent | Tool shell | PATH | identity | login |
+|---|---|---|---|---|
+| Claude, interactive (this Orca agent) | login zsh + snapshot | ✓ shims first | ✓ from `ORCA_WORKTREE_ID` | ! `zsh -l` puts real docker, podman first |
+| Claude, headless (`claude -p`) | login zsh + snapshot | ✓ shims first | ✓ from `ORCA_WORKTREE_ID` | ! same |
+| Kilo (`kilo run --auto`) | `zsh -c` | ✓ shims first | ✓ from `ORCA_WORKTREE_ID` | ! same |
+
+Same answer as the matrix above. The `login` warning is the residual path: a script that starts its own login shell runs the real tools (#33). Without the shims on PATH, doctor fails the PATH check and says to restart the agent through `headroom run`.

@@ -26,11 +26,16 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestShimDispatchOnArgv0(t *testing.T) {
+func TestShimDispatchOnArgv0NotFound(t *testing.T) {
+	// No real binary anywhere on this PATH: like "command not found".
+	empty := t.TempDir()
 	for _, name := range []string{"docker", "/Users/x/.config/headroom/shims/podman", "tart"} {
-		code, _, stderr := run(t, nil, name, "run", "alpine")
-		if code != 127 || !strings.Contains(stderr, "shim") {
-			t.Errorf("%s: code=%d stderr=%q", name, code, stderr)
+		var errb strings.Builder
+		code := Run(Env{Args: []string{name, "run", "alpine"}, Stdout: io.Discard, Stderr: &errb,
+			Getenv:    func(k string) string { return map[string]string{"PATH": empty}[k] },
+			fallbacks: map[string][]string{}})
+		if code != 127 || !strings.Contains(errb.String(), "not found on PATH") {
+			t.Errorf("%s: code=%d stderr=%q", name, code, errb.String())
 		}
 	}
 }

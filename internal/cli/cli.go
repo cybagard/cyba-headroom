@@ -28,6 +28,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/samples"
+	"github.com/cybagard/cyba-headroom/internal/shim"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
@@ -55,10 +56,16 @@ type Env struct {
 	// means: ask the OS about Stdout.
 	Terminal func() (tty bool, width int)
 
-	// Test hooks for --watch; zero values mean the real behaviour.
-	watchEvery time.Duration  // poll interval (1s)
-	suspend    chan os.Signal // delivers Ctrl-Z (SIGTSTP)
-	stopSelf   func()         // stops the process (SIGSTOP)
+	// Environ is the process environment, passed on to the real binary by
+	// the shim. Nil means os.Environ.
+	Environ func() []string
+
+	// Test hooks; zero values mean the real behaviour.
+	exec       func(path string, argv, env []string) error // syscall.Exec
+	fallbacks  map[string][]string                         // shim.Fallbacks
+	watchEvery time.Duration                               // poll interval (1s)
+	suspend    chan os.Signal                              // delivers Ctrl-Z (SIGTSTP)
+	stopSelf   func()                                      // stops the process (SIGSTOP)
 }
 
 // signalContext is e.Context (or Background) that also ends on sigs.
@@ -257,9 +264,40 @@ func runStatus(e Env) int {
 }
 
 // runShim is the gate shim placeholder; the real passthrough lands in #26.
+// runShim replaces this process with the real docker, podman or tart (R5,
+// #26). It passes every call through for now: #27 and #28 add the gate.
 func runShim(e Env, name string) int {
-	fmt.Fprintf(e.Stderr, "headroom: %s shim is not implemented yet (#26); remove the shim dir from PATH\n", name)
-	return 127
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: %s: cannot find headroom's own binary: %v\n", name, err)
+		return 127
+	}
+	fallbacks := e.fallbacks
+	if fallbacks == nil {
+		fallbacks = shim.Fallbacks
+	}
+	t, err := shim.Resolve(name, self, e.Getenv, fallbacks[name])
+	if err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
+		return 127 // as the shell says for a missing command
+	}
+	if e.Getenv("HEADROOM_SHIM_DEBUG") != "" {
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, t.Path, t.Engine)
+	}
+	environ, exec := e.Environ, e.exec
+	if environ == nil {
+		environ = os.Environ
+	}
+	if exec == nil {
+		exec = syscall.Exec
+	}
+	// On success this never returns: the real binary takes over the
+	// process, with its PID, terminal, signals and exit code.
+	if err := exec(t.Path, e.Args, environ()); err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", t.Path, err)
+		return 126 // found but not runnable
+	}
+	return 0
 }
 
 func notYet(e Env, what string, issue int) int {

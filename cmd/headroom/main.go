@@ -8,5 +8,5 @@ import (
 )
 
 func main() {
-	os.Exit(cli.Run(cli.Env{Args: os.Args, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv}))
+	os.Exit(cli.Run(cli.Env{Args: os.Args, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, Environ: os.Environ}))
 }

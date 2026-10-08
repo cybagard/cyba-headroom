@@ -66,6 +66,18 @@ func (e Env) withDefaults() Env {
 	if e.ancestors == nil {
 		e.ancestors = shim.Ancestors
 	}
+	if e.getwd == nil {
+		e.getwd = os.Getwd
+	}
+	if e.fallbacks == nil {
+		e.fallbacks = shim.Fallbacks
+	}
+	if e.status == nil {
+		e.status = daemonStatus
+	}
+	if e.loginShell == nil {
+		e.loginShell = askLoginShell
+	}
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -90,7 +102,7 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		return gated{proceed: true}
 	}
 	h := e.withDefaults()
-	req := callerRequest(getenv, h.ancestors)
+	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	if c.Kind == "tart" {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
@@ -172,7 +184,7 @@ func interrupted(sig os.Signal) gated {
 // callerRequest is a check request carrying who is calling: the worktree
 // from the environment (HEADROOM_WORKTREE, else ORCA_WORKTREE_ID), else
 // the working directory and the parent PIDs for the daemon to match.
-func callerRequest(getenv func(string) string, ancestors func() []int) protocol.CheckRequest {
+func callerRequest(getenv func(string) string, ancestors func() []int, getwd func() (string, error)) protocol.CheckRequest {
 	var r protocol.CheckRequest
 	if r.Worktree = getenv("HEADROOM_WORKTREE"); r.Worktree == "" {
 		r.Worktree = getenv("ORCA_WORKTREE_ID")
@@ -180,7 +192,7 @@ func callerRequest(getenv func(string) string, ancestors func() []int) protocol.
 	if r.Worktree != "" {
 		return r
 	}
-	r.Cwd, _ = os.Getwd()
+	r.Cwd, _ = getwd()
 	if resolved, err := filepath.EvalSymlinks(r.Cwd); err == nil && resolved != r.Cwd {
 		r.RealCwd = resolved
 	}

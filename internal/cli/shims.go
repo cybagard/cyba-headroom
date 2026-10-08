@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/cybagard/cyba-headroom/internal/shim"
 )
@@ -96,16 +97,32 @@ func isHeadroom(p, target string, known ...string) bool {
 func hasShims(dir string) bool {
 	self, _ := os.Executable()
 	for _, n := range shimList() {
-		p := filepath.Join(dir, n)
-		target, err := os.Readlink(p)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil && isHeadroom(p, target, self) {
+		if _, problem := shimState(dir, n, self); problem == "" {
 			return true
 		}
 	}
 	return false
+}
+
+// shimState checks the shim for n in dir: a link to a headroom binary that
+// exists (one named headroom, or self). problem is empty when it is one,
+// else says what is wrong; target is the link's target.
+func shimState(dir, n, self string) (target, problem string) {
+	p := filepath.Join(dir, n)
+	target, err := os.Readlink(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", "missing"
+	case errors.Is(err, syscall.EINVAL):
+		// headroom install leaves what is not a link alone.
+		return "", "is not a link: remove it"
+	case err != nil:
+		return "", "cannot read: " + err.Error()
+	}
+	if _, err := os.Stat(p); err != nil || !isHeadroom(p, target, self) {
+		return target, "→ " + target + " (not a headroom binary that exists)"
+	}
+	return target, ""
 }
 
 // defaultPath is the PATH a shell starts with when it has none.

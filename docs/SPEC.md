@@ -113,8 +113,8 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 
 - [ ] Set through Orca's agent launch command or environment; fallback: a worktree setup hook that writes a small wrapper script used as the agent command
 - [ ] Given an agent launched by Orca, when it runs a tool command in a non-interactive shell, then `command -v docker` resolves to the shim
-- [ ] Verified separately for Claude CLI and Kilo Code tool shells, including login shells where `path_helper` reorders PATH
-- [ ] `headroom doctor`, run inside a worktree terminal, checks PATH order and identity and says what is wrong
+- [x] Verified separately for Claude CLI and Kilo Code tool shells, including login shells where `path_helper` reorders PATH (#8, #32: Claude's tool shells are login shells and keep the shims; a login shell that a script starts itself does not, which #33 detects)
+- [x] `headroom doctor`, run inside a worktree terminal, checks PATH order and identity and says what is wrong (#32)
 
 **R10 — Leases.** An allow reserves the estimated cost until the resource appears, so simultaneous requests cannot overcommit.
 

@@ -56,13 +56,6 @@ func TestStatusRejectsExtraArgs(t *testing.T) {
 	}
 }
 
-func TestNotYetPointsAtIssue(t *testing.T) {
-	code, _, stderr := run(t, nil, "headroom", "doctor")
-	if code != 1 || !strings.Contains(stderr, "#32") {
-		t.Fatalf("code=%d stderr=%q", code, stderr)
-	}
-}
-
 func TestConfigPrintsEffectiveConfig(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {

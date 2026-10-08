@@ -71,10 +71,10 @@ type CheckRequest struct {
 	// ComposeDir is a compose call's project directory, absolute: the key
 	// of its lease when it names no project (Target).
 	ComposeDir string `json:"compose_dir,omitempty"`
-	// DefaultEngine is set for a docker call on the engine the daemon
-	// reads (no --context, -H, DOCKER_HOST or DOCKER_CONTEXT): only then
-	// does the daemon look a start's container up there.
-	DefaultEngine bool `json:"default_engine,omitempty"`
+	// Engine is the endpoint a docker call talks to, as its CLI resolves
+	// it (DOCKER_HOST, else the context's): the daemon looks a start's
+	// container up only when that is its own socket. "" when unknown.
+	Engine string `json:"engine,omitempty"`
 	// MultiTarget is set for a start or restart of several containers.
 	MultiTarget bool `json:"multi_target,omitempty"`
 }

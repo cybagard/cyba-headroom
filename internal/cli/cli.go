@@ -432,7 +432,7 @@ func usage(w io.Writer) {
 func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) {
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
 	d.SetDerive(derive(book, cfg.Budget.Params()))
-	d.SetCheck(gateCheck(book, cfg.PolicyConfig(), docker))
+	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
 }
 
@@ -464,6 +464,12 @@ const inspectTimeout = 200 * time.Millisecond
 // gateCheck answers a check: it finds the calling worktree (#28), then
 // decides with the lease book.
 func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.CheckFunc {
+	return gateCheckOn(book, pol, docker, "")
+}
+
+// gateCheckOn is gateCheck for a daemon that reads the Docker engine at
+// socket: only a start on that engine is looked up there.
+func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket string) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
@@ -476,7 +482,7 @@ func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.Che
 				req.ComposeDirs = append(req.ComposeDirs, resolved)
 			}
 		}
-		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.DefaultEngine && r.Target != "" && docker != nil {
+		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" && docker != nil && sameSocket(r.Engine, socket) {
 			// The container exists: its ID is the lease's key, and a lease
 			// label on it names the run or create this start takes over.
 			// Asked afresh every check: whether it runs changes by the

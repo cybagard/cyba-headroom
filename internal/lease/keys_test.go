@@ -257,3 +257,70 @@ func TestALeaseKeyedByIDBindsAContainerThatNeverLeft(t *testing.T) {
 		t.Fatalf("leases = %+v, want the start's bound to db", l)
 	}
 }
+
+// A container's label names its lease before a start's container ID: a
+// manual start of a worktree's created container leaves the create's lease
+// to bind it.
+func TestALabelBeatsAnIDKey(t *testing.T) {
+	b, _, log := book(t)
+	b.Observe(snap())
+	cr := labelled("w1", "pg")
+	cr.Command = "docker create pg"
+	created := b.Check(cr, snap(), cfg)
+	b.Check(policy.Request{Kind: "container", Command: "docker start x", Target: "x", ContainerID: "X", TakesOver: created.LeaseID}, snap(), cfg)
+	b.Observe(withRun(snap(), "X", "w1", gib/2, created.LeaseID))
+	for _, l := range b.List() {
+		if l.ID == created.LeaseID && l.Bytes == gib/2 {
+			return
+		}
+	}
+	t.Fatalf("the create's lease lost its container: %+v\n%s", b.List(), log)
+}
+
+// docker start a b, a already running (and ungated): the lease is not
+// keyed by a, so a keeps its verdict and the lease holds its cost for b.
+func TestAStartOfARunningAndAStoppedContainer(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	s := addContainer(snap(), protocol.Container{ID: "A", Name: "a", MemoryBytes: 4 * gib}, "w1")
+	b.Observe(s) // a appeared past the shim: ungated
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", CostBytes: gib, Target: "a", ContainerID: "A", Running: true, MultiTarget: true}, s, cfg)
+	b.Observe(s)
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:A" {
+		t.Fatalf("ungated = %v, want a still flagged", got)
+	}
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d, want the start's full cost for the others", r)
+	}
+}
+
+// A release gives back a lapsed lease the call took over too.
+func TestReleaseGivesALapsedTakenOverLeaseBack(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	cr := labelled("w1", "pg")
+	cr.Command = "docker create pg"
+	created := b.Check(cr, snap(), cfg)
+	c.t = c.t.Add(3 * time.Minute) // never started: lapsed
+	b.Observe(snap())
+	st := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", Target: "x", ContainerID: "X", TakesOver: created.LeaseID}, snap(), cfg)
+	b.Release(st.LeaseID) // its exec failed
+	b.Observe(withRun(snap(), "X", "w1", gib/2, created.LeaseID))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v: the create was checked", got)
+	}
+}
+
+// A lease with no key (docker start a b, a running) holds its cost to the
+// timeout and then ends quietly: there was nothing it could see appear.
+func TestAnUnkeyedLeaseEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "A", Name: "a", MemoryBytes: gib}, "w1")
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", CostBytes: gib, Target: "a", ContainerID: "A", Running: true, MultiTarget: true}, s, cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if len(b.List()) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases %+v, log %s", b.List(), log)
+	}
+}

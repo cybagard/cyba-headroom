@@ -113,11 +113,11 @@ type entry struct {
 	labelled bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
-	took        []*entry
-	containerID string
-	name        string
-	target      string
-	composeDirs []string
+	took, tookLapsed []*entry
+	containerID      string
+	name             string
+	target           string
+	composeDirs      []string
 }
 
 // How a resource started (#33).
@@ -164,6 +164,12 @@ const stale = 2 * time.Second
 // the book's lock: concurrent checks run one after another, and the second
 // sees the first's lease.
 func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Config) protocol.Decision {
+	if r.ContainerID != "" && r.Running && !r.MultiTarget {
+		// A start or restart of a container Docker says runs: it starts
+		// nothing new, and the container already counts. Allowed, whatever
+		// the pressure, and no lease.
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.latest
@@ -225,10 +231,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			return true
 		})
 	}
-	if r.ContainerID != "" && r.Running && !r.MultiTarget {
-		// A start or restart of a container Docker says runs: it starts
-		// nothing new, and the container already counts. No lease.
-		return d
+	if r.Running {
+		// docker start a b with a running: the lease is for the others, so
+		// it is not keyed by a (its memory already counts), by ID or name;
+		// it holds its cost to the timeout.
+		e.containerID, e.target = "", ""
 	}
 	if r.TakesOver != "" {
 		// A start of a container a run or create made that has not run
@@ -241,6 +248,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				if list == &b.open {
 					e.cost = max(e.cost, o.cost)
 					e.took = append(e.took, o)
+				} else {
+					e.tookLapsed = append(e.tookLapsed, o)
 				}
 				b.log.Debug("lease ended: its container was started by a later call", "lease", o.ID, "by", e.ID)
 				return true
@@ -366,7 +375,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		if e.containerID == "" || len(e.bound) > 0 {
 			continue
 		}
-		if i := slices.IndexFunc(res, func(r resource) bool { return r.id == e.containerID && !b.boundAnywhere(r.key) }); i >= 0 {
+		// A container whose label names an open lease is that lease's: the
+		// label outranks an ID.
+		if i := slices.IndexFunc(res, func(r resource) bool {
+			return r.id == e.containerID && !b.boundAnywhere(r.key) && keyed(b.open, r, true) == e
+		}); i >= 0 {
 			e.bind(res[i])
 			b.judge(res[i], gated, now)
 		}
@@ -497,6 +510,11 @@ func (b *Book) expire(now time.Time) {
 			// A manual call's: it reserved nothing, and many start nothing
 			// that lives long enough to be seen (docker run --rm).
 			b.log.Debug("manual lease ended at its timeout", "lease", e.ID, "command", e.Command)
+		case !e.hasKey():
+			// It had nothing to see appear (docker start a b, a running):
+			// it held its cost to the timeout, as meant.
+			b.log.Debug("lease with no key ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
+			return true
 		default:
 			b.log.Warn("lease expired: its container or VM never appeared", "lease", e.ID, "worktree", e.Worktree,
 				"command", e.Command, "bytes", e.cost, "age", now.Sub(e.Created).Round(time.Second))
@@ -611,6 +629,12 @@ func (e *entry) key(r resource, based bool) bool {
 	return false
 }
 
+// hasKey reports whether e has anything a resource could match.
+func (e *entry) hasKey() bool {
+	return e.labelled || e.containerID != "" || e.name != "" || e.target != "" || e.project != "" ||
+		len(e.composeDirs) > 0 || e.pid > 0
+}
+
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
 // spends it.
 func (b *Book) lapsedFor(r resource) bool {
@@ -688,6 +712,7 @@ func (b *Book) Release(id string) bool {
 	// started nothing.
 	b.open = append(b.open, e.took...)
 	slices.SortStableFunc(b.open, func(a, b *entry) int { return a.Created.Compare(b.Created) })
+	b.lapsed = append(b.lapsed, e.tookLapsed...)
 	b.log.Debug("lease released: its call did not start", "lease", id)
 	return true
 }

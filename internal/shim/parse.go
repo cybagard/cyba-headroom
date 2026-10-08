@@ -25,9 +25,9 @@ type Call struct {
 	// MultiTarget is set for a start or restart of several containers:
 	// Target is only the first.
 	MultiTarget bool
-	// ComposeEnvFile is a compose call's --env-file, which Compose reads
-	// instead of the project's .env.
-	ComposeEnvFile string
+	// ComposeEnvFiles are a compose call's --env-files, in order, which
+	// Compose reads instead of the project's .env.
+	ComposeEnvFiles []string
 	// ComposeDir is a compose call's project directory as given:
 	// --project-directory, else the first -f file's directory; "" for the
 	// working directory. Compose labels each container with it (#33).
@@ -154,7 +154,8 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
-	var project, projectDir, file, envFile string
+	var project, projectDir, file string
+	var envFiles []string
 	dryRun, noUp := false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
@@ -163,7 +164,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		case "--project-directory":
 			projectDir = v
 		case "--env-file":
-			envFile = v
+			envFiles = append(envFiles, v)
 		case "-f", "--file":
 			if file == "" {
 				file = v // the first file's directory is the project's
@@ -190,7 +191,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		case "--project-directory":
 			projectDir = v
 		case "--env-file":
-			envFile = v
+			envFiles = append(envFiles, v)
 		case "--file":
 			if file == "" {
 				file = v
@@ -217,7 +218,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if projectDir == "" && file != "" && file != "-" {
 		projectDir = filepath.Dir(file)
 	}
-	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, ComposeEnvFile: envFile, Endpoint: endpoint}
+	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, ComposeEnvFiles: envFiles, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

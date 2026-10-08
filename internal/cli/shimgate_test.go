@@ -627,14 +627,17 @@ func TestComposeKeyReadsDotEnvAsComposeDoes(t *testing.T) {
 		t.Fatalf("composeKey = %q, %q; want the file's directory", p, d)
 	}
 	write("ops/prod.env", "COMPOSE_PROJECT_NAME=prod\n")
-	if p, _ := composeKey(shim.Call{ComposeEnvFile: "ops/prod.env"}, none, wd); p != "prod" {
+	if p, _ := composeKey(shim.Call{ComposeEnvFiles: []string{"ops/prod.env"}}, none, wd); p != "prod" {
 		t.Fatalf("project = %q, want prod from --env-file", p)
+	}
+	write("ops/local.env", "OTHER=1\n")
+	if p, _ := composeKey(shim.Call{ComposeEnvFiles: []string{"ops/prod.env", "ops/local.env"}}, none, wd); p != "prod" {
+		t.Fatalf("project = %q, want prod from the first of two --env-files", p)
 	}
 }
 
-func TestDefaultEngineHonoursTheCurrentContext(t *testing.T) {
+func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 	dir := t.TempDir()
-	const sock = "/Users/dev/.docker/run/docker.sock"
 	env := map[string]string{"DOCKER_CONFIG": dir}
 	get := func(k string) string { return env[k] }
 	context := func(name, host string) {
@@ -655,33 +658,24 @@ func TestDefaultEngineHonoursTheCurrentContext(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !defaultEngine(get, sock) {
-		t.Fatal("no config: the default engine")
+	if got := dockerEndpoint(get); got != "unix:///var/run/docker.sock" {
+		t.Fatalf("no config: %q, want Docker's default socket", got)
 	}
-	context("desktop-linux", "unix://"+sock)
+	context("desktop-linux", "unix:///Users/dev/.docker/run/docker.sock")
 	use("desktop-linux")
-	if !defaultEngine(get, sock) {
-		t.Fatal("Docker Desktop's context is the daemon's socket")
-	}
-	context("colima", "unix:///Users/dev/.colima/default/docker.sock")
-	use("colima")
-	if defaultEngine(get, sock) {
-		t.Fatal("docker context use colima: another engine")
+	if got := dockerEndpoint(get); got != "unix:///Users/dev/.docker/run/docker.sock" {
+		t.Fatalf("desktop-linux: %q", got)
 	}
 	use("missing")
-	if defaultEngine(get, sock) {
-		t.Fatal("a context with no metadata: cannot tell")
+	if got := dockerEndpoint(get); got != "" {
+		t.Fatalf("a context with no metadata: %q, want unknown", got)
 	}
 	env["DOCKER_CONTEXT"] = "desktop-linux"
-	if !defaultEngine(get, sock) {
-		t.Fatal("DOCKER_CONTEXT=desktop-linux: the daemon's socket")
-	}
-	env["DOCKER_HOST"] = "unix://" + sock
-	if !defaultEngine(get, sock) {
-		t.Fatal("DOCKER_HOST at the daemon's socket")
+	if got := dockerEndpoint(get); got != "unix:///Users/dev/.docker/run/docker.sock" {
+		t.Fatalf("DOCKER_CONTEXT: %q", got)
 	}
 	env["DOCKER_HOST"] = "unix:///x.sock"
-	if defaultEngine(get, sock) {
-		t.Fatal("DOCKER_HOST elsewhere: not the default engine")
+	if got := dockerEndpoint(get); got != "unix:///x.sock" {
+		t.Fatalf("DOCKER_HOST: %q", got)
 	}
 }

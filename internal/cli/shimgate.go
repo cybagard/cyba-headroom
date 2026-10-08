@@ -108,7 +108,9 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	req.DefaultEngine = name == "docker" && c.Endpoint == "" && defaultEngine(getenv, cfg.Docker.Socket)
+	if name == "docker" && c.Endpoint == "" {
+		req.Engine = dockerEndpoint(getenv)
+	}
 	req.MultiTarget = c.MultiTarget
 	if c.Kind == "compose" {
 		req.Target, req.ComposeDir = composeKey(c, getenv, h.getwd)
@@ -238,14 +240,22 @@ func composeKey(c shim.Call, getenv func(string) string, getwd func() (string, e
 		// The project's .env (or --env-file instead) may name the project
 		// and its compose file, whose directory is then the project's.
 		dir = findComposeDir(cwd)
-		envFile := filepath.Join(dir, ".env")
-		if c.ComposeEnvFile != "" {
-			envFile = c.ComposeEnvFile
-			if !filepath.IsAbs(envFile) {
-				envFile = filepath.Join(cwd, envFile)
+		envFiles := []string{filepath.Join(dir, ".env")}
+		if len(c.ComposeEnvFiles) > 0 {
+			envFiles = nil
+			for _, f := range c.ComposeEnvFiles {
+				if !filepath.IsAbs(f) {
+					f = filepath.Join(cwd, f)
+				}
+				envFiles = append(envFiles, f)
 			}
 		}
-		env := dotEnv(envFile)
+		env := map[string]string{}
+		for _, f := range envFiles {
+			for k, v := range dotEnv(f) {
+				env[k] = v // later files win, as in Compose
+			}
+		}
 		if project == "" {
 			project = env["COMPOSE_PROJECT_NAME"]
 		}
@@ -316,20 +326,20 @@ func dotEnv(path string) map[string]string {
 	return out
 }
 
-// defaultEngine reports whether docker talks to the engine the daemon
-// reads, at socket: DOCKER_HOST, else the context (DOCKER_CONTEXT, else
-// the config's currentContext, as docker context use sets it) must point
-// there. Docker Desktop's context, desktop-linux, does; colima's does not.
-func defaultEngine(getenv func(string) string, socket string) bool {
+// dockerEndpoint is the endpoint the docker CLI talks to: DOCKER_HOST,
+// else the context's (DOCKER_CONTEXT, else the config's currentContext, as
+// docker context use sets it), else Docker's default socket. "" when the
+// context cannot be read.
+func dockerEndpoint(getenv func(string) string) string {
 	if h := getenv("DOCKER_HOST"); h != "" {
-		return sameSocket(h, socket)
+		return h
 	}
 	dir := getenv("DOCKER_CONFIG")
 	if dir == "" {
 		dir = filepath.Join(getenv("HOME"), ".docker")
 	}
 	if !filepath.IsAbs(dir) {
-		return false // cannot tell
+		return ""
 	}
 	name := getenv("DOCKER_CONTEXT")
 	if name == "" {
@@ -337,25 +347,25 @@ func defaultEngine(getenv func(string) string, socket string) bool {
 			CurrentContext string `json:"currentContext"`
 		}
 		if b, err := os.ReadFile(filepath.Join(dir, "config.json")); err == nil && json.Unmarshal(b, &cfg) != nil {
-			return false
+			return ""
 		}
 		name = cfg.CurrentContext
 	}
 	if name == "" || name == "default" {
-		return true // the built-in context: DOCKER_HOST or the default socket
+		return "unix:///var/run/docker.sock"
 	}
 	sum := sha256.Sum256([]byte(name))
 	b, err := os.ReadFile(filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]), "meta.json"))
 	if err != nil {
-		return false
+		return ""
 	}
 	var meta struct {
 		Endpoints map[string]struct{ Host string }
 	}
 	if json.Unmarshal(b, &meta) != nil {
-		return false
+		return ""
 	}
-	return sameSocket(meta.Endpoints["docker"].Host, socket)
+	return meta.Endpoints["docker"].Host
 }
 
 // sameSocket reports whether a Docker endpoint (unix://path) is socket.

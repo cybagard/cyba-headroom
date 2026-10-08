@@ -149,13 +149,13 @@ func TestGateResolvesAStartsContainer(t *testing.T) {
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
 	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
-	started := gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", DefaultEngine: true}, s)
+	started := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s)
 	ls := book.List()
 	if len(ls) != 1 || ls[0].ID != started.LeaseID || ls[0].Bytes != 4<<30 {
 		t.Fatalf("leases = %+v, want the start's, with the create's 4 GiB", ls)
 	}
 	// Docker cannot say: the start's lease stands alone.
-	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope", Target: "nope", DefaultEngine: true}, s)
+	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope", Target: "nope", Engine: "unix:///s.sock"}, s)
 	if len(book.List()) != 2 {
 		t.Fatalf("leases = %+v", book.List())
 	}
@@ -191,12 +191,49 @@ func TestGateAsksDockerEveryCheck(t *testing.T) {
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
 	running := true
-	check := gateCheck(book, pol, flipInspector{&running})
-	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "restart", Command: "docker restart db", Target: "db", DefaultEngine: true}, s); d.LeaseID != "" {
+	check := gateCheckOn(book, pol, flipInspector{&running}, "/s.sock")
+	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "restart", Command: "docker restart db", Target: "db", Engine: "unix:///s.sock"}, s); d.LeaseID != "" {
 		t.Fatalf("restart of a running container leased: %+v", d)
 	}
 	running = false // docker stop db
-	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", DefaultEngine: true}, s); d.LeaseID == "" {
+	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s); d.LeaseID == "" {
 		t.Fatalf("start of a stopped container took no lease: %+v", d)
+	}
+}
+
+// The daemon looks a start up only when the CLI talks to the engine the
+// daemon reads: it compares the CLI's endpoint with its own socket.
+func TestGateLooksUpOnlyItsOwnEngine(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	running := true
+	check := gateCheckOn(book, pol, flipInspector{&running}, "/Users/dev/.docker/run/docker.sock")
+	start := func(endpoint string) protocol.Decision {
+		return check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", Engine: endpoint}, s)
+	}
+	if d := start("unix:///Users/dev/.colima/default/docker.sock"); d.LeaseID == "" {
+		t.Fatalf("another engine was looked up here: %+v", d)
+	}
+	if d := start("unix:///Users/dev/.docker/run/docker.sock"); d.LeaseID != "" {
+		t.Fatalf("its own engine, db runs: want no lease, got %+v", d)
+	}
+}
+
+// docker start of a container that runs starts nothing: allowed at once,
+// whatever the pressure, with no lease.
+func TestStartingARunningContainerIsNeverDenied(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	none := int64(0)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "critical"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &none}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	running := true
+	d := gateCheckOn(book, pol, flipInspector{&running}, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start",
+		Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s)
+	if !d.Allow || d.LeaseID != "" {
+		t.Fatalf("decision %+v", d)
 	}
 }

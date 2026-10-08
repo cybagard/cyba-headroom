@@ -572,23 +572,6 @@ func TestAManualLeaseDoesNotWinAnUnattributedContainer(t *testing.T) {
 	}
 }
 
-// compose up again does not extend the lease it takes over: the merged
-// lease keeps the earliest expiry, so a loop of ups cannot hold one
-// reservation past its timeout.
-func TestATakeoverKeepsTheEarliestExpiry(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app"}
-	s := service("web", "app", "w1")(snap())
-	b.Check(up, snap(), cfg)
-	b.Observe(s)
-	c.t = c.t.Add(time.Minute)
-	b.Check(up, s, cfg)
-	if l := b.List(); len(l) != 1 || !l[0].Expires.Equal(t0.Add(2*time.Minute)) {
-		t.Fatalf("leases = %+v, want the first lease's expiry", l)
-	}
-}
-
 // compose run app, app depends on a one-shot migrate: migrate binds the
 // run's lease and exits before app's one-off appears. The lease lives on,
 // and app's container binds it.
@@ -633,5 +616,37 @@ func TestATakeoverThatNeedsMoreGetsAFreshTimeout(t *testing.T) {
 	b.Observe(s)
 	if r := reserved(b); r < 6*gib-gib/4 {
 		t.Fatalf("reserved %d GiB after the old lease's timeout, want the new 6", r>>30)
+	}
+}
+
+// Through the shim a compose call carries no estimate (the default cost):
+// a takeover just before the old lease's timeout still holds its admitted
+// reservation for a full timeout.
+func TestATakeoverAtTheDefaultCostGetsAFreshTimeout(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app"}
+	s := service("web", "app", "w1")(snap())
+	b.Check(up, snap(), cfg)
+	b.Observe(s)
+	c.t = c.t.Add(115 * time.Second)
+	b.Check(up, s, cfg) // compose --profile heavy up
+	c.t = c.t.Add(10 * time.Second)
+	b.Observe(s)
+	if r := reserved(b); r == 0 {
+		t.Fatal("the admitted call's reservation ended with the old lease")
+	}
+}
+
+// compose run with a dependency that starts within the same tick as the
+// one-off: Docker lists the newest (the one-off) first, yet the dependency
+// is the run's too.
+func TestADependencyInTheOneOffsTick(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(service("db", "p", "w1")(oneoff("r1", "p", "w1")(snap())))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
 	}
 }

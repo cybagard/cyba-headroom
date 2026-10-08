@@ -221,7 +221,6 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost.
 		var reserved, used uint64
-		earliest := e.Expires
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
 			if o.Kind != "compose" || e.oneoff || o.oneoff || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
 				// Only its own worktree's, and not a compose run's (its
@@ -231,9 +230,6 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 			e.took = append(e.took, o)
 			reserved, used = reserved+o.reserved(), used+o.used
-			if o.Expires.Before(earliest) {
-				earliest = o.Expires
-			}
 			for k := range o.bound {
 				e.bound[k] = true
 			}
@@ -245,11 +241,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// estimate and what the old leases still reserved, on top of
 			// what their containers use. Bounded however often it repeats,
 			// and never below what was held.
-			if e.cost <= reserved+used {
-				// Nothing beyond what is held (compose up again, in a loop):
-				// no fresh timeout, or a loop would hold it forever.
-				e.Expires = earliest
-			}
+			// A fresh timeout: this call was admitted, and its containers may
+			// be a pull or a build away. The cost stays bounded however often
+			// compose up repeats, and each repeat is an admitted call.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
 	}
@@ -425,6 +419,18 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			fresh = append(fresh, r)
 		}
 	}
+	// Compose services before one-off containers: a compose run's
+	// dependencies are its lease's until its one-off binds, and Docker lists
+	// the newest first, whatever started first.
+	slices.SortStableFunc(fresh, func(a, b resource) int {
+		switch {
+		case !a.oneoff && b.oneoff:
+			return -1
+		case a.oneoff && !b.oneoff:
+			return 1
+		}
+		return 0
+	})
 	// Each new resource binds the open lease whose key it matches. Before a
 	// source's first reading, only a key nothing else can match (a label,
 	// a container ID) binds: anything else may have been there already.

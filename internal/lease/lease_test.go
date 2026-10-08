@@ -102,9 +102,14 @@ func TestSimultaneousRequestsCannotOvercommit(t *testing.T) {
 	}
 }
 
-// withContainer adds a running container, attributed to wt ("" = none).
+// withContainer adds a running container, attributed to wt ("" = none),
+// already using a lease's full gigabyte.
 func withContainer(s *protocol.Snapshot, id, wt string) *protocol.Snapshot {
-	s.Docker.Containers = append(s.Docker.Containers, protocol.Container{ID: id, Name: id})
+	return withContainerMem(s, id, wt, 64*gib)
+}
+
+func withContainerMem(s *protocol.Snapshot, id, wt string, mem uint64) *protocol.Snapshot {
+	s.Docker.Containers = append(s.Docker.Containers, protocol.Container{ID: id, Name: id, MemoryBytes: mem})
 	if wt != "" {
 		for i := range s.Attribution.Worktrees {
 			if s.Attribution.Worktrees[i].ID == wt {
@@ -115,7 +120,7 @@ func withContainer(s *protocol.Snapshot, id, wt string) *protocol.Snapshot {
 	return s
 }
 
-func ids(b *lease.Book) []string {
+func worktrees(b *lease.Book) []string {
 	var out []string
 	for _, l := range b.List() {
 		out = append(out, l.Worktree)
@@ -129,10 +134,10 @@ func TestANewContainerInTheWorktreeSettlesItsLease(t *testing.T) {
 	b.Check(req("w2", gib), snap(), cfg)
 	b.Observe(snap()) // nothing new yet: only "old"
 	if len(b.List()) != 2 {
-		t.Fatalf("settled by an old container: %v", ids(b))
+		t.Fatalf("settled by an old container: %v", worktrees(b))
 	}
 	b.Observe(withContainer(snap(), "c2", "w2"))
-	if got := ids(b); len(got) != 1 || got[0] != "w1" {
+	if got := worktrees(b); len(got) != 1 || got[0] != "w1" {
 		t.Fatalf("open leases = %v, want w1's only", got)
 	}
 }
@@ -145,7 +150,7 @@ func TestTartLeasesWaitForAVM(t *testing.T) {
 		t.Fatal("a container settled a Tart lease")
 	}
 	s := snap()
-	s.Tart.VMs = []protocol.TartVM{{Name: "vm"}}
+	s.Tart.VMs = []protocol.TartVM{{Name: "vm", MemoryBytes: gib}} // a VM counts its configured memory at once
 	b.Observe(s)
 	if len(b.List()) != 0 {
 		t.Fatalf("a new VM did not settle the Tart lease: %+v", b.List())
@@ -158,7 +163,7 @@ func TestAnUnattributedContainerSettlesTheOldestLease(t *testing.T) {
 	c.t = c.t.Add(time.Second)
 	b.Check(req("w2", gib), snap(), cfg)
 	b.Observe(withContainer(snap(), "c2", ""))
-	if got := ids(b); len(got) != 1 || got[0] != "w2" {
+	if got := worktrees(b); len(got) != 1 || got[0] != "w2" {
 		t.Fatalf("open leases = %v, want w2's only", got)
 	}
 	// Another worktree's container does not settle w2's lease.
@@ -210,5 +215,114 @@ func TestLeasesExpireAndAreLogged(t *testing.T) {
 	// The headroom is back.
 	if d := b.Check(req("w2", 6*gib), snap(), cfg); !d.Allow {
 		t.Fatalf("after expiry: %+v", d)
+	}
+}
+
+func reserved(b *lease.Book) uint64 {
+	var n uint64
+	for _, l := range b.List() {
+		n += l.Bytes
+	}
+	return n
+}
+
+func TestChecksUseTheSnapshotLeasesWereSettledOn(t *testing.T) {
+	// A lease settled by c2 and the snapshot showing c2 must be seen
+	// together: a check holding the older snapshot (no c2) would otherwise
+	// count neither.
+	b, _, _ := book(t)
+	b.Check(req("w1", 6*gib), snap(), cfg)
+	settled := withContainerMem(snap(), "c2", "w1", 6*gib)
+	settled.Budget.HeadroomBytes = i64(int64(2 * gib)) // c2's 6 GB is in the budget now
+	b.Observe(settled)
+	if d := b.Check(req("w2", 6*gib), snap() /* stale: no c2, 8 GB */, cfg); d.Allow {
+		t.Fatalf("decided on a stale snapshot: %+v", d)
+	}
+}
+
+func TestASettlingContainerCannotSettleALaterLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(req("w1", gib), snap(), cfg)
+	s2 := withContainer(snap(), "c2", "w1")
+	b.Observe(s2)
+	b.Check(req("w1", gib), snap() /* stale: no c2 */, cfg)
+	b.Observe(s2)
+	if len(b.List()) != 1 {
+		t.Fatal("c2 settled a lease granted after it appeared")
+	}
+}
+
+func TestALeaseKeepsWhatItsContainerHasNotUsedYet(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withContainerMem(snap(), "jvm", "w1", gib/2))
+	if r := reserved(b); r != 6*gib-gib/2 {
+		t.Fatalf("reserved %d, want 5.5 GiB: the container uses 0.5 so far", r)
+	}
+	b.Observe(withContainerMem(snap(), "jvm", "w1", 6*gib))
+	if len(b.List()) != 0 {
+		t.Fatalf("lease open after its container used it all: %+v", b.List())
+	}
+}
+
+func TestComposeBindsAllItsNewContainers(t *testing.T) {
+	b, _, _ := book(t)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	s := withContainerMem(snap(), "db", "w1", gib)
+	b.Observe(s)
+	if r := reserved(b); r != 2*gib {
+		t.Fatalf("reserved %d after db, want 2 GiB", r)
+	}
+	b.Observe(withContainerMem(withContainerMem(snap(), "db", "w1", gib), "web", "w1", 2*gib))
+	if len(b.List()) != 0 {
+		t.Fatal("compose lease open after its containers used it")
+	}
+}
+
+func TestABoundLeaseEndsQuietlyAtTheTimeout(t *testing.T) {
+	b, c, log := book(t)
+	b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withContainerMem(snap(), "small", "w1", gib)) // never grows to 6
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(withContainerMem(snap(), "small", "w1", gib))
+	if len(b.List()) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases %+v, log %s", b.List(), log)
+	}
+}
+
+func TestAContainerOnTheDeadlineSettlesItsOwnLease(t *testing.T) {
+	b, c, log := book(t)
+	b.Check(req("w1", gib), snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(withContainer(snap(), "c2", "w1"))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("logged as never appeared: %s", log)
+	}
+}
+
+func TestAManualCallsContainerInAWorktreeSettlesItsLease(t *testing.T) {
+	b, _, log := book(t)
+	b.Check(req("", gib), snap(), cfg) // manual
+	b.Observe(withContainer(snap(), "c2", "w1"))
+	if len(b.List()) != 0 {
+		t.Fatalf("manual lease not settled by a worktree's container: %+v (%s)", b.List(), log)
+	}
+}
+
+func TestCommandsAreRedacted(t *testing.T) {
+	b, c, log := book(t)
+	r := req("w1", gib)
+	r.Command = "docker run -e AWS_SECRET_ACCESS_KEY=abc123 --env TOKEN=xyz -e PLAIN --build-arg KEY=val img sh -c x=1"
+	b.Check(r, snap(), cfg)
+	cmd := b.List()[0].Command
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap())
+	for _, secret := range []string{"abc123", "xyz", "val", "x=1"} {
+		if strings.Contains(cmd, secret) || strings.Contains(log.String(), secret) {
+			t.Errorf("%q leaked: %q / %s", secret, cmd, log)
+		}
+	}
+	if !strings.Contains(cmd, "AWS_SECRET_ACCESS_KEY=…") || !strings.Contains(cmd, "-e PLAIN") || !strings.Contains(cmd, "img") {
+		t.Errorf("redacted too much: %q", cmd)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/logfile"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -200,17 +201,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	params := cfg.Budget.Params()
-	d.SetDerive(func(s *protocol.Snapshot) {
-		b := budget.Compute(s, params)
-		s.Budget = &b
-		at := attribution.Attribute(s)
-		s.Attribution = &at
-	})
-	pol := cfg.Policy.Config()
-	d.SetCheck(func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
-		return policy.Decide(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
-	})
+	wireGate(d, cfg, log)
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
@@ -305,4 +296,25 @@ func usage(w io.Writer) {
                       samples; --write merges them into config.toml
   headroom version    print the version
 `)
+}
+
+// wireGate connects the budget (#19), attribution (#20), policy (#24) and
+// leases (#25) to d. Every tick derives the budget and attribution, settles
+// or expires leases against that snapshot, and lists the open ones in it.
+// Checks decide against the latest snapshot and the open leases.
+func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
+	params := cfg.Budget.Params()
+	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
+	d.SetDerive(func(s *protocol.Snapshot) {
+		b := budget.Compute(s, params)
+		s.Budget = &b
+		at := attribution.Attribute(s)
+		s.Attribution = &at
+		book.Observe(s)
+		s.Leases = book.List()
+	})
+	pol := cfg.Policy.Config()
+	d.SetCheck(func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
+		return book.Check(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
+	})
 }

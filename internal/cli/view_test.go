@@ -49,10 +49,10 @@ func serveDaemonWith(t *testing.T, setup func(*daemon.Daemon)) (map[string]strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.Tick(context.Background())
 	if setup != nil {
 		setup(d)
 	}
+	d.Tick(context.Background())
 	ln, err := daemon.Listen(dir + "/d.sock")
 	if err != nil {
 		t.Fatal(err)

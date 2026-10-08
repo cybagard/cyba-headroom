@@ -25,7 +25,7 @@ Tests run on Linux, but headroom ships only for macOS. So:
 - Verify macOS behaviour with `make test-host` or `make test-tart`, and by running `bin/headroom` on the host. CI's macOS runners check it again.
 - Sysctls come and go between macOS releases, and so do their widths: `vm.page_wired_count` and the swapper totals are missing on macOS 15, and the page counters mix 32- and 64-bit values. Read any sysctl that isn't core as optional (nil = unknown) and accept either width. Then check it with `make test-tart`.
 - To check terminal behaviour (`--watch`) without a real TTY, run it under a pty: `(sleep 8) | script -q out.log bin/headroom --watch`, and send it signals with `pkill -f '^bin/headroom --watch'` (an unanchored pattern also matches `script`). That pty reports 0 columns, so code must not treat width 0 as "not a terminal".
-- Socket tests need a short path under `/tmp` (`os.MkdirTemp("/tmp", "hr")`). macOS caps `sun_path` at 104 bytes, and `t.TempDir()` there is longer.
+- Socket tests need a short path under `/tmp` (`os.MkdirTemp("/tmp", "hr")`). macOS caps `sun_path` at 104 bytes, and `t.TempDir()` there is longer. This includes any test that loads a config from a temp dir, because config validation checks the default socket path in that dir. Those tests pass on Linux and fail only in `make test-host`.
 
 ## Implementation loop
 

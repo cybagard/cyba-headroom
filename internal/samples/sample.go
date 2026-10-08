@@ -88,6 +88,12 @@ type LMStudio struct {
 type Model struct {
 	Key       string `json:"key"`
 	SizeBytes uint64 `json:"size_bytes"`
+	// TTL is the idle time after which LM Studio unloads the model; absent
+	// when it stays loaded until unloaded by hand. With LastUsedAt, it lets
+	// suggest (#23) spot models that sit loaded and unused. Both were added
+	// to schema v1 later, so older lines lack them.
+	TTL        *time.Duration `json:"ttl_ns,omitempty"`
+	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
 }
 
 // Worktree is one Orca worktree, its agents' processes and their states.
@@ -140,7 +146,7 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 	if l := s.LMStudio; l != nil && l.Running {
 		out.LMStudio = &LMStudio{FootprintBytes: l.FootprintBytes}
 		for _, m := range l.Models {
-			out.LMStudio.Models = append(out.LMStudio.Models, Model{Key: m.Key, SizeBytes: m.SizeBytes})
+			out.LMStudio.Models = append(out.LMStudio.Models, Model{Key: m.Key, SizeBytes: m.SizeBytes, TTL: m.TTL, LastUsedAt: m.LastUsedAt})
 		}
 	}
 	if o := s.Orca; o != nil && o.Running {

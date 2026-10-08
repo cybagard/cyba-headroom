@@ -90,7 +90,7 @@ func serverTree() fakeProcs {
 	return fakeProcs{
 		procs: []vmproc.Process{
 			{PID: 700, PPID: 1, Comm: "ollama", Exec: serverExec, Args: []string{"ollama", "serve"}},
-			{PID: 701, PPID: 700, Comm: "ollama", Exec: serverExec, Args: []string{serverExec, "runner", "--model", "/x", "--port", "50000"}},
+			{PID: 701, PPID: 700, Comm: "llama-server", Exec: "/opt/homebrew/Cellar/ollama/0.40.1/libexec/lib/ollama/llama-server", Args: []string{"llama-server", "--model", "/x", "--port", "50000"}},
 			{PID: 800, PPID: 2, Comm: "ollama", Exec: serverExec, Args: []string{"ollama", "run", "llama3.2:1b"}},
 		},
 		footprint: map[int]uint64{700: 12 << 20, 701: 2300 << 20, 800: 1 << 30},
@@ -118,10 +118,10 @@ func TestLoadedModelAndMeasuredCost(t *testing.T) {
 		t.Fatalf("got %+v, want running with one model", got)
 	}
 	m := got.Models[0]
-	exp := time.Date(2026, 10, 8, 12, 5, 0, 123456000, time.UTC)
-	if m.Name != "llama3.2:1b" || m.SizeBytes != 2210000000 || m.VRAMBytes != 2210000000 || m.ContextLength != 4096 ||
+	exp := time.Date(2026, 10, 8, 12, 38, 26, 478152000, time.UTC)
+	if m.Name != "llama3.2:1b" || m.SizeBytes != 6474380083 || m.VRAMBytes != 6474380083 || m.ContextLength != 131072 ||
 		m.ExpiresAt == nil || !m.ExpiresAt.Equal(exp) || m.ExpiresAt.Location() != time.UTC {
-		t.Fatalf("model = %+v, want llama3.2:1b, 2.21 GB, ctx 4096, expiring %v UTC", m, exp)
+		t.Fatalf("model = %+v, want llama3.2:1b, 6.47 GB, ctx 131072, expiring %v UTC", m, exp)
 	}
 	// The server and its runner; not the `ollama run` client.
 	if want := uint64(12+2300) << 20; got.FootprintBytes == nil || *got.FootprintBytes != want {
@@ -217,7 +217,7 @@ func TestUnreadableFootprintIsUnknown(t *testing.T) {
 }
 
 func TestKeptLoadedForeverHasNoExpiry(t *testing.T) {
-	// keep_alive -1: Ollama reports now + the largest duration, in 2318.
+	// keep_alive -1: Ollama reports now + the largest duration, in 2319.
 	got := collect(t, ollama.New(fakeAPI{t: t, file: "ps-forever.json", allowed: true}, serverTree(), is(true)))
 	if m := got.Models[0]; m.ExpiresAt != nil {
 		t.Fatalf("expires = %v, want absent", *m.ExpiresAt)

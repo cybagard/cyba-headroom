@@ -1,10 +1,12 @@
 // Package ollama collects Ollama's loaded models and what they cost the host
 // (R1).
 //
-// Ollama reports each loaded model's size in memory. The real cost is the
+// Ollama reports each loaded model's size in memory, which counts its whole
+// context's KV cache and so runs above what it touches. The real cost is the
 // footprint of the server's process tree, where each loaded model has a
-// runner. headroom only reads GET /api/ps, and only once an `ollama serve`
-// process is running, so it never starts, pulls or loads anything.
+// runner (llama-server). headroom only reads GET /api/ps, and only once an
+// `ollama serve` process is running, so it never starts, pulls or loads
+// anything.
 package ollama
 
 import (
@@ -145,7 +147,8 @@ type apiModel struct {
 }
 
 // forever is how far ahead an expiry means "never": for keep_alive < 0
-// Ollama reports now plus the largest duration, about 292 years.
+// Ollama reports now plus the largest duration, about 292 years (2319
+// when measured in 2026).
 const forever = 100 * 365 * 24 * time.Hour
 
 func (m apiModel) toProtocol(now time.Time) protocol.OllamaModel {

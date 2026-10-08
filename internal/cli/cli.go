@@ -37,6 +37,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
 	"github.com/cybagard/cyba-headroom/internal/source/orca"
 	"github.com/cybagard/cyba-headroom/internal/source/tart"
+	"github.com/cybagard/cyba-headroom/internal/units"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
@@ -312,7 +313,14 @@ func runShim(e Env, name string) int {
 		return 127 // as the shell says for a missing command
 	}
 	if getenv("HEADROOM_SHIM_DEBUG") != "" {
-		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, target, shim.Engine(name, target))
+		gate := "pass"
+		if c := shim.Parse(name, e.Args[1:]); c.Kind != "" {
+			gate = "gate: " + c.Command
+			if c.MemoryBytes > 0 {
+				gate += ", " + units.GB(c.MemoryBytes) + " GB"
+			}
+		}
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
 	// Replace, not add: Go's and libc's getenv read the first of duplicates.
 	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, shimSelvesVar+"=") })

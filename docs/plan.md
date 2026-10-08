@@ -28,19 +28,19 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #17 **R1: Orca collector**
 - [x] #18 **R1: host memory pressure and swap (no sudo) with 5-min trend**
 - [x] #19 **R2: budget model (reserved vs used vs headroom)**
-- [ ] #20 **R3: worktree attribution**
-- [ ] #21 **R4: observe view — `headroom` and `headroom --watch`**
-- [ ] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**
+- [x] #20 **R3: worktree attribution**
+- [x] #21 **R4: observe view — `headroom` and `headroom --watch`**
+- [x] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**
 - [x] #55 **R1: record samples to disk for baseline and suggest**
-- [ ] #23 **Baseline: `headroom suggest` learns thresholds from recorded samples; two-week run**
+- [x] #23 **Baseline: `headroom suggest` learns thresholds from recorded samples; two-week run**
 
 ## [#3](https://github.com/cybagard/cyba-headroom/issues/3) Phase 3: Gate — launch env, shims, leases, slot gate, fail-open, policy (R5–R10)
 
 Exit criterion: agents recover from denies without human help in most cases. Blocked by Phase 2. Spec: docs/02-requirements.md R5–R10.
 
-- [ ] #24 **R8: policy engine (min headroom, per-worktree cap, idle-holder rule)**
-- [ ] #25 **R10: leases**
-- [ ] #26 **R5: shim core — real-binary resolution and passthrough**
+- [x] #24 **R8: policy engine (min headroom, per-worktree cap, idle-holder rule)**
+- [x] #25 **R10: leases**
+- [x] #26 **R5: shim core — real-binary resolution and passthrough**
 - [ ] #27 **R5: command parser for docker/podman/tart**
 - [ ] #28 **R5: identity resolution and deny/wait UX**
 - [ ] #29 **R6: macOS VM slot gate**

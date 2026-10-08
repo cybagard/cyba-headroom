@@ -75,8 +75,23 @@ func TestShimDebugLine(t *testing.T) {
 		Getenv:  func(string) string { return "" },
 		Environ: func() []string { return []string{"PATH=" + dir, "HEADROOM_SHIM_DEBUG=1"} },
 		exec:    func(string, []string, []string) error { return nil }})
-	if !strings.Contains(errb.String(), "headroom: docker → "+filepath.Join(dir, "docker")+" (podman)") {
+	if !strings.Contains(errb.String(), "headroom: docker → "+filepath.Join(dir, "docker")+" (podman; pass)") {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+}
+
+func TestShimDebugLineNamesAGatedCall(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!real\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var errb strings.Builder
+	Run(Env{Args: []string{"docker", "run", "--rm", "-m", "512m", "-e", "TOKEN=x", "alpine", "true"}, Stdout: io.Discard, Stderr: &errb,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"PATH=" + dir, "HEADROOM_SHIM_DEBUG=1"} },
+		exec:    func(string, []string, []string) error { return nil }})
+	if want := "(docker; gate: docker run alpine, 0.5 GB)"; !strings.Contains(errb.String(), want) {
+		t.Fatalf("stderr = %q, want %q", errb.String(), want)
 	}
 }
 

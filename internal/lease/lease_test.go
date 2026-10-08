@@ -37,6 +37,7 @@ func snap() *protocol.Snapshot {
 		Docker:      &protocol.Docker{Running: true, Containers: []protocol.Container{{ID: "old", Name: "old"}}},
 		Tart:        &protocol.Tart{Installed: true},
 		Attribution: &protocol.Attribution{Worktrees: []protocol.WorktreeUsage{{ID: "w1"}, {ID: "w2"}}},
+		CollectedAt: t0,
 	}
 }
 

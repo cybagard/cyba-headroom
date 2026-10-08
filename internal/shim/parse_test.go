@@ -77,6 +77,8 @@ func TestParse(t *testing.T) {
 		{"docker compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
 		{"docker compose --profile heavy up --profile gpu -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProfiles: []string{"heavy", "gpu"}}},
 		{"docker compose up -d --scale web=10", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
+		{"docker compose up -d --pull always", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
+		{"docker compose up --watch", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
 		{"docker compose up -d debug", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeNamed: true}},
 		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}, ComposeMayAdd: true}},
 		{"docker compose -f sub/c.yml -f other/d.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"sub/c.yml", "other/d.yml"}}},

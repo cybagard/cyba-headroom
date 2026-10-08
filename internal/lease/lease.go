@@ -166,6 +166,22 @@ const dockerSettle = 30 * time.Second
 // has stopped running.
 const stale = 2 * time.Second
 
+// composeTakes reports whether the lease of compose call r takes o over:
+// an open lease of the same project in its own worktree, neither a compose
+// run's (its one-off container is new). Another worktree's keeps its
+// lease, against its own cap; a manual call reserves nothing.
+func composeTakes(r policy.Request, o *entry) bool {
+	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && o.Kind == "compose" && !o.oneoff && o.project == r.Target && o.Worktree == r.Worktree
+}
+
+// freshDocker reports whether s's Docker reading is fresh and at most
+// idleFresh old: a snapshot is stamped each tick, whatever the age of the
+// reading it carries.
+func freshDocker(s *protocol.Snapshot, now time.Time) bool {
+	began, fresh := readingBegan(s)
+	return fresh && !began.IsZero() && now.Sub(began) <= idleFresh
+}
+
 // idleFresh is how old a reading may be for a compose up to count as
 // starting nothing because its stack runs.
 const idleFresh = 15 * time.Second
@@ -223,6 +239,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	for _, e := range b.open {
+		if composeTakes(r, e) {
+			// This call's lease takes it over, with what it reserves
+			// (below): counting it too would charge the stack twice.
+			continue
+		}
 		r.LeasedBytes += e.reserved()
 		if e.Worktree == r.Worktree {
 			r.WorktreeLeasedBytes += e.reserved()
@@ -252,7 +273,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 	}
 	idle := false
-	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 && (s.CollectedAt.IsZero() || now.Sub(s.CollectedAt) <= idleFresh) {
+	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 && freshDocker(s, now) {
 		// compose up -d of a stack whose every service runs, each replica
 		// (listed once per replica): it starts nothing new. Anything less
 		// and it holds its whole estimate: which service it starts, and
@@ -306,10 +327,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// lease takes that one over, with its containers and its cost.
 		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			if o.Kind != "compose" || e.oneoff || o.oneoff || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
-				// Only its own worktree's, and not a compose run's (its
-				// one-off container is new): another's keeps its lease,
-				// against its own cap; a manual call reserves nothing.
+			if !composeTakes(r, o) {
 				return false
 			}
 			e.took = append(e.took, o)

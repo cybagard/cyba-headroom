@@ -213,8 +213,10 @@ func parseCompose(endpoint string, words, args []string) Call {
 			profiles = append(profiles, v)
 		case "--scale":
 			scaled = true
-		case "--force-recreate", "--always-recreate-deps", "--build", "--renew-anon-volumes", "-V":
+		case "--force-recreate", "--always-recreate-deps", "--build", "--renew-anon-volumes", "-V", "--watch", "-w":
 			scaled = scaled || IsTrue(v) // replaces running containers
+		case "--pull":
+			scaled = scaled || v == "always" // a newer image replaces them
 		case "--file":
 			files = append(files, v)
 		case "-f":

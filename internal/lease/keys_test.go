@@ -341,9 +341,13 @@ func TestATakeoverAddsUpUse(t *testing.T) {
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "px"}, snap(), cfg)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "py"}, snap(), cfg)
 	b.Observe(ctr(ctr(snap(), "x"), "y"))
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "px"}, snap(), cfg)
+	// px again, estimated below what its lease still reserves: the new
+	// lease holds that (3) on top of what x uses (1), less x's use.
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "px"}, snap(), cfg); !d.Allow {
+		t.Fatalf("px again: %+v", d)
+	}
 	if r := reserved(b); r != 3*gib+3*gib {
-		t.Fatalf("reserved %d GiB, want px's 3 and py's 3", r>>30)
+		t.Fatalf("reserved %d GiB, want px's 3 and py's 3: %+v", r>>30, b.List())
 	}
 }
 
@@ -951,6 +955,15 @@ func TestAnUpIsIdleOnlyOnTheDaemonsEngineAndAFreshReading(t *testing.T) {
 			r.OnEngine = true
 			return r, stack()
 		},
+		"stale docker reading": func(b *lease.Book, c *clock) (policy.Request, *protocol.Snapshot) {
+			s := stack()
+			s.CollectedAt = c.t // stamped this tick, but Docker's reading is the last good one
+			s.Sources = map[string]protocol.SourceStatus{"docker": {At: c.t.Add(-time.Minute), Began: c.t.Add(-time.Minute), Stale: true}}
+			b.Observe(s)
+			r := up
+			r.OnEngine = true
+			return r, s
+		},
 		"old reading": func(b *lease.Book, c *clock) (policy.Request, *protocol.Snapshot) {
 			s := stack()
 			s.CollectedAt = c.t
@@ -968,5 +981,21 @@ func TestAnUpIsIdleOnlyOnTheDaemonsEngineAndAFreshReading(t *testing.T) {
 		if reserved(b) != 2*gib {
 			t.Errorf("%s: reserved %d MiB, want the estimate", name, reserved(b)>>20)
 		}
+	}
+}
+
+// compose up -d again while the first up's lease is open: the new lease
+// takes it over, so it is not counted twice against the cap.
+func TestARepeatUpIsNotChargedTwice(t *testing.T) {
+	b, _, _ := book(t)
+	c := cfg
+	c.PerWorktreeCapBytes = 2 * gib
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
+	if d := b.Check(up, snap(), c); !d.Allow {
+		t.Fatalf("first: %+v", d)
+	}
+	if d := b.Check(up, snap(), c); !d.Allow {
+		t.Fatalf("again: %+v", d)
 	}
 }

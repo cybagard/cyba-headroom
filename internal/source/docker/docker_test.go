@@ -363,16 +363,6 @@ func TestInspectSaysNoSuchContainer(t *testing.T) {
 	}
 }
 
-// The docker CLI trims a start's target: so does the lookup.
-func TestInspectTrimsAsDockerDoes(t *testing.T) {
-	sock, _ := engine(t, map[string]string{
-		"/containers/db/json": `{"Id":"abc123","Config":{"Labels":{}},"State":{"Running":false}}`,
-	})
-	if id, _, _, err := docker.New(sock, nil).Inspect(context.Background(), " db "); err != nil || id != "abc123" {
-		t.Fatalf("Inspect(\" db \") = %q, %v", id, err)
-	}
-}
-
 // A 404 that is not Docker's "No such container" (a proxy's) is unknown.
 func TestInspectTrustsOnlyDockersNotFound(t *testing.T) {
 	sock, _ := engine(t, map[string]string{"/containers/db/json": "!404"})

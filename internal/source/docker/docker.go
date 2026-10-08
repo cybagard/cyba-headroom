@@ -269,7 +269,6 @@ var containerRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 // labels and whether it runs, as Docker resolves the target of a docker
 // start (#33).
 func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
-	ref = strings.TrimSpace(ref) // as the docker CLI does: docker start " x" says "No such container: x"
 	if !containerRef.MatchString(ref) {
 		// Unknown, not missing: Docker may read it otherwise, and a start
 		// of it costs.

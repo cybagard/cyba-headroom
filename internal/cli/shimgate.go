@@ -108,7 +108,7 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	if name == "docker" && c.Endpoint == "" && (c.ConfigDir == "" || filepath.IsAbs(c.ConfigDir)) {
+	if name == "docker" && c.Endpoint == "" {
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget = c.MultiTarget
@@ -326,13 +326,11 @@ func dotEnv(path string) map[string]string {
 	return out
 }
 
-// dockerEndpoint is the endpoint the docker CLI talks to: DOCKER_HOST,
-// else the context's (DOCKER_CONTEXT, else the config's currentContext, as
-// docker context use sets it), else Docker's default socket. "" when the
-// context cannot be read.
-func dockerEndpoint(getenv func(string) string) string { return dockerEndpointIn(getenv, "") }
-
-// dockerEndpointIn is dockerEndpoint for docker --config configDir.
+// dockerEndpointIn is the endpoint the docker CLI talks to: DOCKER_HOST,
+// else the context's (DOCKER_CONTEXT, else currentContext in the config at
+// configDir, from --config, else DOCKER_CONFIG, else ~/.docker), else
+// Docker's default socket. "" when the context cannot be read, or the
+// config directory is relative.
 func dockerEndpointIn(getenv func(string) string, configDir string) string {
 	if h := getenv("DOCKER_HOST"); h != "" {
 		return h

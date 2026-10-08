@@ -381,3 +381,66 @@ func TestATakeoverAddsUpUse(t *testing.T) {
 		t.Fatalf("reserved %d GiB, want px's 3 and py's 3", r>>30)
 	}
 }
+
+// docker start tiny big under pressure, tiny held by an open lease: big is
+// not covered by tiny's lease, so the call is decided, not waved through.
+func TestAMultiTargetStartIsDecidedEvenWhenItsFirstIsHeld(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 2*gib), snap(), cfg)
+	s := withRun(snap(), "tiny", "w1", gib/8, run.LeaseID)
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start tiny", CostBytes: gib, Target: "tiny",
+		ContainerID: "tiny", MultiTarget: true}, s, cfg)
+	if d.Allow && d.LeaseID == "" {
+		t.Fatalf("waved through with no lease: %+v", d)
+	}
+	// Under pressure, it is denied like any other start.
+	b2, _, _ := book(t)
+	critical := withRun(snap(), "tiny", "w1", gib/8, "")
+	critical.Host.Pressure = "critical"
+	b2.Observe(critical)
+	if d := b2.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start tiny", CostBytes: gib, Target: "tiny",
+		ContainerID: "tiny", MultiTarget: true}, critical, cfg); d.Allow {
+		t.Fatalf("allowed under critical pressure: %+v", d)
+	}
+}
+
+// A lease past its timeout covers nothing, even before Observe expires it
+// (settling stalled).
+func TestAnExpiredLeaseCoversNoStart(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 2*gib), snap(), cfg)
+	b.Observe(withRun(snap(), "db", "w1", gib/8, run.LeaseID))
+	c.t = c.t.Add(3 * time.Minute) // no Observe since
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db", ContainerID: "db"}, snap(), cfg)
+	if d.LeaseID == "" {
+		t.Fatalf("covered by an expired lease: %+v", d)
+	}
+}
+
+// Compose drops leading _ and - from a directory's name: /ws/_app is app.
+func TestADirectorysProjectNameIsNormalisedAsComposeDoes(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/ws/_app"}}, snap(), cfg)
+	if l := b.List(); len(l) != 1 {
+		t.Fatalf("leases = %+v, want one", l)
+	}
+}
+
+// A directory's lease that holds a project other than the directory's
+// default name (name: in the file) is not that default project's.
+func TestALockedProjectIsNotTheDirectorysDefault(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/repo/app"}}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "c1", Name: "custom-web-1", MemoryBytes: gib / 4,
+		Labels: map[string]string{"com.docker.compose.project": "custom", protocol.ComposeWorkingDirLabel: "/repo/app"}}, "w1"))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 2 {
+		t.Fatalf("leases = %+v, want custom's and app's", l)
+	}
+}

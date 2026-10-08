@@ -172,17 +172,18 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if r.ContainerID != "" && b.boundAnywhere("container:"+r.ContainerID) {
-		// docker stop && docker start of a container an open lease holds:
-		// that lease still covers it. Allowed, and no new lease.
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
-	}
 	s := b.latest
 	if s == nil || (current != nil && current.CollectedAt.After(b.observed.Add(stale))) {
 		s = current
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
+	if r.ContainerID != "" && !r.MultiTarget && b.boundAnywhere("container:"+r.ContainerID) {
+		// docker stop && docker start of the container an open lease
+		// holds: that lease still covers it. Allowed, and no new lease. Not
+		// for docker start a b: the others are no lease's.
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
+	}
 	for _, e := range b.open {
 		r.LeasedBytes += e.reserved()
 		if e.Worktree == r.Worktree {
@@ -670,17 +671,28 @@ func (e *entry) sameKey(o *entry) bool {
 	case len(e.composeDirs) > 0 && len(o.composeDirs) > 0:
 		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) })
 	case len(e.composeDirs) > 0:
-		return o.project != "" && o.project == defaultProject(e.composeDirs[0])
+		return o.project != "" && o.project == e.dirProject()
 	case len(o.composeDirs) > 0:
-		return e.project != "" && e.project == defaultProject(o.composeDirs[0])
+		return e.project != "" && e.project == o.dirProject()
 	}
 	return e.project != "" && e.project == o.project
 }
 
+// dirProject is the project a directory's lease is for: the one it holds
+// (name: in the file may differ from the directory's), else the
+// directory's default.
+func (e *entry) dirProject() string {
+	if e.project != "" {
+		return e.project
+	}
+	return defaultProject(e.composeDirs[0])
+}
+
 // defaultProject is the project name Compose gives a directory: its base
-// name, lower case, keeping only letters, digits, - and _.
+// name, lower case, keeping only letters, digits, - and _, and no leading
+// - or _.
 func defaultProject(dir string) string {
-	return strings.Map(func(c rune) rune {
+	return strings.TrimLeft(strings.Map(func(c rune) rune {
 		switch {
 		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
 			return c
@@ -688,7 +700,7 @@ func defaultProject(dir string) string {
 			return c + 'a' - 'A'
 		}
 		return -1
-	}, filepath.Base(dir))
+	}, filepath.Base(dir)), "_-")
 }
 
 // judge records how r started.

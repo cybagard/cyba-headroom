@@ -658,24 +658,24 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := dockerEndpoint(get); got != "unix:///var/run/docker.sock" {
+	if got := dockerEndpointIn(get, ""); got != "unix:///var/run/docker.sock" {
 		t.Fatalf("no config: %q, want Docker's default socket", got)
 	}
 	context("desktop-linux", "unix:///Users/dev/.docker/run/docker.sock")
 	use("desktop-linux")
-	if got := dockerEndpoint(get); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("desktop-linux: %q", got)
 	}
 	use("missing")
-	if got := dockerEndpoint(get); got != "" {
+	if got := dockerEndpointIn(get, ""); got != "" {
 		t.Fatalf("a context with no metadata: %q, want unknown", got)
 	}
 	env["DOCKER_CONTEXT"] = "desktop-linux"
-	if got := dockerEndpoint(get); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("DOCKER_CONTEXT: %q", got)
 	}
 	env["DOCKER_HOST"] = "unix:///x.sock"
-	if got := dockerEndpoint(get); got != "unix:///x.sock" {
+	if got := dockerEndpointIn(get, ""); got != "unix:///x.sock" {
 		t.Fatalf("DOCKER_HOST: %q", got)
 	}
 }

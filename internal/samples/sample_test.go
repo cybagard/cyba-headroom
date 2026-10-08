@@ -83,9 +83,16 @@ func TestFromSnapshotKeepsAttributionKeys(t *testing.T) {
 }
 
 func TestFromSnapshotKeepsModelIdleness(t *testing.T) {
-	m := samples.FromSnapshot(fullSnapshot()).LMStudio.Models
-	if m[0].TTL == nil || *m[0].TTL != time.Hour || m[0].LastUsedAt == nil || !m[0].LastUsedAt.Equal(t0.Add(-2*time.Hour)) {
+	snap := fullSnapshot()
+	m := samples.FromSnapshot(snap).LMStudio.Models
+	if m[0].TTL == nil || *m[0].TTL != time.Hour || m[0].LastUsedAt == nil || !m[0].LastUsedAt.Equal(t0.Add(-2*time.Hour)) ||
+		m[0].Status != "idle" {
 		t.Fatalf("model = %+v", m[0])
+	}
+	// Copies, not the snapshot's pointers.
+	*snap.LMStudio.Models[0].TTL = time.Minute
+	if *m[0].TTL != time.Hour {
+		t.Fatal("sample shares the snapshot's TTL")
 	}
 	if m[1].TTL != nil || m[1].LastUsedAt != nil {
 		t.Fatalf("pinned model = %+v: want no TTL and no last use", m[1])

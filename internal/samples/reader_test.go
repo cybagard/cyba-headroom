@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
 // threeDays writes samples at 12:00 and 13:00 on Oct 6, 7 and 8; the first
@@ -147,5 +149,26 @@ func TestReadSkipsAnOverlongLineOnly(t *testing.T) {
 	got, st := readAll(t, dir, time.Time{}, day1.AddDate(1, 0, 0))
 	if len(got) != 6 || st.Skipped != 1 || st.BadFiles != 0 {
 		t.Fatalf("got %d samples, stats %+v; want the long line skipped and the rest read", len(got), st)
+	}
+}
+
+func TestModelIdlenessSurvivesWriteAndRead(t *testing.T) {
+	w, dir, _ := newTestWriter(t)
+	ttl, last := 90*time.Minute, day1.Add(-time.Hour)
+	s := snapAt(day1)
+	s.LMStudio = &protocol.LMStudio{Installed: true, Running: true, Models: []protocol.LoadedModel{
+		{Key: "m", SizeBytes: 1 << 30, Status: "generating", TTL: &ttl, LastUsedAt: &last}}}
+	w.write(s)
+	w.close()
+	var got []Model
+	if _, err := Read(dir, time.Time{}, day1.AddDate(0, 0, 1), func(s Sample) error {
+		got = s.LMStudio.Models
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TTL == nil || *got[0].TTL != ttl || got[0].LastUsedAt == nil ||
+		!got[0].LastUsedAt.Equal(last) || got[0].Status != "generating" {
+		t.Fatalf("read back %+v", got)
 	}
 }

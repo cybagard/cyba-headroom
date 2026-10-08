@@ -118,10 +118,11 @@ func (m apiModel) toProtocol() protocol.LoadedModel {
 		Status:        m.Status,
 	}
 	if m.LastUsedTime > 0 {
-		t := time.UnixMilli(m.LastUsedTime)
+		t := time.UnixMilli(m.LastUsedTime).UTC()
 		out.LastUsedAt = &t
 	}
-	if m.TTLMs != nil {
+	// A TTL of 0 or less unloads nothing: the model stays loaded, as with none.
+	if m.TTLMs != nil && *m.TTLMs > 0 {
 		ttl := time.Duration(*m.TTLMs) * time.Millisecond
 		out.TTL = &ttl
 	}

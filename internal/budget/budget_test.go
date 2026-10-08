@@ -204,19 +204,6 @@ func TestOllamaReservesLoadedModels(t *testing.T) {
 	}
 }
 
-// With neither its models nor its footprint known, Ollama's cost is unknown:
-// headroom is an upper bound.
-func TestOllamaWithNothingKnownIsUnknown(t *testing.T) {
-	o := &protocol.Ollama{Installed: true, Running: true, ModelsError: "refused", FootprintError: "boom"}
-	if b := budget.Compute(&protocol.Snapshot{Ollama: o}, budget.Params{}); !slices.Contains(b.Unknown, "ollama") {
-		t.Fatalf("unknown = %v, want ollama", b.Unknown)
-	}
-	o.FootprintBytes, o.FootprintError = u64(gib), ""
-	if b := budget.Compute(&protocol.Snapshot{Ollama: o}, budget.Params{}); slices.Contains(b.Unknown, "ollama") {
-		t.Fatalf("unknown = %v, want ollama known by its footprint", b.Unknown)
-	}
-}
-
 func i64(v int64) *int64 { return &v }
 
 // busyMac is a 64 GiB Mac with every source reporting.

@@ -10,7 +10,6 @@ package ollama
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -60,24 +59,26 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	}
 	o.Installed, o.Running = true, true
 
-	fp, err := s.procs.Footprints(ctx, pids...)
-	if err != nil {
-		// A runner that exits (keep-alive expired) between the scan and the
-		// footprint run fails the whole run: scan again and retry once.
-		if pids, err = s.servers(); err == nil && len(pids) > 0 {
-			fp, err = s.procs.Footprints(ctx, pids...)
-		} else if err == nil {
-			err = errors.New("ollama server exited")
-		}
+	// The footprint run and the API read are independent: run them side by
+	// side, so together they fit the source timeout. Without the model list
+	// the footprint still counts: the budget reserves it, so a server on a
+	// port headroom was not told about is not free.
+	type ps struct {
+		models []protocol.OllamaModel
+		err    error
 	}
-	if err != nil {
+	read := make(chan ps, 1)
+	go func() {
+		m, err := s.models(ctx)
+		read <- ps{m, err}
+	}()
+	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
 		o.FootprintError = err.Error()
 	} else {
 		o.FootprintBytes = &fp
 	}
-	// Without the model list the footprint still counts: the budget reserves
-	// it, so a server on a port headroom was not told about is not free.
-	models, err := s.models(ctx)
+	r := <-read
+	models, err := r.models, r.err
 	if err != nil {
 		o.Models, o.ModelsError = nil, err.Error()
 	} else {

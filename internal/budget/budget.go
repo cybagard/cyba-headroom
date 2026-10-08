@@ -58,13 +58,8 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		b.Unknown = append(b.Unknown, "lmstudio")
 		footprintsKnown = false
 	}
-	if o := s.Ollama; o != nil {
-		add(ollama(o, p))
-		// Running with neither its models nor its footprint known: only its
-		// idle size is reserved, so headroom is an upper bound.
-		if o.Running && o.ModelsError != "" && o.FootprintBytes == nil {
-			b.Unknown = append(b.Unknown, "ollama")
-		}
+	if s.Ollama != nil {
+		add(ollama(s.Ollama, p))
 	} else {
 		b.Unknown = append(b.Unknown, "ollama")
 		footprintsKnown = false

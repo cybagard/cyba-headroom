@@ -44,6 +44,8 @@ func TestEndpoint(t *testing.T) {
 		{"", "localhost:", "http://localhost:11434", true},
 		{"", "127.0.0.1:notaport", "http://127.0.0.1:11434", true},
 		{"", "127.0.0.1:99999", "http://127.0.0.1:11434", true},
+		{"", "http://127.0.0.1:", "http://127.0.0.1:80", true},
+		{"", "https://localhost:abc", "https://localhost:443", true},
 		{"", "127.0.0.1:0", "", false},
 	} {
 		got, err := ollama.Endpoint(tc.configured, tc.env)

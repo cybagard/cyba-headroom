@@ -233,26 +233,38 @@ func TestRemoteEndpointLeavesModelsUnknown(t *testing.T) {
 
 func is(b bool) func() bool { return func() bool { return b } }
 
-// flakyFootprints fails the first footprint run, as when a runner exits
-// between the process scan and the footprint run.
-type flakyFootprints struct {
-	fakeProcs
-	calls *int
+// gatedAPI answers only once the footprint run has started: the two reads
+// run side by side, so a slow one does not delay the other.
+type gatedAPI struct {
+	fakeAPI
+	started chan struct{}
 }
 
-func (f flakyFootprints) Footprints(ctx context.Context, pids ...int) (uint64, error) {
-	*f.calls++
-	if *f.calls == 1 {
-		return 0, errors.New("footprint: no such process")
+func (g gatedAPI) PS(ctx context.Context) ([]byte, error) {
+	select {
+	case <-g.started:
+		return g.fakeAPI.PS(ctx)
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("footprint run never started while /api/ps was read")
 	}
-	return f.fakeProcs.Footprints(ctx, pids...)
 }
 
-func TestFootprintIsRetriedOnce(t *testing.T) {
-	calls := 0
-	got := collect(t, ollama.New(fakeAPI{t: t, file: "ps-empty.json", allowed: true}, flakyFootprints{serverTree(), &calls}, is(true)))
-	if got.FootprintBytes == nil || calls != 2 {
-		t.Fatalf("footprint = %v after %d runs, want measured on the second", got.FootprintBytes, calls)
+type signallingProcs struct {
+	fakeProcs
+	started chan struct{}
+}
+
+func (s signallingProcs) Footprints(ctx context.Context, pids ...int) (uint64, error) {
+	close(s.started)
+	return s.fakeProcs.Footprints(ctx, pids...)
+}
+
+func TestFootprintAndAPIReadInParallel(t *testing.T) {
+	started := make(chan struct{})
+	api := gatedAPI{fakeAPI{t: t, file: "ps-one.json", allowed: true}, started}
+	got := collect(t, ollama.New(api, signallingProcs{serverTree(), started}, is(true)))
+	if len(got.Models) != 1 || got.FootprintBytes == nil {
+		t.Fatalf("got %+v", got)
 	}
 }
 

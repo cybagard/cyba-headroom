@@ -35,7 +35,10 @@ func Installed(configured string, getenv func(string) string, locations []string
 			if rest, ok := strings.CutPrefix(p, "~/"); ok {
 				p = filepath.Join(getenv("HOME"), rest)
 			}
-			if fi, err := os.Stat(p); err == nil && fi.IsDir() && filepath.IsAbs(p) {
+			if !filepath.IsAbs(p) {
+				continue // a relative HOME would resolve against the cwd
+			}
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 				return true
 			}
 			continue
@@ -84,14 +87,15 @@ func Endpoint(configured, ollamaHost string) (string, error) {
 		return fail("has a user name")
 	}
 	host := hostport
+	// Ollama falls back to the scheme's default for a port it cannot read.
+	schemePort := port
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		host, port = h, p
 	} else {
 		host = strings.Trim(host, "[]")
 	}
-	// Ollama falls back to its default for a port it cannot read.
 	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
-		port = defaultPort
+		port = schemePort
 	} else if n == 0 {
 		return fail("has port 0, a random port")
 	}

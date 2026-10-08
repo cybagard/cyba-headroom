@@ -3,7 +3,9 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,9 +102,10 @@ func doctor(e Env) []finding {
 	return out
 }
 
-// daemonStatus asks the daemon for its snapshot.
+// daemonStatus asks the daemon for its snapshot. A whole snapshot takes
+// longer than a check, so wait at least 2 s, not the shim's timeout.
 func daemonStatus(cfg config.Config) (*protocol.Snapshot, error) {
-	return client.Status(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
+	return client.Status(context.Background(), cfg.Socket, max(cfg.Policy.DaemonTimeout.Duration, 2*time.Second))
 }
 
 // shimsFinding checks that each shim in dir links to a headroom binary
@@ -114,8 +117,13 @@ func shimsFinding(dir string) finding {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
 		t, err := os.Readlink(p)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			bad = append(bad, n+" missing")
+			continue
+		}
+		if err != nil {
+			// headroom install leaves what is not a link alone.
+			bad = append(bad, n+" is not a link: remove it")
 			continue
 		}
 		if _, err := os.Stat(p); err != nil || !isHeadroom(p, t, self) {
@@ -125,7 +133,7 @@ func shimsFinding(dir string) finding {
 		target = t
 	}
 	if len(bad) > 0 {
-		return finding{mark: fail, name: "shims", detail: fmt.Sprintf("in %s: %s; run `headroom install`", dir, strings.Join(bad, ", "))}
+		return finding{mark: fail, name: "shims", detail: fmt.Sprintf("in %s: %s; then run `headroom install`", dir, strings.Join(bad, ", "))}
 	}
 	return finding{mark: pass, name: "shims", detail: fmt.Sprintf("%s in %s → %s", strings.Join(shimList(), ", "), dir, target)}
 }
@@ -135,6 +143,7 @@ func shimsFinding(dir string) finding {
 func pathFinding(getenv func(string) string, shimDir string, fallbacks map[string][]string) finding {
 	self, _ := os.Executable()
 	var wrong, more []string
+	gated := 0
 	for _, n := range shimList() {
 		first := binpath.Search(n, getenv, nil, nil)
 		bin, rerr := shim.Resolve(n, []string{self}, getenv, fallbacks[n])
@@ -144,25 +153,44 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 		case first == "":
 			// Not on PATH, so no call by name reaches it, gated or not.
 			more = append(more, fmt.Sprintf("%s: not on this PATH (installed at %s)", n, bin))
-		case !shim.LeadsToHeadroom(first) && !isShim(first, shimDir, n):
+		case !isHeadroom(first, first, self):
 			wrong = append(wrong, fmt.Sprintf("%s resolves to %s, not the shim", n, first))
 		case rerr != nil:
+			gated++
 			more = append(more, n+": shim first; not installed (calls say command not found)")
 		default:
+			gated++
 			more = append(more, fmt.Sprintf("%s: shim first, runs %s", n, bin))
 		}
 	}
-	if len(wrong) > 0 {
-		f := finding{mark: fail, name: "PATH", detail: strings.Join(wrong, "; ") +
-			". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after `headroom install`)", more: more}
-		return f
+	const restart = ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after `headroom install`)"
+	switch {
+	case len(wrong) > 0:
+		return finding{mark: fail, name: "PATH", detail: strings.Join(wrong, "; ") + restart, more: more}
+	case gated == 0 && !onPath(getenv("PATH"), shimDir):
+		return finding{mark: fail, name: "PATH", detail: "the shims in " + shimDir + " are not on this PATH" + restart, more: more}
+	}
+	// The shell, unlike headroom, also searches empty and relative entries:
+	// one ahead of the shims runs a tool from the current directory.
+	for _, d := range filepath.SplitList(getenv("PATH")) {
+		if filepath.Clean(d) == filepath.Clean(shimDir) {
+			break
+		}
+		if !filepath.IsAbs(d) {
+			return finding{mark: warn, name: "PATH", detail: fmt.Sprintf("the entry %q comes before the shims: the shell runs a docker, podman or tart in the current directory there, ungated", d), more: more}
+		}
 	}
 	return finding{mark: pass, name: "PATH", detail: strings.Join(shimList(), ", ") + " go through the shims in " + shimDir, more: more}
 }
 
-// isShim reports whether p is the shim for n in dir.
-func isShim(p, dir, n string) bool {
-	return filepath.Clean(p) == filepath.Join(filepath.Clean(dir), n)
+// onPath reports whether dir is an entry of path.
+func onPath(path, dir string) bool {
+	for _, d := range filepath.SplitList(path) {
+		if d != "" && filepath.Clean(d) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // identityFinding resolves this shell's worktree as the shim would (#28).
@@ -194,6 +222,9 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 		}
 	}
 	if name == "" {
+		if snap.Attribution != nil && snap.Attribution.OrcaStale {
+			return finding{mark: warn, name: "identity", detail: fmt.Sprintf("worktree %s, from %s, is not in Orca's worktree list, which is out of date: it may be new", id, source)}
+		}
 		return finding{mark: warn, name: "identity", detail: fmt.Sprintf("worktree %s, from %s, is not one of Orca's worktrees: its calls are charged to an unknown worktree", id, source)}
 	}
 	f := finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %q (%s), from %s", name, id, source)}
@@ -218,7 +249,11 @@ const loginScript = `for c in docker podman tart; do printf '%s=%s\n' "$c" "$(co
 func askLoginShell(sh string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, sh, "-lc", loginScript).Output()
+	cmd := exec.CommandContext(ctx, sh, "-lc", loginScript)
+	// A profile can leave a background process holding stdout open: stop
+	// waiting for it shortly after the shell is killed.
+	cmd.WaitDelay = 500 * time.Millisecond
+	out, err := cmd.Output()
 	return string(out), err
 }
 
@@ -234,15 +269,21 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error)) 
 		return finding{mark: warn, name: "login", detail: fmt.Sprintf("could not run `%s -l`: %s", sh, oneLine(err))}
 	}
 	var ungated []string
+	found := 0
 	sc := bufio.NewScanner(strings.NewReader(out))
 	for sc.Scan() {
 		n, p, ok := strings.Cut(sc.Text(), "=")
-		if !ok || p == "" || !ShimNames[n] {
+		// A function or alias prints its name, not a path: not a binary.
+		if !ok || !ShimNames[n] || !filepath.IsAbs(p) {
 			continue
 		}
+		found++
 		if !shim.LeadsToHeadroom(p) {
 			ungated = append(ungated, n+" → "+p)
 		}
+	}
+	if found == 0 {
+		return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` finds none of docker, podman, tart", sh)}
 	}
 	if len(ungated) > 0 {
 		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated (#33)", sh, strings.Join(ungated, ", "))}

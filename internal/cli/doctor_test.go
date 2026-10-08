@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -125,7 +126,6 @@ func TestDoctorAllGood(t *testing.T) {
 	if !strings.Contains(out, filepath.Join(r.tools, "docker")) {
 		t.Errorf("real docker not shown:\n%s", out)
 	}
-	_ = io.Discard
 }
 
 func TestDoctorPATHWithoutTheShims(t *testing.T) {
@@ -180,6 +180,46 @@ func TestDoctorToolOffPATHIsNotAFailure(t *testing.T) {
 	if strings.Contains(l, "tart resolves") {
 		t.Fatalf("tart, not on PATH, reported as resolving wrong: %q", l)
 	}
+}
+
+func TestDoctorRealToolInTheShimDirIsNotAShim(t *testing.T) {
+	r := newDoctorRig(t)
+	p := filepath.Join(r.shims, "docker")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := r.run()
+	if code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", code, out)
+	}
+	wantMark(t, out, "PATH", "✗", "docker resolves to "+p)
+	// Not a link: install leaves it alone, so say to remove it.
+	wantMark(t, out, "shims", "✗", "docker is not a link", "remove it")
+}
+
+func TestDoctorNothingThroughTheShimsFails(t *testing.T) {
+	r := newDoctorRig(t)
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if err := os.Remove(filepath.Join(r.tools, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.env["PATH"] = "/usr/bin" // no shim dir, and no tools on it
+	code, out := r.run()
+	if code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", code, out)
+	}
+	wantMark(t, out, "PATH", "✗", "not on this PATH")
+}
+
+func TestDoctorRelativePATHEntryBeforeTheShims(t *testing.T) {
+	r := newDoctorRig(t)
+	r.env["PATH"] = ".:" + r.shims + ":" + r.tools
+	_, out := r.run()
+	wantMark(t, out, "PATH", "!", `"."`, "current directory")
 }
 
 func TestDoctorMissingShims(t *testing.T) {
@@ -279,6 +319,14 @@ func TestDoctorIdentity(t *testing.T) {
 	}
 }
 
+func TestDoctorUnknownIDWithAStaleOrcaList(t *testing.T) {
+	r := newDoctorRig(t)
+	r.env["HEADROOM_WORKTREE"] = "wt-new"
+	r.snap.Attribution = &protocol.Attribution{OrcaStale: true}
+	_, out := r.run()
+	wantMark(t, out, "identity", "!", "wt-new", "out of date")
+}
+
 func TestDoctorIdentityMismatchNamesBoth(t *testing.T) {
 	r := newDoctorRig(t)
 	r.cwd = "/Users/dev/src/b"
@@ -303,6 +351,12 @@ func TestDoctorLoginShell(t *testing.T) {
 		"no SHELL: zsh": {func(r *doctorRig) {
 			delete(r.env, "SHELL")
 		}, "✓", []string{"/bin/zsh -l"}},
+		"finds none of the tools": {func(r *doctorRig) {
+			r.login = "docker=\npodman=\ntart=\n"
+		}, "✓", []string{"finds none"}},
+		"a function is not a path": {func(r *doctorRig) {
+			r.login = "docker=docker\npodman=" + filepath.Join(r.shims, "podman") + "\ntart=\n"
+		}, "✓", []string{"keeps the shims first"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -333,6 +387,22 @@ func TestDoctorRejectsArguments(t *testing.T) {
 		Getenv: func(k string) string { return r.env[k] }})
 	if code != 2 || !strings.Contains(errb.String(), "--fix") {
 		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// A profile that leaves a background process holding stdout must not hang
+// doctor past its timeout.
+func TestAskLoginShellDoesNotHang(t *testing.T) {
+	sh := filepath.Join(t.TempDir(), "sh")
+	if err := os.WriteFile(sh, []byte("#!/bin/sh\n(sleep 30) &\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := askLoginShell(sh); err == nil {
+		t.Fatal("want a timeout error")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("took %v", d)
 	}
 }
 

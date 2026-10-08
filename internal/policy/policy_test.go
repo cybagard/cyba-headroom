@@ -257,3 +257,15 @@ func TestStaleReadingsAreNamed(t *testing.T) {
 		t.Fatalf("message = %q", d.Message)
 	}
 }
+
+func TestAbsurdCostsCannotWrapTheArithmetic(t *testing.T) {
+	r := req("busy", ^uint64(0)) // 2^64 − 1 bytes
+	if d := policy.Decide(r, snap(), cfg); d.Allow {
+		t.Fatalf("allowed an absurd cost: %+v", d)
+	}
+	r = req("busy", gib)
+	r.LeasedBytes = ^uint64(0)
+	if d := policy.Decide(r, snap(), cfg); d.Allow {
+		t.Fatalf("allowed with absurd leases: %+v", d)
+	}
+}

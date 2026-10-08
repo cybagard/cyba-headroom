@@ -52,6 +52,23 @@ type Decision struct {
 	CostBytes     uint64 `json:"cost_bytes"`
 	// Holding is the worktree's own containers and VMs.
 	Holding []Held `json:"holding,omitempty"`
+	// LeaseID names the reservation an allow made (#25).
+	LeaseID string `json:"lease_id,omitempty"`
+	// LeasedBytes is what earlier allows had reserved, and not yet shown up,
+	// when this decision was made.
+	LeasedBytes uint64 `json:"leased_bytes,omitempty"`
+}
+
+// Lease reserves an allowed call's cost until its container or VM appears,
+// or until it expires (R10, #25).
+type Lease struct {
+	ID       string    `json:"id"`
+	Worktree string    `json:"worktree,omitempty"`
+	Kind     string    `json:"kind"`
+	Command  string    `json:"command"`
+	Bytes    uint64    `json:"bytes"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires"`
 }
 
 // Reason is one policy rule's verdict.
@@ -99,6 +116,8 @@ type Snapshot struct {
 	// Attribution assigns containers and Tart VMs to worktrees, derived once
 	// per tick (R3).
 	Attribution *Attribution `json:"attribution,omitempty"`
+	// Leases are the open reservations, oldest first (#25).
+	Leases []Lease `json:"leases,omitempty"`
 }
 
 // Attribution is what each worktree runs (R3).
@@ -116,6 +135,10 @@ type Attribution struct {
 // ComposeWorkingDirLabel is the label Docker Compose sets on a container to
 // its project directory.
 const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
+
+// ComposeProjectLabel is the label Docker Compose sets on a container to its
+// project name.
+const ComposeProjectLabel = "com.docker.compose.project"
 
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {

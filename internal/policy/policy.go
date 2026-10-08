@@ -57,7 +57,14 @@ type Request struct {
 	// LeasedBytes is memory promised to earlier allows that has not shown
 	// up yet (#25).
 	LeasedBytes uint64
+	// WorktreeLeasedBytes is the part of LeasedBytes promised to this
+	// worktree's own calls: it counts toward its cap.
+	WorktreeLeasedBytes uint64
 }
+
+// maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
+// above any Mac's memory.
+const maxBytes = uint64(1) << 42
 
 // The decision types are the wire format's, so the daemon returns them as is.
 type (
@@ -71,6 +78,12 @@ type (
 
 // Decide decides r against s.
 func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
+	if s == nil {
+		s = &protocol.Snapshot{} // before the daemon's first tick
+	}
+	r.CostBytes = min(r.CostBytes, maxBytes)
+	r.LeasedBytes = min(r.LeasedBytes, maxBytes)
+	r.WorktreeLeasedBytes = min(r.WorktreeLeasedBytes, maxBytes)
 	d := Decision{CostBytes: r.CostBytes}
 	if d.CostBytes == 0 {
 		d.CostBytes = c.DefaultContainerBytes
@@ -98,9 +111,12 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 			Text: "this worktree holds containers or VMs while none of its agents is working; reuse or stop them first"})
 	}
 	if d.HeadroomBytes != nil {
-		if c.PerWorktreeCapBytes > 0 && use+d.CostBytes > c.PerWorktreeCapBytes {
-			d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap,
-				Text: fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(use+d.CostBytes), units.GB(c.PerWorktreeCapBytes))})
+		if would := use + r.WorktreeLeasedBytes + d.CostBytes; c.PerWorktreeCapBytes > 0 && would > c.PerWorktreeCapBytes {
+			text := fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(would), units.GB(c.PerWorktreeCapBytes))
+			if r.WorktreeLeasedBytes > 0 {
+				text += fmt.Sprintf(" (%s GB of it for its calls still starting)", units.GB(r.WorktreeLeasedBytes))
+			}
+			d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap, Text: text})
 		}
 		left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(d.CostBytes)
 		if left < int64(c.MinHeadroomBytes) {

@@ -71,9 +71,9 @@
 
 **R10 — Leases.** An allow reserves the estimated cost until the resource appears, so simultaneous requests cannot overcommit.
 
-- [ ] Given two agents each request 6 GB with 8 GB headroom at the same moment, then exactly one is allowed and the other waits or is denied
-- [ ] A lease turns into tracked usage when its container or VM appears, or expires after a timeout (default 2 minutes)
-- [ ] Expired leases are logged
+- [x] Given two agents each request 6 GB with 8 GB headroom at the same moment, then exactly one is allowed and the other waits or is denied (#25)
+- [x] A lease turns into tracked usage when its container or VM appears, or expires after a timeout (default 2 minutes) (#25). The daemon recognises the new resource itself; the shim cannot report back once it has exec'd
+- [x] Expired leases are logged (#25)
 
 ### Nice-to-have (P1)
 

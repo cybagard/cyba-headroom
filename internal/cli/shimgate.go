@@ -73,6 +73,16 @@ func (e Env) withDefaults() Env {
 	if e.getwd == nil {
 		e.getwd = os.Getwd
 	}
+	if e.composeAsk == nil {
+		env, _ := e.envOf()
+		e.composeAsk = func(bin string, args []string) (string, error) { return askCompose(bin, args, env, "") }
+	}
+	if e.ping == nil {
+		e.ping = func(cfg config.Config) error {
+			_, err := client.Ping(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
+			return err
+		}
+	}
 	if e.fallbacks == nil {
 		e.fallbacks = shim.Fallbacks
 	}
@@ -113,12 +123,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget = c.MultiTarget
-	if c.Kind == "compose" {
+	if c.Kind == "compose" && h.ping(cfg) == nil {
+		// Asked only when the daemon answers: down, the call runs ungated
+		// at once (R7), with no wait on Compose.
 		ask := h.composeAsk
-		if ask == nil {
-			env, _ := e.envOf()
-			ask = func(bin string, args []string) (string, error) { return askCompose(bin, args, env, "") }
-		}
 		if name != "docker" {
 			ask = func(string, []string) (string, error) { return "", errors.New("only docker compose is asked") }
 		}
@@ -235,7 +243,11 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	if c.Target != "" {
 		return c.Target
 	}
-	args := []string{"compose"}
+	var args []string
+	if c.ConfigDir != "" {
+		args = append(args, "--config", c.ConfigDir) // its plugins and settings
+	}
+	args = append(args, "compose")
 	for _, f := range c.ComposeFiles {
 		args = append(args, "-f", f)
 	}

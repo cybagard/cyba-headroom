@@ -108,6 +108,9 @@ type entry struct {
 	// target: a start's container as given, when Docker could not resolve
 	// it, or a tart run's VM. composeDir: a compose call's project
 	labelled bool
+	// oneoff is set for a compose run's lease: it binds the one-off
+	// container Compose labels as such, not the project's services.
+	oneoff bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
 	took, tookLapsed []*entry
@@ -210,29 +213,35 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		labelled: r.Labelled, containerID: r.ContainerID, name: r.Name, target: r.Target,
 	}
 	if r.Kind == "compose" {
-		// Its key: the project, as the shim named it the way Compose does
-		// (-p, COMPOSE_PROJECT_NAME, name: in the file, the directory).
+		// Its key: the project, -p or as docker compose config names it.
 		// Compose labels each container with it.
-		e.target, e.project = "", r.Target
+		e.target, e.project, e.oneoff = "", r.Target, r.Op == "run"
 		// compose up again for the project an open lease of this worktree
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost.
+		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			if o.Kind != "compose" || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
-				// Only its own worktree's: another's keeps its lease, against
-				// its own cap (a manual call reserves nothing at all).
+			if o.Kind != "compose" || e.oneoff || o.oneoff || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
+				// Only its own worktree's, and not a compose run's (its
+				// one-off container is new): another's keeps its lease,
+				// against its own cap; a manual call reserves nothing.
 				return false
 			}
-			// Both reservations stand: a compose run's new container needs
-			// its own, and a takeover must never lower what is held.
 			e.took = append(e.took, o)
-			e.cost, e.used = e.cost+max(o.cost, o.used), e.used+o.used
+			reserved, used = reserved+o.reserved(), used+o.used
 			for k := range o.bound {
 				e.bound[k] = true
 			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
+		if len(e.took) > 0 {
+			// The same stack again: it holds the larger of this call's
+			// estimate and what the old leases still reserved, on top of
+			// what their containers use. Bounded however often it repeats,
+			// and never below what was held.
+			e.cost, e.used = max(e.cost, reserved)+used, used
+		}
 	}
 	if r.Running || r.ContainerID != "" && b.boundAnywhere("container:"+r.ContainerID) {
 		// docker start a b with a running, or held by an open lease: the
@@ -278,6 +287,7 @@ type resource struct {
 	dir      string // a compose container's project directory
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
+	oneoff   bool   // a compose run's one-off container
 	worktree string // "" when unattributed
 	os       string // a VM's OS
 	runPID   int    // a VM's tart run process
@@ -306,6 +316,7 @@ func resources(s *protocol.Snapshot) []resource {
 				lease: c.Labels[protocol.LeaseLabel]}
 			if p := c.Labels[protocol.ComposeProjectLabel]; p != "" {
 				r.kind, r.project, r.dir = "compose", p, c.Labels[protocol.ComposeWorkingDirLabel]
+				r.oneoff = c.Labels["com.docker.compose.oneoff"] == "True"
 			}
 			out = append(out, r)
 		}
@@ -595,9 +606,17 @@ func keyed(es []*entry, r resource, based bool) *entry {
 		}
 		return 2
 	}
+	// Among equal keys, the lease of the worktree r is attributed to: two
+	// worktrees may bring up one project.
+	better := func(e, best *entry) bool {
+		if rank(e) != rank(best) {
+			return rank(e) < rank(best)
+		}
+		return e.Worktree == r.worktree && best.Worktree != r.worktree
+	}
 	var best *entry
 	for _, e := range es {
-		if e.key(r, based) && (best == nil || rank(e) < rank(best)) {
+		if e.key(r, based) && (best == nil || better(e, best)) {
 			best = e
 		}
 	}
@@ -619,7 +638,7 @@ func (e *entry) key(r resource, based bool) bool {
 		// have labelled it a project's too (a --label on run).
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
-		return based && e.project != "" && e.project == r.project
+		return based && e.project != "" && e.project == r.project && e.oneoff == r.oneoff
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.containerID != "":

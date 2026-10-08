@@ -86,6 +86,8 @@ type Request struct {
 	Target, Name string
 	// Labelled means the container will carry the lease's ID (#33).
 	Labelled bool
+	// Op is the call's subcommand (run, up, start, ...).
+	Op string
 	// ContainerID is a start's container as Docker resolved it, and
 	// TakesOver the lease of the run or create that made it (its label),
 	// which this call's lease replaces (#33).

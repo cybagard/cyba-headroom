@@ -43,6 +43,10 @@ type shimRig struct {
 	released []string
 	raised   os.Signal
 	pending  os.Signal // a signal that came during an ask
+	// composeAsk stands in for docker compose config; daemonDown makes the
+	// ping before it fail.
+	composeAsk func(string, []string) (string, error)
+	daemonDown bool
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -94,6 +98,18 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			return nil
 		},
 		raise: func(s os.Signal) { r.raised = s },
+		composeAsk: func(bin string, args []string) (string, error) {
+			if r.composeAsk != nil {
+				return r.composeAsk(bin, args)
+			}
+			return "", errors.New("no compose here")
+		},
+		ping: func(config.Config) error {
+			if r.daemonDown {
+				return errors.New("connection refused")
+			}
+			return nil
+		},
 	})
 	return code, errb.String()
 }
@@ -685,5 +701,28 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	ask := func(bin string, args []string) (string, error) { return askCompose(bin, args, os.Environ(), dir) }
 	if got := composeProject(bin, shim.Call{}, ask); got != "blue-shop" {
 		t.Fatalf("project = %q, want blue-shop", got)
+	}
+}
+
+func TestComposeProjectForwardsDockersConfig(t *testing.T) {
+	var asked []string
+	ask := func(_ string, args []string) (string, error) { asked = args; return "x", nil }
+	composeProject("/d", shim.Call{ConfigDir: "/work/.docker"}, ask)
+	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
+// With the daemon down, the shim does not wait on Compose: it fails open at
+// once.
+func TestComposeIsNotAskedWithTheDaemonDown(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) { return nil, errors.New("connection refused") }
+	asked := false
+	r.composeAsk = func(string, []string) (string, error) { asked = true; return "x", nil }
+	r.daemonDown = true
+	r.run("docker", "compose", "up", "-d")
+	if asked {
+		t.Fatal("asked Compose with the daemon down")
 	}
 }

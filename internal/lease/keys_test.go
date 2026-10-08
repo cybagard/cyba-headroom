@@ -93,8 +93,8 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b.Check(up, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // compose up -d again
-	// Both calls' cost stands, less what the container uses.
-	if l := b.List(); len(l) != 1 || l[0].Bytes != 2*gib-gib/4 {
+	// One stack: the larger of the two estimates, less what it uses.
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib-gib/4 {
 		t.Fatalf("leases = %+v, want one, holding the container", l)
 	}
 	c.t = c.t.Add(3 * time.Minute)
@@ -415,19 +415,75 @@ func TestAMultiTargetStartOfAHeldContainerEndsQuietly(t *testing.T) {
 	}
 }
 
-// A compose takeover never lowers what is reserved: the costs add up (a
-// compose run's new container needs its own), and it stays in one worktree
-// (another worktree's call keeps its own lease, against its own cap).
-func TestAComposeTakeoverKeepsBothReservations(t *testing.T) {
+// A compose takeover never lowers what is reserved, and stays in one
+// worktree: another worktree's call keeps its own lease, against its own
+// cap.
+func TestAComposeTakeoverStaysInItsWorktree(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(snap())
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose run", CostBytes: gib, Target: "app"}, snap(), cfg)
-	if l := b.List(); len(l) != 1 || l[0].Bytes != 3*gib {
-		t.Fatalf("leases = %+v, want one holding both 3 GiB", l)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 1 || l[0].Bytes != 2*gib {
+		t.Fatalf("leases = %+v, want one holding the 2 GiB still reserved", l)
 	}
-	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
-	if l := b.List(); len(l) != 2 || reserved(b) != 4*gib {
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 2 || reserved(b) != 3*gib {
 		t.Fatalf("leases = %+v, want w2's apart", l)
+	}
+}
+
+// docker compose up again and again on a running stack: the reservation
+// stays bounded by one call's estimate, not one per call.
+func TestRepeatedComposeUpStaysBounded(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
+	web := addContainer(snap(), protocol.Container{ID: "w", Name: "app-web-1", MemoryBytes: gib / 2,
+		Labels: map[string]string{"com.docker.compose.project": "app"}}, "w1")
+	b.Check(up, snap(), cfg)
+	b.Observe(web)
+	for range 4 {
+		b.Check(up, web, cfg)
+		b.Observe(web)
+	}
+	if r := reserved(b); r > 2*gib {
+		t.Fatalf("reserved %d GiB after five ups of one stack", r>>30)
+	}
+}
+
+// docker compose run starts a one-off container, which Compose labels:
+// it is its own lease's, beside the up's, and both reservations stand.
+func TestComposeRunHasItsOwnLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "run", Command: "docker compose run", CostBytes: gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 2 || reserved(b) != 3*gib {
+		t.Fatalf("leases = %+v", l)
+	}
+	s := addContainer(snap(), protocol.Container{ID: "m", Name: "app-migrate-run-1", MemoryBytes: gib / 4,
+		Labels: map[string]string{"com.docker.compose.project": "app", "com.docker.compose.oneoff": "True"}}, "w1")
+	b.Observe(s)
+	for _, l := range b.List() {
+		if l.Command == "docker compose run" && l.Bytes != gib-gib/4 {
+			t.Fatalf("the run's lease did not take its one-off container: %+v", b.List())
+		}
+	}
+}
+
+// Two worktrees bring up the same project: each one's containers bind its
+// own lease (by the worktree they are attributed to).
+func TestTheSameProjectInTwoWorktrees(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "myapp"}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "myapp"}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "b1", Name: "myapp-web-1", MemoryBytes: gib / 2,
+		Labels: map[string]string{"com.docker.compose.project": "myapp"}}, "w2"))
+	for _, l := range b.List() {
+		if l.Worktree == "w2" && l.Bytes != 2*gib-gib/2 {
+			t.Fatalf("w2's container bound another lease: %+v", b.List())
+		}
 	}
 }

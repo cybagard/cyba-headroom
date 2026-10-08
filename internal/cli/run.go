@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -28,30 +29,37 @@ func runRun(e Env) int {
 		shimDir = cfg.ShimDir
 	} else if dir, derr := config.Dir(getenv); derr == nil {
 		// The shims fail open on a bad config themselves (R7): keep the
-		// gate, from the default shim dir.
-		shimDir = config.Defaults(dir).ShimDir
-		fmt.Fprintf(e.Stderr, "headroom: %s; using the shims in %s\n", oneLine(err), shimDir)
+		// gate, from the default shim dir, if it is a safe PATH entry.
+		if d := config.Defaults(dir).ShimDir; !strings.Contains(d, string(filepath.ListSeparator)) {
+			shimDir = d
+		}
 	}
+	gated := shimDir != "" && hasShims(shimDir)
 	switch {
-	case shimDir != "" && hasShims(shimDir):
-		env = setEnv(env, "PATH", withFirst(getenv("PATH"), shimDir))
-	case err == nil:
+	case err != nil && gated:
+		fmt.Fprintf(e.Stderr, "headroom: %s; using the shims in %s\n", oneLine(err), shimDir)
+	case err != nil:
+		fmt.Fprintf(e.Stderr, "headroom: %s; running `%s` without the gate\n", oneLine(err), argv[0])
+	case !gated:
 		fmt.Fprintf(e.Stderr, "headroom: no shims in %s (run `headroom install`); running `%s` without the gate\n", shimDir, argv[0])
 	}
-	// The agent is found on the PATH it gets; none at all is the system's.
-	_, childGetenv := Env{Environ: func() []string { return env }}.envOf()
+	// The child's PATH, which the agent is also found on; none at all is
+	// the system's.
+	childPath := getenv("PATH")
+	if gated {
+		childPath = withFirst(childPath, shimDir)
+		env = setEnv(env, "PATH", childPath)
+	} else if childPath == "" {
+		childPath = defaultPath
+	}
 	path := argv[0]
 	if !strings.Contains(path, "/") {
-		lookup := childGetenv
-		if childGetenv("PATH") == "" {
-			lookup = func(k string) string {
-				if k == "PATH" {
-					return defaultPath
-				}
-				return childGetenv(k)
+		path = binpath.Search(path, func(k string) string {
+			if k == "PATH" {
+				return childPath
 			}
-		}
-		path = binpath.Search(path, lookup, nil, nil)
+			return getenv(k)
+		}, nil, nil)
 		if path == "" {
 			fmt.Fprintf(e.Stderr, "headroom: %s: command not found\n", argv[0])
 			return 127

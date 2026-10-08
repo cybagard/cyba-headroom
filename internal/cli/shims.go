@@ -49,8 +49,8 @@ func linkShims(dir, bin string) (notes []string, err error) {
 }
 
 // unlinkShims removes the shim links in dir that lead to a headroom binary,
-// and dir itself once it is empty.
-func unlinkShims(dir, bin string) error {
+// and, if removeDir (dir is headroom's own), dir itself once it is empty.
+func unlinkShims(dir, bin string, removeDir bool) error {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
 		if target, err := os.Readlink(p); err == nil && ownLink(p, target, bin) {
@@ -59,28 +59,24 @@ func unlinkShims(dir, bin string) error {
 			}
 		}
 	}
-	if entries, err := os.ReadDir(dir); err == nil && len(entries) == 0 {
+	if entries, err := os.ReadDir(dir); removeDir && err == nil && len(entries) == 0 {
 		return os.Remove(dir)
 	}
 	return nil
 }
 
 // ownLink reports whether the link at p, to target, is headroom's to
-// replace or remove: it leads to bin or another headroom binary, or to
-// nothing (a link whose binary is gone gates nothing).
+// replace or remove: it leads to bin or another headroom binary, also one
+// that is gone. Someone else's link, dangling or not, is not.
 func ownLink(p, target, bin string) bool {
-	if target == bin || isHeadroom(p, target, bin) {
-		return true
-	}
-	_, err := os.Stat(p) // follows the link
-	return errors.Is(err, fs.ErrNotExist)
+	return target == bin || isHeadroom(p, target, bin)
 }
 
 // isHeadroom reports whether the link at p, to target, leads to a headroom
 // binary: one named headroom, or the same file as one of known (the
 // installed or the running binary, whatever their names).
 func isHeadroom(p, target string, known ...string) bool {
-	if shim.HeadroomName(target) {
+	if shim.HeadroomName(target) || shim.LeadsToHeadroom(p) {
 		return true
 	}
 	fi, err := os.Stat(p)

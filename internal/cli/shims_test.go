@@ -43,7 +43,7 @@ func TestLinkShims(t *testing.T) {
 		t.Fatalf("notes %q", notes)
 	}
 	// Uninstall removes only headroom's links.
-	if err := unlinkShims(dir, bin); err != nil {
+	if err := unlinkShims(dir, bin, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "docker")); !os.IsNotExist(err) {
@@ -58,13 +58,13 @@ func TestLinkShims(t *testing.T) {
 	_ = os.Remove(filepath.Join(dir, "podman"))
 	_ = os.Remove(filepath.Join(dir, "tart"))
 	_, _ = linkShims(dir, bin)
-	if err := unlinkShims(dir, bin); err != nil {
+	if err := unlinkShims(dir, bin, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("the empty shim dir stayed")
 	}
-	if err := unlinkShims(dir, bin); err != nil {
+	if err := unlinkShims(dir, bin, true); err != nil {
 		t.Fatalf("nothing to remove: %v", err)
 	}
 }
@@ -84,16 +84,20 @@ func TestDanglingShimsAndPartialShims(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.Symlink(filepath.Join(root, "gone", "hr"), filepath.Join(dir, "docker")) // dangling, any name
+	_ = os.Symlink(filepath.Join(root, "gone", "headroom"), filepath.Join(dir, "docker")) // a headroom that is gone
+	_ = os.Symlink(filepath.Join(root, "gone", "Docker.app"), filepath.Join(dir, "tart")) // someone else's, also gone
 	if hasShims(dir) {
 		t.Fatal("dangling links count as shims")
 	}
-	if notes, err := linkShims(dir, bin); err != nil || len(notes) != 0 {
-		t.Fatalf("notes %q, err %v", notes, err)
+	notes, err := linkShims(dir, bin)
+	if target, _ := os.Readlink(filepath.Join(dir, "docker")); err != nil || target != bin {
+		t.Fatalf("the gone headroom's link was not replaced: %q, %v", target, err)
 	}
-	if target, _ := os.Readlink(filepath.Join(dir, "docker")); target != bin {
-		t.Fatalf("the dangling link was not replaced: %q", target)
+	if target, _ := os.Readlink(filepath.Join(dir, "tart")); target == bin || len(notes) != 1 {
+		t.Fatalf("someone else's link was replaced: %q, notes %q", target, notes)
 	}
+	_ = os.Remove(filepath.Join(dir, "tart"))
+	_, _ = linkShims(dir, bin)
 	// One real file among the shims: the other two still gate.
 	_ = os.Remove(filepath.Join(dir, "podman"))
 	_ = os.WriteFile(filepath.Join(dir, "podman"), []byte("#!/bin/sh\n"), 0o755)
@@ -123,5 +127,31 @@ func TestShellWord(t *testing.T) {
 		if got := shellWord(in); got != want {
 			t.Errorf("shellWord(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A shim dir the user chose, not headroom's default, stays after uninstall;
+// a link through another link to headroom counts as headroom's.
+func TestUnlinkKeepsAChosenDirAndSeesChainedLinks(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin", "headroom")
+	_ = os.MkdirAll(filepath.Dir(bin), 0o755)
+	_ = os.WriteFile(bin, []byte("#!headroom\n"), 0o755)
+	alias := filepath.Join(root, "bin", "hr")
+	_ = os.Symlink(bin, alias)
+	dir := filepath.Join(root, "mybin")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.Symlink(alias, filepath.Join(dir, "docker"))
+	if !hasShims(dir) {
+		t.Fatal("a link to a link to headroom is not a shim")
+	}
+	if err := unlinkShims(dir, bin, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "docker")); !os.IsNotExist(err) {
+		t.Fatal("the chained link stayed")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the user's dir was removed: %v", err)
 	}
 }

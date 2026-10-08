@@ -107,7 +107,8 @@ func TestInstallLinksTheShims(t *testing.T) {
 	if code := f.in.uninstall(context.Background()); code != 0 {
 		t.Fatalf("uninstall: %d %s", code, f.errb.String())
 	}
-	if _, err := os.Stat(f.in.shimDir); !os.IsNotExist(err) {
+	// The links go; the dir stays, as it is not the default one.
+	if _, err := os.Lstat(filepath.Join(f.in.shimDir, "docker")); !os.IsNotExist(err) {
 		t.Fatalf("shims stayed: %v", err)
 	}
 }
@@ -372,7 +373,8 @@ func TestUninstallRemovesLinksToARelativeBin(t *testing.T) {
 	if code := f.in.uninstall(context.Background()); code != 0 {
 		t.Fatalf("uninstall: %s", f.errb.String())
 	}
-	if _, err := os.Stat(f.in.shimDir); !os.IsNotExist(err) {
+	// The links go; the dir stays, as it is not the default one.
+	if _, err := os.Lstat(filepath.Join(f.in.shimDir, "docker")); !os.IsNotExist(err) {
 		t.Fatalf("shims stayed: %v", err)
 	}
 }

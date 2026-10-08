@@ -261,3 +261,14 @@ func TestShimDirMustBeAbsolute(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A relative config dir is taken from the working directory once, so the
+// shim dir under it is absolute.
+func TestRelativeConfigDirIsMadeAbsolute(t *testing.T) {
+	root := shortTempDir(t)
+	t.Chdir(root)
+	cfg, err := Load(env(map[string]string{"HEADROOM_CONFIG_DIR": "cfg"}))
+	if err != nil || !filepath.IsAbs(cfg.ShimDir) {
+		t.Fatalf("shim dir %q, %v", cfg.ShimDir, err)
+	}
+}

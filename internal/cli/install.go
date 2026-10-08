@@ -226,7 +226,13 @@ func (in *installer) uninstall(ctx context.Context) int {
 			bin, _ = filepath.Abs(in.bin)
 		}
 		// Best effort: the agent is already stopped, so finish the rest.
-		if err := unlinkShims(in.shimDir, bin); err != nil {
+		// The dir goes only if it is headroom's own default, not one the
+		// user chose (say ~/bin).
+		own := false
+		if dir, err := config.Dir(in.getenv); err == nil {
+			own = in.shimDir == config.Defaults(dir).ShimDir
+		}
+		if err := unlinkShims(in.shimDir, bin, own); err != nil {
 			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
 		}
 	}

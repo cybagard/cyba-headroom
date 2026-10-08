@@ -146,3 +146,14 @@ func TestRunKnowsItsOwnBinaryByAnyName(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q, PATH %q", code, stderr, pathOf(r.execEnv))
 	}
 }
+
+// A broken config with no shims says the agent runs without the gate.
+func TestRunSaysWhenTheGateIsOff(t *testing.T) {
+	r := newRunRig(t, false)
+	if err := os.WriteFile(filepath.Join(r.cfg, "config.toml"), []byte("not toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, stderr := r.run("--", "agent"); code != 0 || !strings.Contains(stderr, "without the gate") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}

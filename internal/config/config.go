@@ -221,11 +221,13 @@ func Defaults(dir string) Config {
 // $XDG_CONFIG_HOME/headroom, then ~/.config/headroom. It deliberately does not
 // use os.UserConfigDir, which is ~/Library/Application Support on macOS.
 func Dir(getenv func(string) string) (string, error) {
+	// Absolute, so paths under it (the socket, the shim dir on agents'
+	// PATH) do not depend on a working directory.
 	if d := getenv("HEADROOM_CONFIG_DIR"); d != "" {
-		return d, nil
+		return filepath.Abs(d)
 	}
 	if x := getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "headroom"), nil
+		return filepath.Abs(filepath.Join(x, "headroom"))
 	}
 	home := getenv("HOME")
 	if home == "" {

@@ -589,7 +589,9 @@ func TestAStartLeaseTakesALabelledContainer(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(snap())
 	// docker create, then docker start: the container runs at the start.
-	created := b.Check(labelled("w1", "postgres"), snap(), cfg)
+	cr := labelled("w1", "postgres")
+	cr.Command = "docker create postgres"
+	created := b.Check(cr, snap(), cfg)
 	c.t = c.t.Add(time.Second)
 	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
 	s := addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
@@ -623,6 +625,73 @@ func TestALabelBindsOnlyAnUnboundContainerLease(t *testing.T) {
 	// A copy with the same labels: the lease already has its container.
 	b.Observe(withLabel(withLabel(snap(), "one", "alpine", d.LeaseID, ""), "copy", "alpine", d.LeaseID, ""))
 	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:copy" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// The shim labels every run: a slow pull's container still finds its
+// lapsed lease by its label.
+func TestALabelledContainerAfterASlowPullIsGated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(labelled("w1", "big-image"), snap(), cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(snap())
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(withLabel(snap(), "big", "big-image", d.LeaseID, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("a lapsed lease reserves again: %+v", l)
+	}
+}
+
+// Only a create's lease hands its container to a start: a run's is its own.
+func TestAStartLeaseDoesNotTakeARunsContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	// docker start db || docker run --name db postgres: the start failed.
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	r := labelled("w1", "postgres")
+	r.Name, r.CostBytes = "db", 4*gib
+	run := b.Check(r, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.LeaseLabel: run.LeaseID}}, "w1"))
+	for _, l := range b.List() {
+		if l.ID == run.LeaseID && l.Bytes == 4*gib-gib/2 {
+			return
+		}
+	}
+	t.Fatalf("the run's lease lost its container: %+v", b.List())
+}
+
+func TestAStartLeaseTakesOnlyItsOwnWorktreesCreated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	r := labelled("w1", "postgres")
+	r.Command = "docker create postgres"
+	created := b.Check(r, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.LeaseLabel: created.LeaseID}}, "w1"))
+	for _, l := range b.List() {
+		if l.ID == created.LeaseID {
+			return // kept its container
+		}
+	}
+	t.Fatalf("w2's start took w1's created container: %+v", b.List())
+}
+
+func TestAShimmedRunWithAComposeLabelIsGated(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(labelled("w1", "alpine"), snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "x", Name: "x", Image: "alpine",
+		Labels: map[string]string{protocol.LeaseLabel: d.LeaseID, "com.docker.compose.project": "dev"}}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
 		t.Fatalf("ungated = %v", got)
 	}
 }

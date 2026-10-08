@@ -19,6 +19,8 @@ func TestLabelled(t *testing.T) {
 		{"podman", "run alpine", "run --label " + l + " alpine"},
 		{"docker", "run --label dev.headroom.lease=forged --label-file f alpine", "run --label dev.headroom.lease=forged --label-file f --label " + l + " alpine"},
 		{"docker", "run -e X=1 -- alpine", "run -e X=1 --label " + l + " -- alpine"},
+		// "--" as -e's value, not the end of the options.
+		{"docker", "run -e -- alpine true", "run -e -- --label " + l + " alpine true"},
 		// Nothing to label: the container exists, or compose and tart
 		// start their own.
 		{"docker", "start db", ""},

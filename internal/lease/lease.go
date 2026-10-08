@@ -316,20 +316,24 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// a lease long gone (the container is matched as any other).
 	var unbound []resource
 	for _, r := range fresh {
-		if e := b.labelledLease(r); e != nil {
-			// A docker start of a created container: the start's lease
-			// takes it, and the create's ends, having started nothing.
-			if st := b.startNaming(r); st != nil {
-				st.bind(r)
-				b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
-				b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
-			} else {
-				e.bind(r)
-			}
-			b.judge(r, gated, now)
+		e, open := b.labelledLease(r)
+		switch {
+		case e == nil:
+			unbound = append(unbound, r)
 			continue
+		case !open:
+			// Its lease lapsed while the image pulled: checked, but it
+			// reserves nothing any more.
+		case b.startNaming(e, r) != nil:
+			// docker create, then docker start: the start's lease takes the
+			// container, and the create's ends, having started nothing.
+			b.startNaming(e, r).bind(r)
+			b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
+			b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
+		default:
+			e.bind(r)
 		}
-		unbound = append(unbound, r)
+		b.judge(r, gated, now)
 	}
 	for _, find := range []func(resource, time.Time, bool) *entry{b.named, b.match} {
 		var left []resource
@@ -516,8 +520,8 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	}
 	for _, live := range []bool{true, false} {
 		var other, manual *entry
-		for _, e := range b.open {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.labelled || e.namesOther(r) {
+		for _, e := range unlabelled(b.open) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.namesOther(r) {
 				continue
 			}
 			switch {
@@ -545,47 +549,68 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	return nil
 }
 
-// labelledLease is the open lease r's label names, if it is a labelled
-// call's that waits for r's kind and has bound nothing yet.
-func (b *Book) labelledLease(r resource) *entry {
-	if r.lease == "" {
-		return nil
+// labelledLease is the lease r's label names, if it is a labelled call's
+// (a run or create, so a container; one a compose label marks too) that
+// has bound nothing: an open one, or a lapsed one after a slow pull,
+// which is spent.
+func (b *Book) labelledLease(r resource) (e *entry, open bool) {
+	if r.lease == "" || source(r.kind) != "container" {
+		return nil, false
 	}
-	i := slices.IndexFunc(b.open, func(e *entry) bool {
-		return e.ID == r.lease && e.labelled && e.waitsFor() == r.kind && len(e.bound) == 0
-	})
-	if i < 0 {
-		return nil
+	is := func(e *entry) bool { return e.ID == r.lease && e.labelled && len(e.bound) == 0 }
+	if i := slices.IndexFunc(b.open, is); i >= 0 {
+		return b.open[i], true
 	}
-	return b.open[i]
+	if i := slices.IndexFunc(b.lapsed, is); i >= 0 {
+		e = b.lapsed[i]
+		b.lapsed = slices.Delete(b.lapsed, i, i+1)
+		return e, false
+	}
+	return nil, false
 }
 
-// startNaming is an open docker start or restart lease that names r.
-func (b *Book) startNaming(r resource) *entry {
-	i := slices.IndexFunc(b.open, func(e *entry) bool {
-		return !e.labelled && isStart(e.Command) && e.waitsFor() == r.kind && e.takes(r) && e.names(r)
-	})
-	if i < 0 {
+// startNaming is an open docker start or restart lease of e's worktree
+// that names r, when e is a docker create's: the start runs what the create
+// made.
+func (b *Book) startNaming(e *entry, r resource) *entry {
+	if !isOp(e.Command, "create") {
 		return nil
 	}
-	return b.open[i]
+	for _, st := range unlabelled(b.open) {
+		if isStart(st.Command) && st.Worktree == e.Worktree && st.waitsFor() == "container" && st.takes(r) && st.names(r) {
+			return st
+		}
+	}
+	return nil
+}
+
+// unlabelled leaves out the leases of labelled calls: their container
+// carries their ID, so only labelledLease binds it, never a guess.
+func unlabelled(es []*entry) []*entry {
+	var out []*entry
+	for _, e := range es {
+		if !e.labelled {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // lapsedFor reports whether a lapsed lease is r's, and spends it: one its
 // call names, or else one of r's own worktree.
 func (b *Book) lapsedFor(r resource) bool {
-	// A labelled lease's container carries its ID: it never lapses into
-	// another.
-	i := slices.IndexFunc(b.lapsed, func(e *entry) bool { return !e.labelled && e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
+	lapsed := unlabelled(b.lapsed)
+	i := slices.IndexFunc(lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
 	if i < 0 {
-		i = slices.IndexFunc(b.lapsed, func(e *entry) bool {
-			return !e.labelled && e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
+		i = slices.IndexFunc(lapsed, func(e *entry) bool {
+			return e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
 		})
 	}
 	if i < 0 {
 		return false
 	}
-	b.lapsed = slices.Delete(b.lapsed, i, i+1)
+	spent := lapsed[i]
+	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return e == spent })
 	return true
 }
 
@@ -603,8 +628,8 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 func (b *Book) named(r resource, now time.Time, ownOnly bool) *entry {
 	for _, live := range []bool{true, false} {
 		var other *entry
-		for _, e := range b.open {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.labelled || !e.names(r) {
+		for _, e := range unlabelled(b.open) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r) {
 				continue
 			}
 			own := r.worktree != "" && e.Worktree == r.worktree
@@ -660,12 +685,16 @@ func (e *entry) names(r resource) bool {
 
 // isStart reports whether a call summary is a docker or podman start or
 // restart, whose target is a container rather than an image.
-func isStart(command string) bool {
+func isStart(command string) bool { return isOp(command, "start") || isOp(command, "restart") }
+
+// isOp reports whether a call summary ("docker container create db") is
+// of subcommand op.
+func isOp(command, op string) bool {
 	w := strings.Fields(command)
 	if len(w) > 2 && w[1] == "container" {
 		w = w[1:]
 	}
-	return len(w) > 1 && (w[1] == "start" || w[1] == "restart")
+	return len(w) > 1 && w[1] == op
 }
 
 // namesOther reports whether e's call names a different container: a

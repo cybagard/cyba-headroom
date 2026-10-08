@@ -186,7 +186,7 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 				names = append(names, "…")
 				break
 			}
-			names = append(names, Clean(u.Name))
+			names = append(names, short(Clean(u.Name), 40)) // a long name would wrap the footer
 		}
 		parts = append(parts, r.paint(yellow, fmt.Sprintf("%d ungated: %s (started without headroom; see headroom doctor)", n, strings.Join(names, ", "))))
 	}

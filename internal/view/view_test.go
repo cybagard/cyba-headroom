@@ -368,3 +368,12 @@ func TestOneMarkPerRow(t *testing.T) {
 		t.Fatalf("two marks: %q", r)
 	}
 }
+
+func TestLongUngatedNamesAreCut(t *testing.T) {
+	s := busy()
+	s.Ungated = []protocol.Ungated{{Key: "container:x", Name: strings.Repeat("n", 200), Kind: "container"}}
+	f := render(t, s, view.Options{})
+	if l := f[len(f)-1]; strings.Contains(l, strings.Repeat("n", 41)) {
+		t.Fatalf("footer = %q", l)
+	}
+}

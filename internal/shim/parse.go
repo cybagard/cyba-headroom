@@ -113,8 +113,8 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		at = opAt + 1
 		if !guessed && len(pos) > 0 {
 			at = len(all) - len(pos) // pos is what is left: the image on
-			if all[at-1] == "--" {
-				at--
+			if res == endOfFlags {
+				at-- // before the "--" that ended the options (not a flag's value)
 			}
 		}
 	}

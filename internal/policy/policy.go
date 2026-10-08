@@ -102,6 +102,9 @@ type Request struct {
 	// looked up or that Docker did not resolve: each may still start, and
 	// costs one container.
 	Unresolved int
+	// Missing counts the containers a start names that Docker says do not
+	// exist: they start nothing, and the first is then no Target.
+	Missing int
 	// Services are a compose up's project's services: those its worktree
 	// already runs start nothing new.
 	Services []string

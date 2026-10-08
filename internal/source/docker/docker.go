@@ -233,6 +233,9 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/containers/") {
+		return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET %s: %s", path, resp.Status)
 	}
@@ -249,12 +252,16 @@ func (r reading) Apply(s *protocol.Snapshot) {
 	s.Docker = &d
 }
 
+// ErrNoSuchContainer is Docker's word that a container does not exist: a
+// start of it starts nothing.
+var ErrNoSuchContainer = errors.New("no such container")
+
 // Inspect resolves a container name, ID or ID prefix to its full ID, its
 // labels and whether it runs, as Docker resolves the target of a docker
 // start (#33).
 func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
 	if ref == "" || strings.ContainsAny(ref, "/?#%") {
-		return "", nil, false, fmt.Errorf("docker: not a container reference: %q", ref)
+		return "", nil, false, fmt.Errorf("docker: not a container reference: %q: %w", ref, ErrNoSuchContainer)
 	}
 	var c struct {
 		ID     string `json:"Id"`

@@ -117,6 +117,10 @@ type entry struct {
 	// container Compose labels as such (hasOneoff once it has), and the
 	// services it starts first (depends_on) when no up lease takes them.
 	oneoff, hasOneoff bool
+	// idle is set for a compose up of a stack whose every service ran: it
+	// reserves nothing, and binding nothing (another lease holds the
+	// stack) is no failure.
+	idle bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
 	took, tookLapsed []*entry
@@ -179,8 +183,13 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// Named but not resolved: each still starts. The first, unresolved,
 	// is a start of several only when it names others.
 	unresolved := r.Unresolved
-	if r.ContainerID == "" && (len(r.Others) > 0 || r.Unresolved > 0) {
+	if r.ContainerID == "" && r.Target != "" && (len(r.Others) > 0 || r.Unresolved > 0) {
 		unresolved++
+	}
+	if r.Missing > 0 && r.ContainerID == "" && r.Target == "" && len(r.Others) == 0 && r.Unresolved == 0 {
+		// docker start nope: no container it names exists, so it starts
+		// nothing (Docker says so). Allowed, and no lease.
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (no such container)", Summary(r.Command))}
 	}
 	if r.ContainerID != "" && unresolved == 0 && !r.MultiTarget && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
 		// A start or restart of containers Docker says run: it starts
@@ -225,28 +234,34 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			r.CostBytes = uint64(n) * per
 		}
 	}
-	idle := false
-	if r.Kind == "compose" && r.Op == "up" && len(r.Services) > 0 && r.Worktree != "" && s != nil {
-		// compose up -d of a stack that runs: only the services its
-		// worktree does not run yet start, each its share of the estimate.
-		// A service is listed once per replica.
-		running := map[string]int{}
+	// The project's running services in the caller's worktree: a compose
+	// up's lease holds them (below).
+	var stack []resource
+	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && r.Worktree != "" && s != nil {
 		for _, x := range resources(s) {
 			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree {
-				running[x.service]++
+				stack = append(stack, x)
 			}
 		}
-		var missing uint64
+	}
+	idle := false
+	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 {
+		// compose up -d of a stack whose every service runs, each replica
+		// (listed once per replica): it starts nothing new. Anything less
+		// and it holds its whole estimate: which service it starts, and
+		// what that costs, is not known.
+		running := map[string]int{}
+		for _, x := range stack {
+			running[x.service]++
+		}
+		idle = true
 		for _, sv := range r.Services {
-			if running[sv] > 0 {
-				running[sv]--
-			} else {
-				missing++
-			}
+			idle = idle && running[sv] > 0
+			running[sv]--
 		}
-		per := cmp.Or(r.CostBytes, c.DefaultContainerBytes) / uint64(len(r.Services))
-		r.CostBytes = max(1, missing*per) // 0 means the default
-		idle = missing == 0
+		if idle {
+			r.CostBytes = 1 // 0 means the default
+		}
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -268,7 +283,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		labelled: r.Labelled, name: r.Name, target: r.Target,
 	}
 	if idle {
-		e.cost = 0 // every service runs: it starts nothing new
+		e.cost, e.idle = 0, true // every service runs: it starts nothing new
 	}
 	for _, t := range starts {
 		e.containerIDs = append(e.containerIDs, t.ID)
@@ -304,19 +319,16 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// call was admitted, and its containers may be a pull away.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
-		if !e.oneoff && e.project != "" && s != nil && r.Worktree != "" {
-			// compose up -d of a stack that already runs, once its lease
-			// ended: its running containers are this lease's, so it never
-			// logs "never appeared" when the up starts nothing new. Their
-			// memory counts already: it is added to the cost, not taken
-			// from it, so what the check reserved (its services not yet
-			// running) stays reserved. Only those of this worktree, and
-			// held by no lease.
-			for _, x := range resources(s) {
-				if x.kind == "compose" && !x.oneoff && x.project == e.project && x.worktree == r.Worktree && !e.bound[x.key] && !b.boundAnywhere(x.key) {
-					e.bind(x)
-					e.cost, e.used = e.cost+x.bytes, e.used+x.bytes
-				}
+		// compose up -d of a stack that already runs, once its lease
+		// ended: its running containers are this lease's, so it never logs
+		// "never appeared" when the up starts nothing new. Their memory
+		// counts already: it is added to the cost, not taken from it, so
+		// what the check reserved stays reserved. Only those held by no
+		// lease.
+		for _, x := range stack {
+			if !e.oneoff && !e.bound[x.key] && !b.boundAnywhere(x.key) {
+				e.bind(x)
+				e.cost, e.used = e.cost+x.bytes, e.used+x.bytes
 			}
 		}
 	}
@@ -730,6 +742,9 @@ func (b *Book) expire(now time.Time) {
 			return false
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
+			return true
+		case e.idle:
+			b.log.Debug("lease of an up that started nothing ended at its timeout", "lease", e.ID, "worktree", e.Worktree)
 			return true
 		case e.Worktree == "":
 			// A manual call's: it reserved nothing, and many start nothing

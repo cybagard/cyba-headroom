@@ -16,6 +16,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/source/docker"
 )
 
 // The daemon's own wiring: a second check sees the first allow's lease.
@@ -247,7 +248,10 @@ type mapInspector map[string]struct {
 func (m mapInspector) Inspect(_ context.Context, ref string) (string, map[string]string, bool, error) {
 	c, ok := m[ref]
 	if !ok {
-		return "", nil, false, errors.New("no such container")
+		return "", nil, false, docker.ErrNoSuchContainer
+	}
+	if c.id == "" {
+		return "", nil, false, context.DeadlineExceeded // a lookup that ran out of time
 	}
 	return c.id, nil, c.running, nil
 }
@@ -307,9 +311,9 @@ func TestGateLooksUpTheOthersWhenTheFirstIsUnknown(t *testing.T) {
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
-	insp := mapInspector{"b": {"B", false}, "c": {"C", false}}
-	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start typo",
-		Target: "typo", Targets: []string{"typo", "b", "c", "gone"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
+	insp := mapInspector{"b": {"B", false}, "c": {"C", false}, "slow": {"", false}, "slower": {"", false}}
+	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start slow",
+		Target: "slow", Targets: []string{"slow", "b", "c", "slower"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
 	if l := book.List(); len(l) != 1 || l[0].Bytes != 4*pol.DefaultContainerBytes {
 		t.Fatalf("leases %+v: want all four named reserved", l)
 	}
@@ -321,5 +325,26 @@ func TestGateCountsARepeatedTargetOnce(t *testing.T) {
 	lookUpStarts(&req, &protocol.CheckRequest{Target: "db", Targets: []string{"db", "db"}, Engine: "unix:///other.sock"}, nil, "/s.sock")
 	if req.Unresolved != 0 {
 		t.Fatalf("Unresolved = %d, want 0", req.Unresolved)
+	}
+}
+
+// Targets Docker says do not exist start nothing: they cost nothing, and
+// a start of none that exist takes no lease.
+func TestGateChargesNoMissingTarget(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	insp := mapInspector{"b": {"B", false}}
+	check := gateCheckOn(book, pol, insp, "/s.sock")
+	check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start typo",
+		Target: "typo", Targets: []string{"typo", "b"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
+	if l := book.List(); len(l) != 1 || l[0].Bytes != pol.DefaultContainerBytes {
+		t.Fatalf("leases %+v: want b's alone", l)
+	}
+	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope",
+		Target: "nope", Engine: "unix:///s.sock"}, s); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("no such container: %+v", d)
 	}
 }

@@ -853,7 +853,7 @@ func TestAnEventPrefersAWorktreesLeaseToAManualOne(t *testing.T) {
 }
 
 // compose up -d of a stack whose services all run: it starts nothing, so
-// it reserves nothing; one service down costs its share.
+// it reserves nothing; one service down, and it holds its estimate.
 func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
 	stack := func(services ...string) *protocol.Snapshot {
 		s := snap()
@@ -866,7 +866,7 @@ func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
 	for _, tc := range []struct {
 		running []string
 		want    uint64
-	}{{[]string{"web", "db"}, 0}, {[]string{"web"}, gib}, {nil, 2 * gib}} {
+	}{{[]string{"web", "db"}, 0}, {[]string{"web"}, 2 * gib}, {nil, 2 * gib}} {
 		b, _, _ := book(t)
 		s := stack(tc.running...)
 		b.Observe(s)
@@ -886,7 +886,27 @@ func TestComposeUpCountsReplicas(t *testing.T) {
 	b.Observe(s)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 3 * gib, Target: "app",
 		Services: []string{"web", "web", "web"}}, s, cfg)
-	if reserved(b) != 2*gib {
-		t.Fatalf("reserved %d MiB, want two replicas' 2048", reserved(b)>>20)
+	if reserved(b) != 3*gib {
+		t.Fatalf("reserved %d MiB, want the estimate: two replicas start", reserved(b)>>20)
+	}
+}
+
+// An up of a running stack that another lease holds (a compose run's
+// dependencies) binds nothing, and that is no "never appeared".
+func TestAnIdleUpEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "run", Command: "docker compose run", Target: "app"}, snap(), cfg)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	b.Observe(s) // db: the run's dependency
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}}, s, cfg)
+	if reserved(b) > gib {
+		t.Fatalf("reserved %d MiB: the up starts nothing", reserved(b)>>20)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
 	}
 }

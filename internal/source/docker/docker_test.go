@@ -338,3 +338,18 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 		t.Fatal("a stream that ends must say so: the caller reconnects")
 	}
 }
+
+// Docker's word that no such container exists is told apart from a
+// failed lookup: a start of it starts nothing.
+func TestInspectSaysNoSuchContainer(t *testing.T) {
+	sock, _ := engine(t, map[string]string{})
+	s := docker.New(sock, nil)
+	for _, ref := range []string{"gone", "x%"} {
+		if _, _, _, err := s.Inspect(context.Background(), ref); !errors.Is(err, docker.ErrNoSuchContainer) {
+			t.Errorf("Inspect(%q) = %v, want ErrNoSuchContainer", ref, err)
+		}
+	}
+	if _, _, _, err := docker.New(filepath.Join(shortDir(t), "none.sock"), nil).Inspect(context.Background(), "db"); errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Fatal("no engine is not no such container")
+	}
+}

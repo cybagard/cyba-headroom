@@ -122,9 +122,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	if c.Kind == "compose" && name == "docker" {
-		// Compose names the project (-p needs no asking; podman compose is
-		// not asked). Bounded by composeTimeout, also when the daemon
-		// turns out to be down (R7).
+		// Compose names the project and lists an up's services (-p needs
+		// no asking but for an up; podman compose is not asked). Bounded
+		// by composeTimeout, also when the daemon turns out to be down
+		// (R7).
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
@@ -233,12 +234,13 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 
 // composeProject is a compose call's project, as Compose itself names it
 // (#33): -p, else the name docker compose config gives, run with the call's
-// own -f, --project-directory and --env-file in its own environment and
-// working directory. Compose labels each container with the project, so
-// the name is the lease's key. Asking Compose, rather than reading .env,
-// override files and name: the way it does, keeps the two from parting.
-// "" when Compose cannot say (the call will fail too): no key, failing
-// closed.
+// own -f, --project-directory, --env-file and --profile in its own
+// environment and working directory. Compose labels each container with
+// the project, so the name is the lease's key. Asking Compose, rather than
+// reading .env, override files and name: the way it does, keeps the two
+// from parting. "" when Compose cannot say (the call will fail too): no
+// key, failing closed. For an up, also its services, a name per replica
+// (none for --scale, or when Compose cannot say).
 func composeProject(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) (string, []string) {
 	if c.Target != "" && c.Op != "up" {
 		return c.Target, nil
@@ -344,7 +346,7 @@ func normalProject(s string) string {
 const composeTimeout = 2 * time.Second
 
 // askCompose runs docker compose config (args) at bin in env and dir ("":
-// this process's) and returns the project's name.
+// this process's) and returns its JSON.
 func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()

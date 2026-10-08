@@ -445,7 +445,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 // check: whether it runs changes by the second (docker stop && docker
 // start). One not looked up (another engine) or not resolved may still
 // start: it counts as Unresolved, and costs.
-func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspector, socket string) {
+func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspector, socket string) {
 	targets := r.Targets
 	if len(targets) == 0 {
 		targets = []string{r.Target}
@@ -457,12 +457,12 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspecto
 		seen[t] = true
 		return dup
 	})
-	if docker == nil || !sameSocket(r.Engine, socket) {
+	if inspector == nil || !sameSocket(r.Engine, socket) {
 		req.Unresolved = len(targets) - 1
 		return
 	}
 	type found struct {
-		ok bool
+		ok, missing bool
 		policy.Start
 	}
 	got := make([]found, len(targets))
@@ -474,20 +474,26 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspecto
 		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			if cid, labels, running, err := docker.Inspect(ctx, t); err == nil {
-				got[i] = found{true, policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running}}
-			}
+			cid, labels, running, err := inspector.Inspect(ctx, t)
+			got[i] = found{err == nil, errors.Is(err, docker.ErrNoSuchContainer), policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running}}
 		})
 	}
 	wg.Wait()
-	if got[0].ok {
+	switch {
+	case got[0].ok:
 		req.ContainerID, req.TakesOver, req.Running = got[0].ID, got[0].TakesOver, got[0].Running
 		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
+	case got[0].missing:
+		req.Target = "" // no such container: Docker starts it not, and no name of it comes
+		req.Missing++
 	}
 	for _, f := range got[1:] {
-		if f.ok {
+		switch {
+		case f.ok:
 			req.Others = append(req.Others, f.Start)
-		} else {
+		case f.missing:
+			req.Missing++
+		default:
 			req.Unresolved++
 		}
 	}

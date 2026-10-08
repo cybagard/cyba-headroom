@@ -74,6 +74,7 @@ type Env struct {
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
+	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
@@ -579,7 +580,7 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
-			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Services: r.Services, OnEngine: sameSocket(r.Engine, socket)}
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Idle: r.Idle, OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
 		}

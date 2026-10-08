@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -857,45 +856,6 @@ func TestAnEventPrefersAWorktreesLeaseToAManualOne(t *testing.T) {
 	}
 }
 
-// compose up -d of a stack whose services all run: it starts nothing, so
-// it reserves nothing; one service down, and it holds its estimate.
-func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
-	stack := func(services ...string) *protocol.Snapshot {
-		s := snap()
-		for _, sv := range services {
-			s = addContainer(s, protocol.Container{ID: sv, Name: sv, MemoryBytes: gib / 4,
-				Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": sv}}, "w1")
-		}
-		return s
-	}
-	for _, tc := range []struct {
-		running []string
-		want    uint64
-	}{{[]string{"web", "db"}, 0}, {[]string{"web"}, 2 * gib}, {nil, 2 * gib}} {
-		b, _, _ := book(t)
-		s := stack(tc.running...)
-		b.Observe(s)
-		d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true,
-			Services: []string{"web", "db"}}, s, cfg)
-		if !d.Allow || reserved(b) > tc.want || reserved(b)+1 < tc.want {
-			t.Errorf("%v running: decision %+v, reserved %d MiB, want %d", tc.running, d, reserved(b)>>20, tc.want>>20)
-		}
-	}
-}
-
-// A service with three replicas of which one runs still starts two.
-func TestComposeUpCountsReplicas(t *testing.T) {
-	b, _, _ := book(t)
-	s := addContainer(snap(), protocol.Container{ID: "w-1", Name: "w-1",
-		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "web"}}, "w1")
-	b.Observe(s)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 3 * gib, Target: "app", OnEngine: true,
-		Services: []string{"web", "web", "web"}}, s, cfg)
-	if reserved(b) != 3*gib {
-		t.Fatalf("reserved %d MiB, want the estimate: two replicas start", reserved(b)>>20)
-	}
-}
-
 // An up of a running stack that another lease holds (a compose run's
 // dependencies) binds nothing, and that is no "never appeared".
 func TestAnIdleUpEndsQuietly(t *testing.T) {
@@ -905,7 +865,7 @@ func TestAnIdleUpEndsQuietly(t *testing.T) {
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
 	b.Observe(s) // db: the run's dependency
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}, OnEngine: true}, s, cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Idle: true, OnEngine: true}, s, cfg)
 	if reserved(b) > gib {
 		t.Fatalf("reserved %d MiB: the up starts nothing", reserved(b)>>20)
 	}
@@ -934,53 +894,8 @@ func TestAnIdleUpMeetsThePressureGuard(t *testing.T) {
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
 	s.Host.Pressure = "critical"
 	b.Observe(s)
-	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}, OnEngine: true}, s, cfg); d.Allow {
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Idle: true, OnEngine: true}, s, cfg); d.Allow {
 		t.Fatalf("decision %+v", d)
-	}
-}
-
-// An up to another engine, or after Docker said its stack exited, or on an
-// old reading, starts what it may: it keeps its estimate.
-func TestAnUpIsIdleOnlyOnTheDaemonsEngineAndAFreshReading(t *testing.T) {
-	stack := func() *protocol.Snapshot {
-		return addContainer(snap(), protocol.Container{ID: "db", Name: "db",
-			Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
-	}
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", Services: []string{"db"}}
-	for name, prep := range map[string]func(*lease.Book, *clock) (policy.Request, *protocol.Snapshot){
-		"another engine": func(*lease.Book, *clock) (policy.Request, *protocol.Snapshot) { return up, stack() },
-		"stopped since": func(b *lease.Book, _ *clock) (policy.Request, *protocol.Snapshot) {
-			b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
-			r := up
-			r.OnEngine = true
-			return r, stack()
-		},
-		"stale docker reading": func(b *lease.Book, c *clock) (policy.Request, *protocol.Snapshot) {
-			s := stack()
-			s.CollectedAt = c.t // stamped this tick, but Docker's reading is the last good one
-			s.Sources = map[string]protocol.SourceStatus{"docker": {At: c.t.Add(-time.Minute), Began: c.t.Add(-time.Minute), Stale: true}}
-			b.Observe(s)
-			r := up
-			r.OnEngine = true
-			return r, s
-		},
-		"old reading": func(b *lease.Book, c *clock) (policy.Request, *protocol.Snapshot) {
-			s := stack()
-			s.CollectedAt = c.t
-			b.Observe(s)
-			c.t = c.t.Add(time.Minute)
-			r := up
-			r.OnEngine = true
-			return r, s
-		},
-	} {
-		b, c, _ := book(t)
-		b.Observe(stack())
-		r, s := prep(b, c)
-		b.Check(r, s, cfg)
-		if reserved(b) != 2*gib {
-			t.Errorf("%s: reserved %d MiB, want the estimate", name, reserved(b)>>20)
-		}
 	}
 }
 
@@ -1059,7 +974,7 @@ func TestAnIdleRepeatUpIsWeighedAtAByte(t *testing.T) {
 	c := cfg
 	c.PerWorktreeCapBytes = 3 * gib
 	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Services: []string{"db"}}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Idle: true}
 	b.Check(up, snap(), c)
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib / 2,
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
@@ -1074,7 +989,7 @@ func TestAnIdleRepeatUpIsWeighedAtAByte(t *testing.T) {
 func TestIdleRepeatUpsKeepTheTakenExpiry(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Services: []string{"db"}}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Idle: true}
 	b.Check(up, snap(), cfg)
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib / 2,
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
@@ -1097,7 +1012,7 @@ func TestAnIdleUpTakingAnIdleUpOverEndsQuietly(t *testing.T) {
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
 	b.Observe(s)
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Services: []string{"db"}}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Idle: true}
 	b.Check(up, s, cfg)
 	b.Check(up, s, cfg)
 	c.t = c.t.Add(3 * time.Minute)
@@ -1119,16 +1034,56 @@ func TestAnIdleUpTakingAWaitingUpOverEndsQuietly(t *testing.T) {
 	}
 	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}, snap(), cfg)
 	b.Observe(svc(snap(), "db"))
-	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Services: []string{"db", "web"}}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}
 	b.Check(up, svc(snap(), "db"), cfg)                           // waits for web
 	run := b.Check(labelled("w1", "web"), svc(snap(), "db"), cfg) // web comes as a run's, its label outranking the up's project
 	both := addContainer(svc(snap(), "db"), protocol.Container{ID: "web", Name: "web",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "web", protocol.LeaseLabel: run.LeaseID}}, "w1")
 	b.Observe(both)
-	b.Check(up, both, cfg) // idle
+	up.Idle = true // Compose: every container runs
+	b.Check(up, both, cfg)
 	c.t = c.t.Add(3 * time.Minute)
 	b.Observe(both)
 	if strings.Contains(log.String(), `never appeared" lease=lease-`) && strings.Contains(log.String(), `command="docker compose up"`) {
 		t.Fatalf("log: %s", log)
+	}
+}
+
+// compose restart of a stack whose every service runs starts nothing new.
+func TestAComposeRestartOfARunningStackIsIdle(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "restart", Command: "docker compose restart", CostBytes: 2 * gib, Target: "app", OnEngine: true, Idle: true}, s, cfg)
+	if reserved(b) != 0 {
+		t.Fatalf("reserved %d MiB, want none", reserved(b)>>20)
+	}
+}
+
+// Two docker start db at once, db stopped: the first's lease holds it, so
+// the second takes none.
+func TestASecondStartOfTheSameContainerTakesNoLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	r := policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}
+	b.Check(r, snap(), cfg)
+	if d := b.Check(r, snap(), cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("second: %+v", d)
+	}
+}
+
+// Compose said the up starts nothing: it reserves nothing. Otherwise its
+// estimate.
+func TestAnUpComposeSaysIsIdleReservesNothing(t *testing.T) {
+	for idle, want := range map[bool]uint64{true: 0, false: 2 * gib} {
+		b, _, _ := book(t)
+		s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+			Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+		b.Observe(s)
+		b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Idle: idle}, s, cfg)
+		if reserved(b) != want {
+			t.Errorf("idle %v: reserved %d MiB, want %d", idle, reserved(b)>>20, want>>20)
+		}
 	}
 }

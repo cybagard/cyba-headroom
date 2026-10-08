@@ -105,11 +105,11 @@ type Request struct {
 	// FirstMissing is set when Docker says the first container a start
 	// names does not exist: it starts nothing, and is no Target.
 	FirstMissing bool
-	// Services are a compose up's project's services: those its worktree
-	// already runs start nothing new.
-	Services []string
+	// Idle is set for a compose call Compose's own dry run said creates,
+	// recreates and starts nothing.
+	Idle bool
 	// OnEngine is set when the call goes to the Docker engine the daemon
-	// reads: only then does what that engine runs tell what it starts.
+	// reads: only then are that engine's containers the call's.
 	OnEngine bool
 }
 

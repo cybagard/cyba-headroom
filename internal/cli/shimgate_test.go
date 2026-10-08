@@ -45,6 +45,8 @@ type shimRig struct {
 	pending  os.Signal // a signal that came during an ask
 	// composeAsk stands in for docker compose config.
 	composeAsk func(string, []string) ([]byte, error)
+	// composeDry stands in for docker compose --dry-run.
+	composeDry func(string, []string) ([]byte, error)
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -99,6 +101,12 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 		composeAsk: func(bin string, args []string) ([]byte, error) {
 			if r.composeAsk != nil {
 				return r.composeAsk(bin, args)
+			}
+			return nil, errors.New("no compose here")
+		},
+		composeDry: func(bin string, args []string) ([]byte, error) {
+			if r.composeDry != nil {
+				return r.composeDry(bin, args)
 			}
 			return nil, errors.New("no compose here")
 		},
@@ -657,22 +665,18 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 		return []byte(`{"name":"shop","services":{"web":{},"db":{}}}`), nil
 	}
 	c := shim.Call{Op: "up", ComposeFiles: []string{"a.yml", "b.yml"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
-	if got, services := composeProject("/usr/local/bin/docker", c, ask); got != "shop" || !slices.Equal(services, []string{"db", "web"}) {
-		t.Fatalf("project = %q, services %q", got, services)
+	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
+		t.Fatalf("project = %q", got)
 	}
 	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
-	if got, _ := composeProject("/usr/local/bin/docker", shim.Call{Op: "down", Target: "p"}, ask); got != "p" || len(asked) != 1 {
+	if got := composeProject("/usr/local/bin/docker", shim.Call{Op: "up", Target: "p"}, ask); got != "p" || len(asked) != 1 {
 		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
 	}
-	// An up with -p asks for its services: those already running cost nothing.
-	if got, services := composeProject("/usr/local/bin/docker", shim.Call{Op: "up", Target: "p"}, ask); got != "p" || len(services) != 2 {
-		t.Fatalf("-p up: %q, %q", got, services)
-	}
 	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	if got, _ := composeProject("/usr/local/bin/docker", shim.Call{}, failing); got != "" {
+	if got := composeProject("/usr/local/bin/docker", shim.Call{}, failing); got != "" {
 		t.Fatalf("Compose could not say: %q, want no key", got)
 	}
 }
@@ -695,8 +699,8 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	write("compose.override.yaml", "name: ${STACK}-shop\n")
 	write(".env", "STACK=blue\n")
 	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
-	if got, services := composeProject(bin, shim.Call{Op: "up"}, ask); got != "blue-shop" || !slices.Equal(services, []string{"web"}) {
-		t.Fatalf("project = %q, services %q, want blue-shop, [web]", got, services)
+	if got := composeProject(bin, shim.Call{Op: "up"}, ask); got != "blue-shop" {
+		t.Fatalf("project = %q, want blue-shop", got)
 	}
 }
 
@@ -709,27 +713,25 @@ func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	}
 }
 
-// Compose is asked only when it must name the project or list an up's
-// services: not for -p otherwise, not for podman.
+// Compose's config is asked only when it must name the project: not for
+// -p, not for podman. Its dry run is asked for an up or restart.
 func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r := newShimRig(t)
 	r.ask = allow
-	asked := 0
-	r.composeAsk = func(string, []string) ([]byte, error) {
-		asked++
-		return []byte(`{"name":"x","services":{"web":{}}}`), nil
-	}
+	asked, dry := 0, 0
+	r.composeAsk = func(string, []string) ([]byte, error) { asked++; return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
 	r.run("docker", "compose", "-p", "shop", "run", "web")
-	if asked != 0 || r.asked[0].Target != "shop" {
-		t.Fatalf("asked %d, target %q", asked, r.asked[0].Target)
+	if asked != 0 || dry != 0 || r.asked[0].Target != "shop" {
+		t.Fatalf("asked %d, dry %d, target %q", asked, dry, r.asked[0].Target)
 	}
 	r.run("docker", "compose", "up", "-d")
-	if asked != 1 || r.asked[1].Target != "x" || !slices.Equal(r.asked[1].Services, []string{"web"}) {
-		t.Fatalf("asked %d, target %q, services %q", asked, r.asked[1].Target, r.asked[1].Services)
+	if asked != 1 || dry != 1 || r.asked[1].Target != "x" || !r.asked[1].Idle {
+		t.Fatalf("asked %d, dry %d, %+v", asked, dry, r.asked[1])
 	}
-	r.run("docker", "compose", "-p", "shop", "up", "-d")
-	if asked != 2 || r.asked[2].Target != "shop" {
-		t.Fatalf("asked %d, target %q", asked, r.asked[2].Target)
+	r.run("podman", "compose", "up", "-d")
+	if asked != 1 || dry != 1 {
+		t.Fatalf("podman: asked %d, dry %d", asked, dry)
 	}
 }
 
@@ -756,55 +758,32 @@ func TestComposeProjectOfStdin(t *testing.T) {
 	}
 }
 
-// An up's profiles reach Compose, which lists their services; replicas
-// count, each a service's share.
-func TestComposeProjectListsProfilesAndReplicas(t *testing.T) {
-	var asked []string
-	ask := func(_ string, args []string) ([]byte, error) {
-		asked = args
-		return []byte(`{"name":"x","services":{"web":{"deploy":{"replicas":3}},"db":{"scale":2},"ml":{}}}`), nil
-	}
-	_, services := composeProject("/d", shim.Call{Op: "up", ComposeProfiles: []string{"heavy"}}, ask)
-	if !slices.Equal(services, []string{"db", "db", "ml", "web", "web", "web"}) {
-		t.Fatalf("services = %q", services)
-	}
-	if i := slices.Index(asked, "--profile"); i < 0 || asked[i+1] != "heavy" || i > slices.Index(asked, "config") {
-		t.Fatalf("asked %q, want --profile heavy before config", asked)
-	}
-	// --scale, or named services (their profiles on), are not what
-	// Compose lists: the up reserves its estimate.
-	for _, c := range []shim.Call{{Op: "up", ComposeMayAdd: true}, {Op: "up", ComposeNamed: true}} {
-		if _, services := composeProject("/d", c, ask); services != nil {
-			t.Fatalf("%+v: services = %q, want none", c, services)
+// Compose's dry run decides: an up is idle only when every container it
+// names already runs.
+func TestComposeIdleIsComposesOwnPlan(t *testing.T) {
+	for out, want := range map[string]bool{
+		" Container app-db-1 Running \n Container app-web-1 Running \n":                          true,
+		" Container app-db-1 Running \n Container app-web-1 Recreate \n":                         false,
+		" Network app_default Created \n Container app-db-1 Creating \n":                         false,
+		" Container app-db-1 Restarting \n Container app-db-1 Started \n":                        false,
+		" Image busybox Pulling \n Container app-db-1 Running \n Container app-db-2 Starting \n": false,
+		"":                   false,
+		"no such service: x": false,
+	} {
+		dry := func(_ string, args []string) ([]byte, error) {
+			if !slices.Contains(args, "--dry-run") {
+				t.Fatalf("args %q", args)
+			}
+			return []byte(out), nil
+		}
+		if got := composeIdle("/d", []string{"compose", "up", "-d"}, dry); got != want {
+			t.Errorf("%q: idle = %v, want %v", out, got, want)
 		}
 	}
-	many := func(string, []string) ([]byte, error) {
-		return []byte(`{"name":"x","services":{"web":{"deploy":{"replicas":100}}}}`), nil
+	failing := func(string, []string) ([]byte, error) {
+		return []byte(" Container a Running \n"), errors.New("exit status 1")
 	}
-	if _, services := composeProject("/d", shim.Call{Op: "up"}, many); services != nil {
-		t.Fatalf("100 replicas: %d listed, want none", len(services))
-	}
-}
-
-// A service that pulls or builds on every up replaces its containers: the
-// up keeps its estimate.
-func TestComposeProjectListsNoServicesThatPullOrBuild(t *testing.T) {
-	for _, policy := range []string{"always", "build", "daily", "every_12h"} {
-		ask := func(string, []string) ([]byte, error) {
-			return []byte(`{"name":"x","services":{"web":{"pull_policy":"` + policy + `"},"db":{}}}`), nil
-		}
-		if _, services := composeProject("/d", shim.Call{Op: "up"}, ask); services != nil {
-			t.Errorf("pull_policy %s: services = %q, want none", policy, services)
-		}
-	}
-}
-
-// A service that pulls only when its image is missing starts nothing new.
-func TestComposeProjectListsServicesThatPullWhenMissing(t *testing.T) {
-	ask := func(string, []string) ([]byte, error) {
-		return []byte(`{"name":"x","services":{"web":{"pull_policy":"missing"}}}`), nil
-	}
-	if _, services := composeProject("/d", shim.Call{Op: "up"}, ask); len(services) != 1 {
-		t.Fatalf("services = %q", services)
+	if composeIdle("/d", []string{"compose", "up"}, failing) {
+		t.Fatal("a failed dry run says nothing")
 	}
 }

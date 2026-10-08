@@ -2,6 +2,7 @@ package shim
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -31,14 +32,6 @@ type Call struct {
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
-	// ComposeProfiles are a compose call's --profiles, which decide its
-	// services; ComposeMayAdd is set for an up or create that may start
-	// more than Compose's config lists (--scale), or replace running
-	// containers (--force-recreate, --build, -V).
-	ComposeProfiles []string
-	ComposeMayAdd   bool
-	// ComposeNamed is set for an up that names services.
-	ComposeNamed bool
 	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
 	// --project-directory, as given: the shim finds the project's name
 	// from them as Compose does (#33).
@@ -71,7 +64,8 @@ func Parse(name string, args []string) Call {
 
 // parseEngine parses a docker or podman call. at is where a run or create
 // takes one more option last: before its image (and a "--" ahead of it), or
-// right after the subcommand when the image is not known; -1 otherwise.
+// right after the subcommand when the image is not known; for compose,
+// right after "compose"; -1 otherwise.
 func parseEngine(name string, all []string) (c Call, at int) {
 	args := all
 	version := false
@@ -107,7 +101,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		if len(words) > 1 {
 			return Call{}, -1
 		}
-		return parseCompose(c.Endpoint, append(words, "compose"), args[1:]), -1
+		return parseCompose(c.Endpoint, append(words, "compose"), args[1:]), opAt + 1
 	default:
 		return Call{}, -1
 	}
@@ -170,10 +164,25 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 	return append(out, args[at:]...), true
 }
 
+// DryRun returns a docker compose call's args with --dry-run added as a
+// compose option, so Compose says what the call would do and does none of
+// it. ok is false for any other call, and for a compose run (its one-off
+// container is always new) or one whose file is on stdin (the call needs
+// it).
+func DryRun(args []string) (out []string, ok bool) {
+	c, at := parseEngine("docker", args)
+	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
+		return nil, false
+	}
+	out = append(out, args[:at]...)
+	out = append(out, "--dry-run")
+	return append(out, args[at:]...), true
+}
+
 func parseCompose(endpoint string, words, args []string) Call {
 	var project, projectDir string
-	var files, envFiles, profiles []string
-	dryRun, noUp, scaled, named := false, false, false, false
+	var files, envFiles []string
+	dryRun, noUp := false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
@@ -184,8 +193,6 @@ func parseCompose(endpoint string, words, args []string) Call {
 			envFiles = append(envFiles, v)
 		case "-f", "--file":
 			files = append(files, v)
-		case "--profile":
-			profiles = append(profiles, v)
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		}
@@ -209,14 +216,6 @@ func parseCompose(endpoint string, words, args []string) Call {
 			projectDir = v
 		case "--env-file":
 			envFiles = append(envFiles, v)
-		case "--profile":
-			profiles = append(profiles, v)
-		case "--scale":
-			scaled = true
-		case "--force-recreate", "--always-recreate-deps", "--build", "--renew-anon-volumes", "-V", "--watch", "-w":
-			scaled = scaled || IsTrue(v) // replaces running containers
-		case "--pull":
-			scaled = scaled || v == "always" // a newer image replaces them
 		case "--file":
 			files = append(files, v)
 		case "-f":
@@ -233,15 +232,13 @@ func parseCompose(endpoint string, words, args []string) Call {
 		// Flags after the service are its command's.
 		_, res, _ = scanPast(args[1:], flags, nil, seen)
 	} else {
-		var pos []string
-		pos, res, _ = scanAll(args[1:], flags, seen) // flags may follow services
-		named = op == "up" && len(pos) > 0
+		_, res, _ = scanAll(args[1:], flags, seen) // flags may follow services
 	}
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeMayAdd: scaled, ComposeNamed: named, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

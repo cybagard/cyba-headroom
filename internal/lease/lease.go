@@ -117,9 +117,10 @@ type entry struct {
 	// container Compose labels as such (hasOneoff once it has), and the
 	// services it starts first (depends_on) when no up lease takes them.
 	oneoff, hasOneoff bool
-	// idle is set for a compose up of a stack whose every service ran: it
-	// waits for nothing, nor for what an up it took over waited for, so
-	// binding nothing (other leases hold the stack) is no failure.
+	// idle is set for a compose call Compose's dry run said starts
+	// nothing: it waits for nothing, nor for what an up it took over
+	// waited for (Compose saw that running too), so binding nothing (other
+	// leases hold the stack) is no failure.
 	idle bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
@@ -187,18 +188,6 @@ func takesCreate(r policy.Request, o *entry) bool {
 	return o.labelled && len(o.bound) == 0 && (r.Worktree != "" || o.Worktree == "")
 }
 
-// freshDocker reports whether s's Docker reading is fresh and at most
-// idleFresh old: a snapshot is stamped each tick, whatever the age of the
-// reading it carries.
-func freshDocker(s *protocol.Snapshot, now time.Time) bool {
-	began, fresh := readingBegan(s)
-	return fresh && !began.IsZero() && now.Sub(began) <= idleFresh
-}
-
-// idleFresh is how old a reading may be for a compose up to count as
-// starting nothing because its stack runs.
-const idleFresh = 15 * time.Second
-
 // Check decides r, counting what open leases still reserve, and leases the
 // cost of a gated allow. It decides on the snapshot the leases were last
 // settled against; current is the daemon's latest, used before the first
@@ -244,7 +233,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// open lease holds (docker stop && docker start): that lease still
 	// covers them, and its worktree is charged for them.
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
-		return t.Running || b.boundAnywhere("container:"+t.ID)
+		return t.Running || b.boundAnywhere("container:"+t.ID) || b.awaited(t.ID)
 	})
 	if known && len(starts) == 0 {
 		// Allowed, and no new lease. Not when others went unresolved:
@@ -262,22 +251,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 		}
 	}
-	idle := false
-	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 && freshDocker(s, now) {
-		// compose up -d of a stack whose every service runs, each replica
-		// (listed once per replica): it starts nothing new. Anything less
-		// and it holds its whole estimate: which service it starts, and
-		// what that costs, is not known.
-		running := map[string]int{}
-		for _, x := range stack {
-			running[x.service]++
-		}
-		idle = true
-		for _, sv := range r.Services {
-			idle = idle && running[sv] > 0
-			running[sv]--
-		}
-	}
+	// Compose's own dry run said the call creates, recreates and starts
+	// nothing (compose up -d of a stack that runs as configured).
+	idle := r.Kind == "compose" && r.Op != "run" && r.Idle
 	// What this call's lease takes over is part of what it will hold (see
 	// the takeovers below): the check weighs that in its cost, not twice.
 	// An idle up adds nothing: what it takes over stays counted as it is.
@@ -342,7 +318,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		labelled: r.Labelled, name: r.Name, target: r.Target,
 	}
 	if idle {
-		e.cost, e.idle = 0, true // every service runs: it starts nothing new
+		e.cost, e.idle = 0, true // it starts nothing new
 	}
 	for _, t := range starts {
 		e.containerIDs = append(e.containerIDs, t.ID)
@@ -370,7 +346,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if len(e.took) > 0 && idle {
 			// It adds nothing: what it took over ends when that would
 			// have, however often the up repeats. And what that waited for
-			// came: every service of the stack runs.
+			// came: Compose saw it running.
 			for _, o := range e.took {
 				if o.Expires.Before(e.Expires) {
 					e.Expires = o.Expires
@@ -735,6 +711,9 @@ func (e *entry) boundIDs() int {
 type seen struct {
 	at   time.Time
 	gone bool
+	// stopped: by docker stop or compose stop (a stop event), not a
+	// restart policy's restart or a crash.
+	stopped bool
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
@@ -761,7 +740,10 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	r := containerResource(id, name, labels)
 	now := b.now()
 	switch action {
+	case "stop":
+		b.seen[r.key] = seen{at: now, gone: true, stopped: true}
 	case "start":
+		stopped := b.seen[r.key].stopped
 		b.seen[r.key] = seen{at: now}
 		if b.boundAnywhere(r.key) {
 			return
@@ -770,8 +752,11 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		switch {
 		case e == nil:
 			return
-		case b.prev[r.key] && !e.labelled && !slices.Contains(e.containerIDs, id):
-			return // a container already seen (a restart policy's restart) is no name's
+		case b.prev[r.key] && !stopped && !e.labelled && !slices.Contains(e.containerIDs, id):
+			// A container the last reading held, started again without
+			// a stop (a restart policy's restart): no name's or project's.
+			// After docker or compose stop it is a start like any.
+			return
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run
 		case tied(b.open, r, e):
@@ -782,7 +767,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		e.bind(r)
 		b.judge(r, gated, now)
 	case "die":
-		b.seen[r.key] = seen{at: now, gone: true}
+		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
 		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 			if !e.bound[r.key] || !e.over() {
 				return false
@@ -865,6 +850,12 @@ func kindOf(key string) string {
 		return "vm"
 	}
 	return "container"
+}
+
+// awaited reports whether an open lease waits for container id: two
+// docker start db at once, the first's lease covers it.
+func (b *Book) awaited(id string) bool {
+	return slices.ContainsFunc(b.open, func(e *entry) bool { return slices.Contains(e.containerIDs, id) })
 }
 
 func (b *Book) boundAnywhere(key string) bool {

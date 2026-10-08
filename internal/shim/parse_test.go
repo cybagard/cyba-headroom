@@ -75,12 +75,7 @@ func TestParse(t *testing.T) {
 		{"docker --unknown ps", Call{}},
 		// Compose.
 		{"docker compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
-		{"docker compose --profile heavy up --profile gpu -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProfiles: []string{"heavy", "gpu"}}},
-		{"docker compose up -d --scale web=10", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
-		{"docker compose up -d --pull always", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
-		{"docker compose up --watch", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeMayAdd: true}},
-		{"docker compose up -d debug", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeNamed: true}},
-		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}, ComposeMayAdd: true}},
+		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}}},
 		{"docker compose -f sub/c.yml -f other/d.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"sub/c.yml", "other/d.yml"}}},
 		{"docker compose --project-directory /srv/app -f c.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProjectDir: "/srv/app", ComposeFiles: []string{"c.yml"}}},
 		{"docker compose --file=deploy/c.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"deploy/c.yml"}}},
@@ -89,7 +84,7 @@ func TestParse(t *testing.T) {
 		{"docker --context x compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Endpoint: "x"}},
 		{"docker compose start", Call{Kind: "compose", Op: "start", Command: "docker compose start"}},
 		{"docker compose restart -t 5 web", Call{Kind: "compose", Op: "restart", Command: "docker compose restart"}},
-		{"docker compose create --scale web=3", Call{Kind: "compose", Op: "create", Command: "docker compose create", ComposeMayAdd: true}},
+		{"docker compose create --scale web=3", Call{Kind: "compose", Op: "create", Command: "docker compose create"}},
 		{"docker compose --dry-run up", Call{}},
 		{"docker compose --dry-run=0 up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
 		{"docker compose up --dry-run=FALSE", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
@@ -102,7 +97,7 @@ func TestParse(t *testing.T) {
 		{"docker compose watch", Call{Kind: "compose", Op: "watch", Command: "docker compose watch"}},
 		{"docker compose watch --no-up", Call{}},
 		{"docker compose up -p proj -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
-		{"docker compose up --project-name=proj -f a.yml web", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}, ComposeNamed: true}},
+		{"docker compose up --project-name=proj -f a.yml web", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}}},
 		{"docker compose up -f a.yml web --dry-run", Call{}},
 		{"docker compose --verbose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"a.yml"}}},
 		{"docker compose up web --dry-run", Call{}},
@@ -337,4 +332,24 @@ func helpCommands(t *testing.T, name string) []string {
 		t.Fatalf("%s: no commands found", name)
 	}
 	return out
+}
+
+func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"compose", "up", "-d"}, []string{"compose", "--dry-run", "up", "-d"}},
+		{[]string{"--context", "x", "compose", "-f", "a.yml", "up", "--scale", "web=3", "web"},
+			[]string{"--context", "x", "compose", "--dry-run", "-f", "a.yml", "up", "--scale", "web=3", "web"}},
+		{[]string{"compose", "restart"}, []string{"compose", "--dry-run", "restart"}},
+		{[]string{"compose", "run", "web"}, nil},
+		{[]string{"compose", "-f", "-", "up"}, nil},
+		{[]string{"run", "alpine"}, nil},
+	} {
+		got, ok := DryRun(tc.args)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("DryRun(%q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+	}
 }

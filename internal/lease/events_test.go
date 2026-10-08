@@ -159,3 +159,26 @@ func TestAStaleReadingDropsNoEvent(t *testing.T) {
 		t.Fatalf("leases = %+v, want none: both exited", l)
 	}
 }
+
+// docker compose stop && docker compose up -d before a reading: Docker's
+// stop and start events say the containers really started again, so they
+// bind the up's lease.
+func TestAStopThenUpWithinATickBinds(t *testing.T) {
+	b, c, log := book(t)
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, "w1")
+	b.Observe(s)
+	b.Observe(s)
+	b.ContainerEvent("stop", "db", "db", lbl)
+	b.ContainerEvent("die", "db", "db", lbl)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
+	b.ContainerEvent("start", "db", "db", lbl)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// A restart policy's restart (die, start, no stop) binds no named lease:
+// see TestAnEventOfAKnownContainerBindsNoNamedLease.

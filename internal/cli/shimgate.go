@@ -1,14 +1,12 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -80,6 +78,10 @@ func (e Env) withDefaults() Env {
 		env, _ := e.envOf()
 		e.composeAsk = func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, env, "") }
 	}
+	if e.composeDry == nil {
+		env, _ := e.envOf()
+		e.composeDry = func(bin string, args []string) ([]byte, error) { return askComposeDry(bin, args, env) }
+	}
 
 	if e.fallbacks == nil {
 		e.fallbacks = shim.Fallbacks
@@ -122,15 +124,18 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	if c.Kind == "compose" && name == "docker" {
-		// Compose names the project and lists an up's services (-p needs
-		// no asking but for an up; podman compose is not asked). Bounded
-		// by composeTimeout, also when the daemon turns out to be down
-		// (R7).
+		// Compose names the project (-p needs no asking; podman compose is
+		// not asked), and says whether an up or restart starts anything.
+		// Bounded by composeTimeout, also when the daemon turns out to be
+		// down (R7).
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
 		} else {
-			req.Target, req.Services = composeProject(bin, c, h.composeAsk)
+			req.Target = composeProject(bin, c, h.composeAsk)
+		}
+		if c.Op == "up" || c.Op == "restart" {
+			req.Idle = composeIdle(bin, e.Args[1:], h.composeDry)
 		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
@@ -234,16 +239,15 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 
 // composeProject is a compose call's project, as Compose itself names it
 // (#33): -p, else the name docker compose config gives, run with the call's
-// own -f, --project-directory, --env-file and --profile in its own
-// environment and working directory. Compose labels each container with
-// the project, so the name is the lease's key. Asking Compose, rather than
-// reading .env, override files and name: the way it does, keeps the two
-// from parting. "" when Compose cannot say (the call will fail too): no
-// key, failing closed. For an up, also its services, a name per replica
-// (none for --scale, or when Compose cannot say).
-func composeProject(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) (string, []string) {
-	if c.Target != "" && c.Op != "up" {
-		return c.Target, nil
+// own -f, --project-directory and --env-file in its own environment and
+// working directory. Compose labels each container with the project, so
+// the name is the lease's key. Asking Compose, rather than reading .env,
+// override files and name: the way it does, keeps the two from parting.
+// "" when Compose cannot say (the call will fail too): no key, failing
+// closed.
+func composeProject(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) string {
+	if c.Target != "" {
+		return c.Target
 	}
 	var args []string
 	if c.ConfigDir != "" {
@@ -259,56 +263,46 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	for _, f := range c.ComposeEnvFiles {
 		args = append(args, "--env-file", f)
 	}
-	for _, p := range c.ComposeProfiles {
-		args = append(args, "--profile", p) // its services
-	}
 	out, err := ask(bin, append(args, "config", "--format", "json"))
 	var cfg struct {
-		Name     string `json:"name"`
-		Services map[string]struct {
-			Scale      *int   `json:"scale"`
-			PullPolicy string `json:"pull_policy"`
-			Deploy     struct {
-				Replicas *int `json:"replicas"`
-			} `json:"deploy"`
-		} `json:"services"`
+		Name string `json:"name"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		return c.Target, nil
+		return ""
 	}
-	name := cmp.Or(c.Target, cfg.Name)
-	if c.ComposeMayAdd || c.ComposeNamed {
-		// --scale or a recreate, or services named (which turns their
-		// profiles on): not what Compose lists.
-		return name, nil
-	}
-	// An up's services, a name per replica: those already running start
-	// nothing new.
-	var services []string
-	for _, sv := range slices.Sorted(maps.Keys(cfg.Services)) {
-		replicas := 1
-		if n := cmp.Or(cfg.Services[sv].Deploy.Replicas, cfg.Services[sv].Scale); n != nil {
-			replicas = max(*n, 0)
-		}
-		if replicas > maxReplicas {
-			return name, nil // too many to list: the up keeps its estimate
-		}
-		switch cfg.Services[sv].PullPolicy {
-		case "", "missing", "if_not_present", "never":
-		default:
-			// always, build, daily, every_12h: a pull or build may replace
-			// its containers.
-			return name, nil
-		}
-		for range replicas {
-			services = append(services, sv)
-		}
-	}
-	return name, services
+	return cfg.Name
 }
 
-// maxReplicas bounds the replicas a service is listed with.
-const maxReplicas = 64
+// composeIdle reports whether Compose's own dry run of the call (args,
+// with --dry-run added) says it creates, recreates and starts nothing:
+// compose up -d of a stack that runs as configured. Asking Compose, rather
+// than reading its config against what runs, leaves what it does (profiles,
+// replicas, --scale, pull policies, a changed file or image) to Compose.
+// false when it cannot say: the call holds its estimate.
+func composeIdle(bin string, args []string, dry func(bin string, args []string) ([]byte, error)) bool {
+	dryArgs, ok := shim.DryRun(args)
+	if !ok {
+		return false
+	}
+	out, err := dry(bin, dryArgs)
+	if err != nil {
+		return false
+	}
+	running := false
+	for line := range strings.Lines(string(out)) {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != "Container" {
+			continue
+		}
+		switch f[len(f)-1] {
+		case "Running":
+			running = true
+		default:
+			return false // Creating, Recreate, Starting, Restarting, ...
+		}
+	}
+	return running
+}
 
 // composeStdinProject names the project of compose -f - as Compose does
 // when its file is on stdin: -p, else COMPOSE_PROJECT_NAME, else the
@@ -361,6 +355,16 @@ func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
 	return cmd.Output()
+}
+
+// askComposeDry runs a compose call's dry run (args) at bin in env: its
+// plan is on stderr, with stdout.
+func askComposeDry(bin string, args, env []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env, cmd.WaitDelay = env, 500*time.Millisecond
+	return cmd.CombinedOutput()
 }
 
 // dockerEndpointIn is the endpoint the docker CLI talks to: DOCKER_HOST,

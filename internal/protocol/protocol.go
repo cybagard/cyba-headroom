@@ -76,8 +76,9 @@ type CheckRequest struct {
 	MultiTarget bool `json:"multi_target,omitempty"`
 	// Targets are all the containers a start or restart names, as given.
 	Targets []string `json:"targets,omitempty"`
-	// Services are a compose up's project's services, as Compose lists them.
-	Services []string `json:"services,omitempty"`
+	// Idle is set for a compose call Compose's own dry run (--dry-run)
+	// said creates, recreates and starts nothing.
+	Idle bool `json:"idle,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

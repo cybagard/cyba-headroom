@@ -1171,21 +1171,58 @@ func TestAGrowingStackDoesNotEndTheUpsLease(t *testing.T) {
 	}
 }
 
-// compose up again while the first up's lease holds a running container:
-// that container is held, not charged, so a down leaves only the stack's
-// estimate.
-func TestATakeOverDoesNotChargeTheRunningContainers(t *testing.T) {
+// compose up again while the first up's lease holds a container it
+// started: the takeover keeps covering it, with its memory, so a stop and
+// start of it within the lease is not checked again, and takes no lease
+// that could never bind.
+func TestATakeOverKeepsCoveringTheContainersItTook(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(snap())
 	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
 	b.Check(up, snap(), cfg)
 	s := withComposeContainer(snap(), "db", "w1", gib)
-	b.Observe(s) // db binds: 1 GiB of 2 still reserved
+	b.Observe(s)
 	c.t = c.t.Add(time.Second)
-	b.Check(up, s, cfg)
-	b.Observe(snap()) // compose down
+	idle := up
+	idle.Idle = true
+	b.Check(idle, s, cfg)
+	b.Observe(snap()) // docker stop db
 	if r := reserved(b); r != 2*gib {
-		t.Fatalf("reserved %d MiB after the down, want 2048", r>>20)
+		t.Fatalf("reserved %d MiB with db stopped, want 2048", r>>20)
+	}
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, snap(), cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("start: %+v", d)
+	}
+}
+
+// compose stop, then up again within the lease of an up that found the
+// stack running: Compose starts the same containers, and their memory
+// counts towards this up's estimate.
+func TestAHeldContainerStoppedSinceCountsWhenItIsBack(t *testing.T) {
+	b, c, _ := book(t)
+	s := withComposeContainer(snap(), "db", "w1", gib)
+	b.Observe(s)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
+	b.Check(up, s, cfg) // db held
+	b.Observe(snap())   // compose stop
+	c.t = c.t.Add(time.Second)
+	b.Check(up, snap(), cfg)
+	b.Observe(s) // the same db again
+	if r := reserved(b); r != 0 {
+		t.Fatalf("reserved %d MiB once db is back, want 0", r>>20)
+	}
+}
+
+// A service whose image was committed from a gated container inherits a
+// lease label from another run of the daemon: it is still its project's.
+func TestAnInheritedLeaseLabelDoesNotKeepAServiceFromItsLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib, Labels: map[string]string{
+		protocol.ComposeProjectLabel: "app", protocol.ComposeConfigHashLabel: "1", protocol.LeaseLabel: "lease-0ld000-3"}}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
 	}
 }
 

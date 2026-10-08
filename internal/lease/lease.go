@@ -97,14 +97,13 @@ type entry struct {
 	protocol.Lease
 	cost uint64
 	// bound are this lease's own resources, and used what they use now.
-	bound map[string]bool
-	used  uint64
-	// base is what of a bound resource's memory counts already: used
-	// counts only its use above that. A stack a compose up found running
-	// (math.MaxUint64: never counted, so a down does not add it back and
-	// its growth is not what the lease waits for), or a container a
-	// takeover found running (its use then: its growth still counts).
-	base map[string]uint64
+	// held are those of a stack a compose up found running, held by no
+	// lease: bound, so they are gated, but neither the cost nor used counts
+	// them, nor does the lease cover a start of them (covered). Their
+	// memory counts already: a down does not add it back, and their growth
+	// is not what the lease waits for.
+	bound, held map[string]bool
+	used        uint64
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
@@ -324,7 +323,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{}, base: map[string]uint64{}, macOS: r.MacOS, pid: r.PID,
+		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
 		labelled: r.Labelled, name: r.Name, target: r.Target,
 	}
 	if idle {
@@ -339,30 +338,23 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		e.target, e.project, e.oneoff = "", r.Target, r.Op == "run"
 		// compose up again for the project an open lease of this worktree
 		// already waits for or holds (compose stop, then up): this call's
-		// lease takes that one over, with its containers and its cost.
-		// What they use now counts already (entry.base).
-		running := map[string]uint64{}
-		if s != nil {
-			for _, x := range resources(s) {
-				if !b.seen[x.key].gone {
-					running[x.key] = x.bytes
-				}
-			}
+		// lease takes that one over, with its containers and its cost:
+		// what they use stays counted, so a start of one stopped is
+		// covered. Those it held stay held while they run; one stopped
+		// since is started by this call, which its estimate is for.
+		running := map[string]bool{}
+		for _, x := range stack {
+			running[x.key] = true
 		}
-		var reserved uint64
+		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
 			if !composeTakes(r, o) {
 				return false
 			}
 			e.took = append(e.took, o)
-			reserved += o.reserved()
+			reserved, used = reserved+o.reserved(), used+o.used
 			for k := range o.bound {
-				e.bound[k] = true
-				if v, ok := o.base[k]; ok && v == math.MaxUint64 {
-					e.base[k] = v
-				} else if v, ok := running[k]; ok {
-					e.base[k] = v
-				}
+				e.bound[k], e.held[k] = true, o.held[k] && running[k]
 			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
@@ -372,8 +364,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// estimate and what the old leases still reserved (as
 			// decided), bounded however often it repeats, with a fresh
 			// timeout: this call was admitted, and its containers may be
-			// a pull away.
-			e.cost = max(e.cost, reserved)
+			// a pull away; on top of what their containers use.
+			e.cost, e.used = max(e.cost, reserved)+used, used
 			if idle {
 				// It adds nothing: what it took over ends when that would
 				// have, however often the up repeats. And what that waited
@@ -387,13 +379,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 		// compose up -d of a stack that already runs, once its lease
 		// ended: its running containers are this lease's, so it never logs
-		// "never appeared" when the up starts nothing new. Their memory
-		// counts already: never in used (entry.base), so what the check
-		// reserved stays reserved. Only those held by no lease.
+		// "never appeared" when the up starts nothing new. They are held
+		// (entry.held). Only those held by no lease.
 		for _, x := range stack {
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
-				e.base[x.key] = math.MaxUint64
+				e.held[x.key] = true
 			}
 		}
 	}
@@ -440,9 +431,11 @@ type resource struct {
 	name  string
 	id    string // a container's ID
 	lease string // the lease ID its LeaseLabel carries
-	// marked: it carries a LeaseLabel, counted or not (protocol.LeaseOf).
-	// The shim made it, or it is forged: no compose lease's service.
-	marked   bool
+	// mark is the LeaseLabel it carries, counted or not (protocol.LeaseOf).
+	// One of this daemon's leases: the shim made it, or it is forged, and
+	// it is no compose lease's service. Another run's is inherited from an
+	// image committed from a gated container.
+	mark     string
 	dir      string // a compose container's project directory
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
@@ -488,7 +481,7 @@ func resources(s *protocol.Snapshot) []resource {
 // containerResource is the container id: its labels say which keys apply.
 func containerResource(id, name string, labels map[string]string) resource {
 	r := resource{key: "container:" + id, name: name, id: id, kind: "container", lease: protocol.LeaseOf(labels),
-		marked: labels[protocol.LeaseLabel] != ""}
+		mark: labels[protocol.LeaseLabel]}
 	if p := labels[protocol.ComposeProjectLabel]; p != "" {
 		r.kind, r.project, r.dir = "compose", p, labels[protocol.ComposeWorkingDirLabel]
 		r.oneoff, r.service = labels[protocol.ComposeOneoffLabel] == "True", labels[protocol.ComposeServiceLabel]
@@ -679,8 +672,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		var used uint64
 		unsure := false
 		for k := range e.bound {
+			if e.held[k] {
+				continue // it ran before the check: not what the lease waits for
+			}
 			if bytes, ok := present[k]; ok {
-				used += bytes - min(bytes, e.base[k]) // above what counted already
+				used += bytes
 			} else if !readable(s, e.waitsFor()) {
 				unsure = true
 			}
@@ -888,17 +884,23 @@ func kindOf(key string) string {
 
 // covered reports whether a worktree's open lease holds container id, or
 // waits for it: two docker start db at once, the first's lease covers it.
-// Not one it found running (entry.base): it reserves nothing for that one.
+// Not one it holds (entry.held): it reserves nothing for that one.
 func (b *Book) covered(id string) bool {
 	k := "container:" + id
 	return slices.ContainsFunc(b.open, func(e *entry) bool {
-		_, based := e.base[k]
-		return e.Worktree != "" && (e.bound[k] && !based || slices.Contains(e.containerIDs, id))
+		return e.Worktree != "" && (e.bound[k] && !e.held[k] || slices.Contains(e.containerIDs, id))
 	})
 }
 
 func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
+}
+
+// sameRun reports whether lease IDs a and b are of one run of the daemon:
+// lease-<run>-<n>.
+func sameRun(a, b string) bool {
+	i, j := strings.LastIndexByte(a, '-'), strings.LastIndexByte(b, '-')
+	return i > 0 && j > 0 && a[:i] == b[:j]
 }
 
 // rank is how sure e's key for r is: a label, then a start's container ID
@@ -968,8 +970,8 @@ func (e *entry) key(r resource, based bool) bool {
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
 		switch {
-		case !based || e.project == "" || e.project != r.project || r.marked:
-			// marked: a shim run dressed as Compose's (its config hash and
+		case !based || e.project == "" || e.project != r.project || sameRun(r.mark, e.ID):
+			// mark: a shim run dressed as Compose's (its config hash and
 			// project) must not take a project's lease by its name.
 			return false
 		case r.oneoff:

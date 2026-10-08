@@ -592,25 +592,36 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := dockerEndpointIn(get, ""); got != "unix:///var/run/docker.sock" {
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///var/run/docker.sock" {
 		t.Fatalf("no config: %q, want Docker's default socket", got)
 	}
 	context("desktop-linux", "unix:///Users/dev/.docker/run/docker.sock")
 	use("desktop-linux")
-	if got := dockerEndpointIn(get, ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("desktop-linux: %q", got)
 	}
 	use("missing")
-	if got := dockerEndpointIn(get, ""); got != "" {
+	if got := dockerEndpointIn(get, "", ""); got != "" {
 		t.Fatalf("a context with no metadata: %q, want unknown", got)
 	}
 	env["DOCKER_CONTEXT"] = "desktop-linux"
-	if got := dockerEndpointIn(get, ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("DOCKER_CONTEXT: %q", got)
 	}
 	env["DOCKER_HOST"] = "unix:///x.sock"
-	if got := dockerEndpointIn(get, ""); got != "unix:///x.sock" {
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///x.sock" {
 		t.Fatalf("DOCKER_HOST: %q", got)
+	}
+	// --context or -H on the call: before DOCKER_HOST, as the CLI takes it.
+	for endpoint, want := range map[string]string{
+		"desktop-linux":   "unix:///Users/dev/.docker/run/docker.sock",
+		"default":         "unix:///var/run/docker.sock",
+		"unix:///y.sock":  "unix:///y.sock",
+		"tcp://host:2375": "tcp://host:2375",
+	} {
+		if got := dockerEndpointIn(get, "", endpoint); got != want {
+			t.Errorf("%s: %q, want %q", endpoint, got, want)
+		}
 	}
 }
 
@@ -634,7 +645,7 @@ func TestDockerEndpointHonoursConfigDir(t *testing.T) {
 		}
 		return ""
 	}
-	if got := dockerEndpointIn(get, dir); got != "unix:///c.sock" {
+	if got := dockerEndpointIn(get, dir, ""); got != "unix:///c.sock" {
 		t.Fatalf("endpoint = %q", got)
 	}
 	c := shim.Parse("docker", []string{"--config", dir, "start", "x"})
@@ -650,7 +661,7 @@ func TestAnUnreadableDockerConfigIsTheDefaultContext(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil { // a directory: unreadable as a file
 		t.Fatal(err)
 	}
-	if got := dockerEndpointIn(func(string) string { return "" }, dir); got != "unix:///var/run/docker.sock" {
+	if got := dockerEndpointIn(func(string) string { return "" }, dir, ""); got != "unix:///var/run/docker.sock" {
 		t.Fatalf("endpoint = %q, want the default socket", got)
 	}
 }
@@ -937,6 +948,9 @@ func TestARunThatSetsTheLeaseLabelIsRefused(t *testing.T) {
 		{"run", "--label=dev.headroom.lease=lease-abc-7", "alpine"},
 		{"run", "-dl", "dev.headroom.lease=lease-abc-7", "alpine"},
 		{"run", "-ldev.headroom.lease=lease-abc-7", "alpine"},
+		{"create", "-ql", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-tqdl", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-Zl", "dev.headroom.lease=lease-abc-7", "alpine"}, // a shorthand the table lacks
 	} {
 		r := newShimRig(t)
 		r.ask = allow
@@ -952,6 +966,7 @@ func TestTheLeaseLabelNameElsewhereIsAllowed(t *testing.T) {
 	for _, args := range [][]string{
 		{"run", "--rm", "alpine", "grep", "dev.headroom.lease", "/x"},
 		{"run", "-e", "NOTE=dev.headroom.lease", "alpine"},
+		{"run", "-el", "dev.headroom.lease", "alpine"}, // -e's value is "l"
 		{"run", "--label", "note=x", "alpine", "echo", "dev.headroom.lease"},
 	} {
 		r := newShimRig(t)

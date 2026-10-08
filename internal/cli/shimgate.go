@@ -128,8 +128,8 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	if name == "docker" && c.Endpoint == "" {
-		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
+	if name == "docker" {
+		req.Engine = dockerEndpointIn(getenv, c.ConfigDir, c.Endpoint)
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool
@@ -439,13 +439,17 @@ func askComposeDry(bin string, args, env []string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// dockerEndpointIn is the endpoint the docker CLI talks to: DOCKER_HOST,
-// else the context's (DOCKER_CONTEXT, else currentContext in the config at
-// configDir, from --config, else DOCKER_CONFIG, else ~/.docker), else
-// Docker's default socket. "" when the context cannot be read, or the
-// config directory is relative.
-func dockerEndpointIn(getenv func(string) string, configDir string) string {
-	if h := getenv("DOCKER_HOST"); h != "" {
+// dockerEndpointIn is the endpoint the docker CLI talks to: the call's
+// own -H, or its --context's; else DOCKER_HOST, else the context's
+// (DOCKER_CONTEXT, else currentContext in the config at configDir, from
+// --config, else DOCKER_CONFIG, else ~/.docker), else Docker's default
+// socket. "" when the context cannot be read, or the config directory is
+// relative.
+func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) string {
+	if strings.Contains(endpoint, "://") {
+		return endpoint // -H
+	}
+	if h := getenv("DOCKER_HOST"); h != "" && endpoint == "" {
 		return h
 	}
 	dir := configDir
@@ -458,7 +462,10 @@ func dockerEndpointIn(getenv func(string) string, configDir string) string {
 	if !filepath.IsAbs(dir) {
 		return ""
 	}
-	name := getenv("DOCKER_CONTEXT")
+	name := endpoint // --context
+	if name == "" {
+		name = getenv("DOCKER_CONTEXT")
+	}
 	if name == "" {
 		var cfg struct {
 			CurrentContext string `json:"currentContext"`

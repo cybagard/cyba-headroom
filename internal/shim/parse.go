@@ -168,8 +168,9 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 }
 
 // SetsLabel reports whether args set the label key: --label key=v,
-// --label=key=v, -l key=v, -lkey=v, or -l after run's boolean shorthands
-// (-dl key=v). The command after the image is scanned too: Labelled cannot
+// --label=key=v, -l key=v, -lkey=v, or -l in a cluster after run's
+// boolean shorthands (-qdl key=v), as the run and create table knows them;
+// an unknown one counts as boolean, so a newer one cannot hide it. The command after the image is scanned too: Labelled cannot
 // always tell where it starts, and a false match only refuses a call that
 // spells out headroom's own label.
 func SetsLabel(args []string, key string) bool {
@@ -186,14 +187,20 @@ func SetsLabel(args []string, key string) bool {
 		case strings.HasPrefix(a, "--label="):
 			v = strings.TrimPrefix(a, "--label=")
 		case len(a) > 1 && a[0] == '-' && a[1] != '-':
-			// -l, -dl, -ldev.…: booleans, then l and its value.
-			flags := strings.TrimLeft(a[1:], "ditP")
-			if !strings.HasPrefix(flags, "l") {
-				continue
-			}
-			v = strings.TrimPrefix(flags[1:], "=")
-			if flags == "l" && i+1 < len(args) {
-				v = args[i+1]
+			// -l, -dl, -ldev.…: booleans, then l and its value. Any other
+			// flag that takes a value takes the rest of the cluster.
+			for j := 1; j < len(a); j++ {
+				f := "-" + a[j:j+1]
+				if f == "-l" {
+					v = strings.TrimPrefix(a[j+1:], "=")
+					if v == "" && j+1 == len(a) && i+1 < len(args) {
+						v = args[i+1]
+					}
+					break
+				}
+				if containerRun[f] {
+					break
+				}
 			}
 		}
 		if names(v) {

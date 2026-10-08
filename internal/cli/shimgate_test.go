@@ -925,3 +925,21 @@ func TestTheNameDoesNotNeedEveryProfile(t *testing.T) {
 		t.Fatalf("%+v", r.asked[0])
 	}
 }
+
+// The lease label is headroom's: a call that sets it could pass another
+// worktree's lease off as its own (past an unknown flag, the shim's label
+// goes first, and a later one wins).
+func TestARunThatSetsTheLeaseLabelIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--new-flag", "x", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"create", "-l=dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		code, stderr := r.run(append([]string{"docker"}, args...)...)
+		if code != exitDenied || r.execed != "" || len(r.asked) != 0 || !strings.Contains(stderr, "dev.headroom.lease") {
+			t.Errorf("%q: code %d, execed %q, asked %d, stderr %q", args, code, r.execed, len(r.asked), stderr)
+		}
+	}
+}

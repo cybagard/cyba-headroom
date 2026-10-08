@@ -85,6 +85,16 @@ type CheckRequest struct {
 // daemon tells it from one started past the shim (#33).
 const LeaseLabel = "dev.headroom.lease"
 
+// LeaseOf is the lease a container's labels name: none for a container
+// Compose made (its config hash), as the shim labels only a run or create,
+// so a service's labels cannot name another worktree's lease.
+func LeaseOf(labels map[string]string) string {
+	if labels["com.docker.compose.config-hash"] != "" {
+		return ""
+	}
+	return labels[LeaseLabel]
+}
+
 // How a check's worktree was found (Decision.IdentifiedBy).
 const (
 	IdentifiedByCaller  = "caller"  // named by the caller: HEADROOM_WORKTREE, ORCA_WORKTREE_ID or --worktree

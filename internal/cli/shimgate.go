@@ -112,6 +112,14 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
 		return gated{proceed: true}
 	}
+	if c.Kind == "container" && (c.Op == "run" || c.Op == "create") &&
+		slices.ContainsFunc(e.Args[1:], func(a string) bool { return strings.Contains(a, protocol.LeaseLabel) }) {
+		// The shim's label must be the one Docker keeps: past an option it
+		// does not know, it goes first, and a later one would win and name
+		// another worktree's lease.
+		fmt.Fprintf(e.Stderr, "headroom: refused `%s`: the label %s is headroom's own\n", c.Command, protocol.LeaseLabel)
+		return gated{code: exitDenied}
+	}
 	cfg, err := config.Load(getenv)
 	if err != nil {
 		notGated(e, "config: "+oneLine(err), c.Command)

@@ -484,7 +484,7 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			cid, labels, running, err := inspector.Inspect(ctx, t)
-			got[i] = found{err == nil, errors.Is(err, docker.ErrNoSuchContainer), policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running}}
+			got[i] = found{err == nil, errors.Is(err, docker.ErrNoSuchContainer), policy.Start{ID: cid, TakesOver: protocol.LeaseOf(labels), Running: running}}
 		})
 	}
 	wg.Wait()

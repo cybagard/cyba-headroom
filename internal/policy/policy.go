@@ -24,6 +24,9 @@ const (
 	WorktreeCap = "worktree_cap"
 	Headroom    = "headroom"
 	VMSlots     = "vm_slots"
+	// StaleSnapshot: the collector has not refreshed the snapshot in
+	// MaxSnapshotAge, so nothing current is known (R7, #30).
+	StaleSnapshot = "stale_snapshot"
 )
 
 // Config is the policy's settings, in bytes.
@@ -48,6 +51,9 @@ type Config struct {
 	// MaxMacOSVMs is how many macOS VMs may run at once (R6); Apple's
 	// licence allows two.
 	MaxMacOSVMs int
+	// MaxSnapshotAge is how old the snapshot may be before decisions treat
+	// it as unknown: the collector has stalled. 0 means no limit.
+	MaxSnapshotAge time.Duration
 }
 
 // Request describes one resource-creating call.
@@ -106,6 +112,13 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 			d.CostBytes = c.DefaultTartBytes
 		}
 	}
+	// A snapshot the collector stopped refreshing says nothing current:
+	// decide by the same rules on an empty one, so only what does not come
+	// from readings (the config, the leases) can deny (R7, #30).
+	age, stale := snapshotAge(s, c)
+	if stale {
+		s = &protocol.Snapshot{}
+	}
 	if s.Budget != nil {
 		d.HeadroomBytes = s.Budget.HeadroomBytes
 	}
@@ -129,14 +142,16 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Reasons = append(d.Reasons, Reason{Code: IdleHolder,
 			Text: "this worktree holds containers or VMs while none of its agents is working; reuse or stop them first"})
 	}
-	if d.HeadroomBytes != nil {
-		if would := use + r.WorktreeLeasedBytes + d.CostBytes; c.PerWorktreeCapBytes > 0 && would > c.PerWorktreeCapBytes {
-			text := fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(would), units.GB(c.PerWorktreeCapBytes))
-			if r.WorktreeLeasedBytes > 0 {
-				text += fmt.Sprintf(" (%s GB of it for its calls still starting)", units.GB(r.WorktreeLeasedBytes))
-			}
-			d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap, Text: text})
+	// The cap counts what is known to be the worktree's: its attributed
+	// use (0 if unknown) and its leases.
+	if would := use + r.WorktreeLeasedBytes + d.CostBytes; c.PerWorktreeCapBytes > 0 && would > c.PerWorktreeCapBytes {
+		text := fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(would), units.GB(c.PerWorktreeCapBytes))
+		if r.WorktreeLeasedBytes > 0 {
+			text += fmt.Sprintf(" (%s GB of it for its calls still starting)", units.GB(r.WorktreeLeasedBytes))
 		}
+		d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap, Text: text})
+	}
+	if d.HeadroomBytes != nil {
 		left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(d.CostBytes)
 		if left < int64(c.MinHeadroomBytes) {
 			text := fmt.Sprintf("only %s GB headroom", units.SignedGB(*d.HeadroomBytes))
@@ -150,7 +165,10 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		}
 	}
 	d.Allow = len(d.Reasons) == 0
-	if d.Allow && d.HeadroomBytes == nil {
+	switch {
+	case d.Allow && stale:
+		d.Reasons = []Reason{{Code: StaleSnapshot, Text: staleText(age) + ", so headroom cannot gate this call"}}
+	case d.Allow && d.HeadroomBytes == nil:
 		// Fail open (R7): with no budget, headroom cannot gate the call.
 		d.Reasons = []Reason{{Code: Unknown, Text: "the budget is unknown (no host reading yet), so headroom cannot gate this call"}}
 	}
@@ -159,22 +177,53 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Retry = d.Retry && reason.Retry
 	}
 	d.Message = message(r, s, d)
+	if !d.Allow && stale {
+		d.Message += "; " + staleText(age)
+	}
 	return d
+}
+
+// snapshotAge is how old s's readings are, and whether that is too old to
+// decide on: the snapshot's own age, or its host reading's when the host
+// source keeps failing (each tick reapplies its last reading).
+func snapshotAge(s *protocol.Snapshot, c Config) (time.Duration, bool) {
+	if c.MaxSnapshotAge <= 0 || c.Now == nil || s.CollectedAt.IsZero() {
+		return 0, false
+	}
+	// Wall clocks: a monotonic reading stops while the Mac sleeps, and a
+	// snapshot from before a sleep is old.
+	now := c.Now().Round(0)
+	age := now.Sub(s.CollectedAt.Round(0))
+	if h := s.Sources["host"]; h.Stale && !h.At.IsZero() {
+		age = max(age, now.Sub(h.At.Round(0)))
+	}
+	return age, age > c.MaxSnapshotAge
+}
+
+// staleText says how old the readings are.
+func staleText(age time.Duration) string {
+	return fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
 }
 
 // slots is the macOS VM slot rule: running plus starting macOS VMs must
 // stay below the slot count for one more to start. Without a fresh Tart reading the count is unknown, and
 // the call is decided on memory alone (R7).
 func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
-	if !r.MacOS || s.Tart == nil || s.Sources["tart"].Stale {
-		return Reason{}, false
-	}
-	inUse := s.Tart.MacOSRunning + r.PendingMacOS
-	if inUse < c.MaxMacOSVMs {
+	if !r.MacOS {
 		return Reason{}, false
 	}
 	if c.MaxMacOSVMs <= 0 {
 		return Reason{Code: VMSlots, Text: "this Mac allows no macOS VMs (budget.max_macos_vms = 0)"}, true
+	}
+	// Running VMs are unknown without a fresh Tart reading: count only the
+	// ones still starting, which the leases know.
+	running := 0
+	if s.Tart != nil && !s.Sources["tart"].Stale {
+		running = s.Tart.MacOSRunning
+	}
+	inUse := running + r.PendingMacOS
+	if inUse < c.MaxMacOSVMs {
+		return Reason{}, false
 	}
 	text := fmt.Sprintf("the macOS VM slots are full (%d of %d in use", inUse, c.MaxMacOSVMs)
 	if r.PendingMacOS > 0 {
@@ -184,7 +233,11 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 	if r.VMUnknown {
 		text = "its VM's config was not found, so it counts as macOS, and " + text
 	}
-	holders, idle := slotHolders(s, c)
+	var holders []string
+	var idle string
+	if s.Tart != nil && !s.Sources["tart"].Stale { // a stale reading's VMs may be gone
+		holders, idle = slotHolders(s, c)
+	}
 	if len(holders) > 0 {
 		text += ": " + strings.Join(holders, ", ")
 	}

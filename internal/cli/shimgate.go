@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,9 +29,18 @@ const (
 	waitPoll = 2 * time.Second
 )
 
-// errCannotCheck means the daemon answered but cannot check calls: most
-// likely an older build still running after an upgrade.
+// errCannotCheck means the daemon answered but gave no decision; a
+// daemonError carries what it said.
 var errCannotCheck = errors.New("the daemon cannot check calls")
+
+// daemonError is a daemon's answer without a decision.
+type daemonError struct{ said string }
+
+func (e daemonError) Error() string { return errCannotCheck.Error() + " (" + e.said + ")" }
+func (e daemonError) Unwrap() error { return errCannotCheck }
+
+// olderDaemon is the answer of a daemon built before the check (#24).
+const olderDaemon = `unknown op "check"`
 
 // gated is how gate decided.
 type gated struct {
@@ -75,7 +86,7 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	}
 	cfg, err := config.Load(getenv)
 	if err != nil {
-		fmt.Fprintf(e.Stderr, "headroom: %v; `%s` not gated\n", err, c.Command)
+		notGated(e, "config: "+oneLine(err), c.Command)
 		return gated{proceed: true}
 	}
 	h := e.withDefaults()
@@ -110,13 +121,10 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 			}
 		}
 		switch {
-		case errors.Is(err, errCannotCheck):
-			fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install. `%s` not gated\n", err, c.Command)
-			return gated{proceed: true}
 		case err != nil:
 			// Also while waiting: a daemon that went away must not hold
 			// the call (R7).
-			fmt.Fprintf(e.Stderr, "headroom: daemon not reachable (%v); `%s` not gated\n", err, c.Command)
+			notGated(e, "daemon "+daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket), c.Command)
 			return gated{proceed: true}
 		case d.Allow:
 			if getenv("HEADROOM_SHIM_DEBUG") != "" {
@@ -180,6 +188,43 @@ func callerRequest(getenv func(string) string, ancestors func() []int) protocol.
 	return r
 }
 
+// notGated warns, in one line, that a call runs without a check (R7).
+func notGated(e Env, cause, command string) {
+	fmt.Fprintf(e.Stderr, "headroom: not gated (%s); running `%s` anyway. See: headroom status\n", cause, command)
+}
+
+// daemonCause says briefly why the daemon at socket gave no decision.
+func daemonCause(err error, timeout time.Duration, socket string) string {
+	var ne net.Error
+	var de daemonError
+	switch {
+	case errors.Is(err, client.ErrVersion), errors.As(err, &de) && de.said == olderDaemon:
+		return "is another version: restart it with this build: headroom install"
+	case errors.As(err, &de) && de.said == "":
+		return "gave no decision; restart it with this build: headroom install"
+	case errors.As(err, &de):
+		return "gave no decision (" + strings.Join(strings.Fields(de.said), " ") + "); restart it with this build: headroom install"
+	case errors.Is(err, client.ErrBadReply):
+		return "gave a bad reply"
+	case errors.As(err, &ne) && ne.Timeout(): // deadlines of conn and context alike
+		return fmt.Sprintf("gave no answer in %s", timeout)
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "socket not accessible"
+	}
+	if fi, statErr := os.Lstat(socket); statErr == nil && fi.Mode()&os.ModeSocket == 0 {
+		return "socket path " + socket + " is not a socket"
+	}
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOTSOCK) {
+		return "not running"
+	}
+	return "unreachable: " + oneLine(err)
+}
+
+// oneLine is err's text on one line.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
+}
+
 // askDaemon sends one check to the daemon. errCannotCheck means it
 // answered without a decision.
 func askDaemon(cfg config.Config, req protocol.CheckRequest) (*protocol.Decision, error) {
@@ -187,11 +232,11 @@ func askDaemon(cfg config.Config, req protocol.CheckRequest) (*protocol.Decision
 		protocol.Request{Op: protocol.OpCheck, Check: &req})
 	switch {
 	case err != nil && rep.Error != "":
-		return nil, fmt.Errorf("%w (%s)", errCannotCheck, rep.Error)
+		return nil, daemonError{said: rep.Error}
 	case err != nil:
 		return nil, err
 	case rep.Decision == nil:
-		return nil, fmt.Errorf("%w (no decision in its reply)", errCannotCheck)
+		return nil, daemonError{}
 	}
 	return rep.Decision, nil
 }

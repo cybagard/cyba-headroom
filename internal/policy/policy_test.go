@@ -269,3 +269,106 @@ func TestAbsurdCostsCannotWrapTheArithmetic(t *testing.T) {
 		t.Fatalf("allowed with absurd leases: %+v", d)
 	}
 }
+
+// A snapshot the collector stopped refreshing says nothing current: the
+// call is allowed as unknown rather than decided on old readings (R7, #30).
+func TestAnOldSnapshotIsUnknown(t *testing.T) {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(0) // would deny
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	s.CollectedAt = now.Add(-30 * time.Second)
+	if d := policy.Decide(req("busy", gib), s, c); d.Allow {
+		t.Fatalf("a fresh snapshot must decide: %+v", d)
+	}
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	d := policy.Decide(req("busy", gib), s, c)
+	if !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot || !strings.Contains(d.Message, "2m") {
+		t.Fatalf("an old snapshot: %+v", d)
+	}
+}
+
+// With an old snapshot, what is still known decides: the slot count from
+// the config and from leases starting, and the worktree's own leases
+// against its cap. And the message gives one explanation, not two.
+func TestAnOldSnapshotKeepsWhatIsKnown(t *testing.T) {
+	s := snap()
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	s.Sources = map[string]protocol.SourceStatus{"docker": {Stale: true}}
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	c.MaxMacOSVMs = 2
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || strings.Contains(d.Message, "decided on stale readings") {
+		t.Fatalf("old snapshot: %+v", d)
+	}
+	mac := policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, PendingMacOS: 2}
+	if d := policy.Decide(mac, s, c); d.Allow || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("both slots promised: %+v", d)
+	}
+	c.MaxMacOSVMs = 0
+	mac.PendingMacOS = 0
+	if d := policy.Decide(mac, s, c); d.Allow || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("no macOS VMs allowed: %+v", d)
+	}
+	c.PerWorktreeCapBytes = 4 * gib
+	r := req("busy", gib)
+	r.WorktreeLeasedBytes = 4 * gib
+	if d := policy.Decide(r, s, c); d.Allow || d.Reasons[0].Code != policy.WorktreeCap {
+		t.Fatalf("its own leases fill the cap: %+v", d)
+	}
+}
+
+// An old snapshot is decided by the same rules as any other, on nothing it
+// held: retry only if every reason can clear, no old headroom reported.
+func TestAnOldSnapshotUsesTheSameRules(t *testing.T) {
+	s := snap()
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	c := cfg
+	c.MaxSnapshotAge, c.MaxMacOSVMs, c.PerWorktreeCapBytes = time.Minute, 2, 4*gib
+	mac := policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true,
+		PendingMacOS: 2, WorktreeLeasedBytes: 4 * gib}
+	d := policy.Decide(mac, s, c)
+	if d.Allow || d.Retry || d.HeadroomBytes != nil || !strings.Contains(d.Message, "2m old") {
+		t.Fatalf("%+v", d)
+	}
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || d.HeadroomBytes != nil || d.Reasons[0].Code != policy.StaleSnapshot {
+		t.Fatalf("allowed: %+v", d)
+	}
+}
+
+// What the config says is known whatever the readings: no macOS VMs at all
+// means none, also before Tart was read.
+func TestNoMacOSVMsWithoutATartReading(t *testing.T) {
+	s := snap()
+	s.Tart = nil
+	c := cfg
+	c.MaxMacOSVMs = 0
+	if d := policy.Decide(policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", MacOS: true}, s, c); d.Allow {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A host source that hangs keeps its last reading in every fresh snapshot;
+// once that reading is too old, nothing current is known (#30).
+func TestAnOldHostReadingIsUnknown(t *testing.T) {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(0) // would deny
+	s.CollectedAt = now
+	s.Sources = map[string]protocol.SourceStatus{"host": {Stale: true, At: now.Add(-10 * time.Minute)}}
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A stale Tart reading names no holders: they may be gone.
+func TestAStaleTartReadingNamesNoHolders(t *testing.T) {
+	s := slotSnap()
+	s.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true}}
+	r := tartReq("busy", true)
+	r.PendingMacOS = 2
+	if d := policy.Decide(r, s, slotCfg); d.Allow || strings.Contains(d.Reasons[0].Text, "ci-mac") {
+		t.Fatalf("%+v", d)
+	}
+}

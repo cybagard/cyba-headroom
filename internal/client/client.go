@@ -13,6 +13,13 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
+// ErrVersion and ErrBadReply mean the daemon answered, but not in this
+// client's protocol: another build, or something else on the socket.
+var (
+	ErrVersion  = errors.New("protocol version mismatch")
+	ErrBadReply = errors.New("bad reply")
+)
+
 // Do sends one request and returns the reply. timeout bounds the whole
 // exchange, dial included (R7: the shim fails open after 500 ms).
 func Do(ctx context.Context, socket string, timeout time.Duration, req protocol.Request) (protocol.Reply, error) {
@@ -41,10 +48,11 @@ func Do(ctx context.Context, socket string, timeout time.Duration, req protocol.
 	}
 	var rep protocol.Reply
 	if err := json.Unmarshal(sc.Bytes(), &rep); err != nil {
-		return protocol.Reply{}, fmt.Errorf("bad reply: %w", err)
+		return protocol.Reply{}, fmt.Errorf("%w: %w", ErrBadReply, err)
 	}
 	if rep.V != protocol.Version {
-		return protocol.Reply{}, fmt.Errorf("daemon speaks protocol version %d, this client speaks %d; restart the daemon after upgrading", rep.V, protocol.Version)
+		return protocol.Reply{}, fmt.Errorf("%w: daemon speaks protocol version %d, this client speaks %d; restart the daemon after upgrading",
+			ErrVersion, rep.V, protocol.Version)
 	}
 	if !rep.OK {
 		return rep, fmt.Errorf("daemon: %s", rep.Error)

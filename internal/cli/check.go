@@ -59,12 +59,13 @@ func runCheck(e Env) int {
 		return 1
 	}
 	d, err := askDaemon(cfg, req)
-	switch {
-	case errors.Is(err, errCannotCheck):
-		fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install\n", err)
-		return 1
-	case err != nil:
-		unreachable(e, cfg.Socket, err)
+	if err != nil {
+		// The shim's diagnosis; only a daemon not running needs starting.
+		if cause := daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket); cause != "not running" {
+			fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", cause)
+		} else {
+			unreachable(e, cfg.Socket, err)
+		}
 		return 1
 	}
 	// A deny goes to stderr, where an agent looks for why a command failed.

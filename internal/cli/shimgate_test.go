@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,7 +24,7 @@ import (
 // shimRig runs the shim against a fake daemon (ask) and records what it
 // would exec.
 type shimRig struct {
-	t        *testing.T
+	t        testing.TB
 	dir      string // PATH dir with fake docker and tart, and the config dir
 	env      []string
 	ask      func(protocol.CheckRequest) (*protocol.Decision, error)
@@ -42,7 +41,7 @@ type shimRig struct {
 	pending  os.Signal // a signal that came during an ask
 }
 
-func newShimRig(t *testing.T) *shimRig {
+func newShimRig(t testing.TB) *shimRig {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
@@ -217,7 +216,7 @@ func TestShimGateChecksAChildOfACheckedCall(t *testing.T) {
 func TestShimGateOldDaemon(t *testing.T) {
 	r := newShimRig(t)
 	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
-		return nil, fmt.Errorf("%w (unknown op)", errCannotCheck)
+		return nil, daemonError{said: `unknown op "check"`}
 	}
 	code, stderr := r.run("docker", "run", "alpine")
 	if code != 0 || r.execed == "" || !strings.Contains(stderr, "headroom install") || strings.Contains(stderr, "not reachable") {
@@ -494,6 +493,24 @@ func TestDenyHintFitsTheReason(t *testing.T) {
 	} {
 		if got := denyHint(&c.d); !strings.Contains(got, c.want) {
 			t.Errorf("%+v: hint %q, want %q", c.d.Reasons, got, c.want)
+		}
+	}
+}
+
+// Only a daemon that does not know the check is called another version;
+// any other daemon error is shown as it is.
+func TestDaemonCause(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{daemonError{said: `unknown op "check"`}, "is another version: restart it with this build: headroom install"},
+		{daemonError{said: "check: not supported by this daemon"}, "gave no decision (check: not supported by this daemon); restart it"},
+		{daemonError{}, "gave no decision; restart it"},
+		{daemonError{said: "bad request: unexpected EOF"}, "gave no decision (bad request: unexpected EOF); restart it"},
+	} {
+		if got := daemonCause(c.err, time.Second, "/nonexistent/d.sock"); !strings.Contains(got, c.want) {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
 		}
 	}
 }

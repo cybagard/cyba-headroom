@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,3 +92,33 @@ func TestCheckAgainstADaemonWithoutCheck(t *testing.T) {
 }
 
 var _ = context.Background
+
+// headroom check gives the shim's advice for a daemon on another version.
+func TestCheckAgainstAnotherVersion(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), `{"v":99,"ok":true}`, 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "headroom install") || strings.Contains(stderr, "not reachable") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}
+
+// Something that answers garbage is not "not reachable".
+func TestCheckAgainstGarbage(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), "nope", 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "bad reply") || strings.Contains(stderr, "not reachable") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}
+
+// headroom check diagnoses a hung daemon as the shim does, not as "start it".
+func TestCheckAgainstAHungDaemon(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), "", 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "no answer in 500ms") || strings.Contains(stderr, "start it") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}

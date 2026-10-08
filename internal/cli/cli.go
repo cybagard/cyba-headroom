@@ -437,7 +437,7 @@ func gatePolicy(cfg config.Config) policy.Config {
 func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, PID: r.PID}, s, pol)
+		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

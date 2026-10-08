@@ -101,9 +101,7 @@ func TestParse(t *testing.T) {
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
 		{"tart run --no-graphics --dir src:/tmp/src ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
-
 		{"tart run ci-vm --no-graphics --dir a:/b", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
-
 		{"tart run --future x ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run"}},
 		// clone makes a VM but runs nothing: disk, not memory (#29).
 		{"tart clone base ci-vm", Call{}},

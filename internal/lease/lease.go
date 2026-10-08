@@ -146,6 +146,7 @@ type resource struct {
 	project  string // the compose project, for compose
 	worktree string // "" when unattributed
 	os       string // a VM's OS
+	runPID   int    // a VM's tart run process
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
 	bytes uint64
@@ -177,7 +178,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS})
+			out = append(out, resource{key: k, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
 		}
 	}
 	return out
@@ -326,11 +327,23 @@ func (b *Book) boundAnywhere(key string) bool {
 // so a lease whose own call failed cannot take a newer lease's resource on
 // its last tick.
 func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
+	// A VM whose tart run is a lease's own process is that lease's: the
+	// shim became tart run, keeping its PID.
+	if r.runPID > 0 {
+		for _, e := range b.open {
+			if e.pid == r.runPID && e.waitsFor() == r.kind && e.takes(r) {
+				return e
+			}
+		}
+	}
 	for _, live := range []bool{true, false} {
 		var other *entry
 		for _, e := range b.open {
 			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) {
 				continue
+			}
+			if e.pid > 0 && r.runPID > 0 {
+				continue // both processes known, and they differ
 			}
 			if r.worktree != "" && e.Worktree == r.worktree {
 				return e
@@ -345,9 +358,6 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	}
 	return nil
 }
-
-// SetAlive replaces the process check, for tests.
-func (b *Book) SetAlive(f func(pid int) bool) { b.alive = f }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.
 func processAlive(pid int) bool {

@@ -85,8 +85,12 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
 		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {
 			req.MacOS, req.CostBytes = macOS, mem
-		} else if getenv("HEADROOM_SHIM_DEBUG") != "" {
-			fmt.Fprintf(e.Stderr, "headroom: no config for the VM in `%s` under TART_HOME: not counted as a macOS VM\n", c.Command)
+		} else {
+			// Unknown: count it as macOS rather than let a third one by.
+			req.MacOS, req.VMUnknown = true, true
+			if getenv("HEADROOM_SHIM_DEBUG") != "" {
+				fmt.Fprintf(e.Stderr, "headroom: no config for the VM in `%s` under TART_HOME: counted as a macOS VM\n", c.Command)
+			}
 		}
 		// This process becomes tart run: when it exits before its VM
 		// appears, the daemon ends the lease (#29).

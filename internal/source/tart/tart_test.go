@@ -241,10 +241,10 @@ func TestOptionValueNamedLikeAnotherVMIsNotTheVM(t *testing.T) {
 
 func TestOneVMFailingTartGetKeepsTheOthers(t *testing.T) {
 	cli := twoRunning()
-	delete(cli, "get b --format json") // b stopped between list and get
+	delete(cli, "get b --format json") // b's config cannot be read
 	got := collect(t, tart.New(cli, fakeProcs{}, fakeVMs{}, home))
-	if len(got.VMs) != 1 || got.VMs[0].Name != "a" {
-		t.Fatalf("vms = %+v, want just a", got.VMs)
+	if len(got.VMs) != 2 || got.VMs[0].Name != "a" || got.VMs[0].OS == "" || got.VMs[1].OS != "" {
+		t.Fatalf("vms = %+v, want a, and b with its OS unknown", got.VMs)
 	}
 }
 
@@ -282,5 +282,15 @@ func TestConfigReadOncePerRun(t *testing.T) {
 	collect(t, src)
 	if n := calls["get headroom-mac --format json"]; n != 2 {
 		t.Fatalf("tart get ran %d times across a restart, want 2", n)
+	}
+}
+
+// A running VM whose config cannot be read still holds a slot: it is
+// reported with its OS unknown and counted as macOS (R6, #29).
+func TestARunningVMWithoutItsConfigCountsAsMacOS(t *testing.T) {
+	cli := fakeCLI{"list --format json": "list.json"} // tart get fails
+	got := collect(t, tart.New(cli, fakeProcs{}, fakeVMs{}, home))
+	if got.MacOSRunning != 1 || len(got.VMs) != 1 || got.VMs[0].Name != "headroom-mac" || got.VMs[0].OS != "" {
+		t.Fatalf("got %+v", got)
 	}
 }

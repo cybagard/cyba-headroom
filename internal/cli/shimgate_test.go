@@ -404,7 +404,7 @@ func TestShimGateTartVMs(t *testing.T) {
 	}
 	r.env = append(r.env, "HEADROOM_SHIM_DEBUG=1")
 	_, stderr := r.run("tart", "run", "not-here")
-	if len(r.asked) != 2 || r.asked[1].MacOS || r.asked[1].CostBytes != 0 || !strings.Contains(stderr, "no config for the VM in `tart run not-here`") {
+	if len(r.asked) != 2 || !r.asked[1].MacOS || !r.asked[1].VMUnknown || r.asked[1].CostBytes != 0 || !strings.Contains(stderr, "no config for the VM in `tart run not-here`") {
 		t.Fatalf("unknown VM asked %+v, stderr %q", r.asked[1], stderr)
 	}
 	if r.asked[0].PID != os.Getpid() {

@@ -55,11 +55,15 @@ func TartVM(name string, getenv func(string) string) (macOS bool, memoryBytes ui
 // ociDir is where Tart caches an OCI reference: its repository path, then
 // its tag (latest if none) or digest.
 func ociDir(ref string) (string, bool) {
-	repo, version := ref, "latest"
-	if i := strings.Index(ref, "@"); i >= 0 {
-		repo, version = ref[:i], ref[i+1:]
-	} else if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
-		repo, version = ref[:i], ref[i+1:]
+	repo, version, digest := strings.Cut(ref, "@") // a digest wins over a tag
+	if !digest {
+		version = "latest"
+	}
+	if i := strings.LastIndex(repo, ":"); i > strings.LastIndex(repo, "/") {
+		if version == "latest" {
+			version = repo[i+1:]
+		}
+		repo = repo[:i]
 	}
 	segs := append(strings.Split(repo, "/"), version)
 	for _, s := range segs {

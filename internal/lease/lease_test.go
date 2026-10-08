@@ -575,7 +575,7 @@ func TestAMacOSLeaseWaitsForAMacOSVM(t *testing.T) {
 func TestATartLeaseEndsWithItsProcess(t *testing.T) {
 	b, _, log := book(t)
 	alive := map[int]bool{4242: true}
-	b.SetAlive(func(pid int) bool { return alive[pid] })
+	lease.SetAlive(b, func(pid int) bool { return alive[pid] })
 	s := snap()
 	s.Tart = &protocol.Tart{Installed: true}
 	run := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run lx", CostBytes: gib, PID: 4242}
@@ -590,5 +590,25 @@ func TestATartLeaseEndsWithItsProcess(t *testing.T) {
 	b.Observe(s)
 	if len(b.List()) != 0 || !strings.Contains(log.String(), "exited before") {
 		t.Fatalf("leases %+v, log %s", b.List(), log)
+	}
+}
+
+// A tart lease binds the VM its own process runs, whatever starts first.
+func TestATartLeaseBindsTheVMItsProcessRuns(t *testing.T) {
+	b, _, _ := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true}
+	c := cfg
+	c.MaxMacOSVMs = 2
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run lx", CostBytes: gib, PID: 10}, s, c)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run mac", CostBytes: gib, MacOS: true, PID: 20}, s, c)
+	// mac comes up first; the older linux lease must not take it.
+	s.Tart.VMs = []protocol.TartVM{{Name: "mac", OS: "darwin", RunPID: 20}}
+	s.Tart.MacOSRunning = 1
+	b.Observe(s)
+	// One macOS VM running and none starting: a second fits.
+	if d := b.Check(policy.Request{Worktree: "w2", Kind: "tart", Command: "tart run m2", CostBytes: gib, MacOS: true}, s, c); !d.Allow {
+		t.Fatalf("the slot is counted twice: %+v", d)
 	}
 }

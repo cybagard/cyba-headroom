@@ -49,6 +49,9 @@ type CheckRequest struct {
 	// MacOS is set for a tart run of a macOS VM, which takes one of the
 	// macOS VM slots (R6, #29).
 	MacOS bool `json:"macos,omitempty"`
+	// VMUnknown is set when the VM's config was not found: it is counted as
+	// macOS rather than let a third macOS VM by.
+	VMUnknown bool `json:"vm_unknown,omitempty"`
 	// PID is the calling process, for tart run: it becomes tart, so its exit
 	// before its VM appears means the run failed (#29).
 	PID int `json:"pid,omitempty"`

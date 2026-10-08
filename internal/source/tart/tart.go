@@ -101,10 +101,15 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		}
 		cfg, ok := s.configs[v.Name]
 		if !ok {
-			if err := s.tartJSON(ctx, &cfg, "get", v.Name, "--format", "json"); err != nil {
-				continue // stopped or deleted since tart list
+			if err := s.tartJSON(ctx, &cfg, "get", v.Name, "--format", "json"); err == nil {
+				s.configs[v.Name] = cfg
+			} else {
+				// Its OS and memory are unknown ("", 0), but it may hold
+				// a macOS slot (R6): it is counted as one rather than let
+				// a third VM by. If it stopped since tart list, the next
+				// reading drops it.
+				cfg = vmConfig{}
 			}
-			s.configs[v.Name] = cfg
 		}
 		vm := protocol.TartVM{Name: v.Name, OS: cfg.OS, CPUs: cfg.CPU, MemoryBytes: cfg.Memory << 20}
 		if fp, ok := footprint[v.Name]; ok {
@@ -113,7 +118,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		if l, ok := launches[v.Name]; ok {
 			vm.RunPID, vm.LaunchCwd, vm.SharedDirs = l.pid, l.cwd, l.dirs
 		}
-		if vm.OS == "darwin" {
+		if vm.OS == "darwin" || vm.OS == "" {
 			t.MacOSRunning++
 		}
 		t.VMs = append(t.VMs, vm)

@@ -43,6 +43,7 @@ func TestTartVM(t *testing.T) {
 		{"ghcr.io/cirruslabs/macos-sequoia-base:latest", true, 8 << 30, true}, // a cached OCI image
 		{"ghcr.io/cirruslabs/macos-sequoia-base", true, 8 << 30, true},        // :latest
 		{"ghcr.io/cirruslabs/macos-sequoia-base@sha256:abc", true, 8 << 30, true},
+		{"ghcr.io/cirruslabs/macos-sequoia-base:sequoia@sha256:abc", true, 8 << 30, true}, // tag and digest: the digest
 		{"ghcr.io/cirruslabs/not-cached:latest", false, 0, false},
 		{"ghcr.io/../../vms/mac-ci:latest", false, 0, false},
 		{"../vms/mac-ci", false, 0, false},

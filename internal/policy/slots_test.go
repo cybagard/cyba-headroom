@@ -125,3 +125,23 @@ func TestStopIsOnlySuggestedForAKnownIdleHolder(t *testing.T) {
 		t.Fatalf("an odd VM name must be quoted and not offered as a command: %q", msg)
 	}
 }
+
+// A VM whose config was not found is counted as macOS, and the message says
+// why: a miss must not let a third macOS VM by.
+func TestAnUnknownVMIsCountedAsMacOS(t *testing.T) {
+	r := tartReq("busy", true)
+	r.VMUnknown = true
+	if d := policy.Decide(r, slotSnap(), slotCfg); d.Allow || !strings.Contains(d.Reasons[0].Text, "config was not found") {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A worktree with no agents left is idle, as the idle-holder rule says, and
+// its VM can be offered for stopping.
+func TestAHolderWithNoAgentsIsIdle(t *testing.T) {
+	s := slotSnap()
+	s.Orca.Worktrees[1].Agents = nil
+	if msg := policy.Decide(tartReq("busy", true), s, slotCfg).Reasons[0].Text; !strings.Contains(msg, "tart stop rel-mac") {
+		t.Fatalf("%q", msg)
+	}
+}

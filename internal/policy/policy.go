@@ -68,6 +68,8 @@ type Request struct {
 	WorktreeLeasedBytes uint64
 	// MacOS is set for a tart run of a macOS VM, which takes a slot (R6).
 	MacOS bool
+	// VMUnknown means the VM's config was not found, so MacOS is assumed.
+	VMUnknown bool
 	// PendingMacOS counts macOS VMs allowed but not yet running (#29).
 	PendingMacOS int
 	// PID is the calling process for a tart run, which becomes tart: the
@@ -179,6 +181,9 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 		text += fmt.Sprintf(", %d starting", r.PendingMacOS)
 	}
 	text += ")"
+	if r.VMUnknown {
+		text = "its VM's config was not found, so it counts as macOS, and " + text
+	}
 	holders, idle := slotHolders(s, c)
 	if len(holders) > 0 {
 		text += ": " + strings.Join(holders, ", ")
@@ -191,8 +196,8 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 
 // slotHolders describes the running macOS VMs, those whose worktree's
 // agents are idle first (longest idle first), then manual ones, then those
-// in use; idle is the first idle one's name.
-func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string) {
+// in use; stop is the first one safe to suggest stopping.
+func slotHolders(s *protocol.Snapshot, c Config) (holders []string, stop string) {
 	owner := map[string]protocol.WorktreeUsage{}
 	if s.Attribution != nil {
 		for _, w := range s.Attribution.Worktrees {
@@ -210,7 +215,7 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string)
 	}
 	var hs []holder
 	for _, vm := range s.Tart.VMs {
-		if vm.OS != "darwin" {
+		if vm.OS != "darwin" && vm.OS != "" { // "": unknown, counted as macOS
 			continue
 		}
 		shown := vmName(vm.Name)
@@ -223,7 +228,9 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string)
 		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, w.Name, state)}
 		if !working {
 			h.rank, h.idle = 0, since
-			h.offer = since > 0 && since >= c.IdleGrace && shown == vm.Name
+			// Offered for stopping only as the idle-holder rule calls
+			// it idle, and only under a plain name.
+			h.offer = idle(s, w.ID, c) && shown == vm.Name
 		}
 		hs = append(hs, h)
 	}
@@ -235,11 +242,11 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string)
 	})
 	for _, h := range hs {
 		holders = append(holders, h.text)
-		if h.offer && idle == "" {
-			idle = h.name
+		if h.offer && stop == "" {
+			stop = h.name
 		}
 	}
-	return holders, idle
+	return holders, stop
 }
 
 // vmName shows a VM name: as is if plain (letters, digits, . _ -), else
@@ -353,7 +360,7 @@ func idle(s *protocol.Snapshot, id string, c Config) bool {
 			continue
 		}
 		for _, a := range w.Agents {
-			if a.State == "working" || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
+			if a.State == "working" || a.StateSince.IsZero() || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
 				return false
 			}
 		}

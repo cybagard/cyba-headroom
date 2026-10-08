@@ -106,7 +106,7 @@ type entry struct {
 	// (protocol.LeaseLabel). containerID: a start's container, as Docker
 	// resolved it. name: a run's --name, for a call the shim did not label.
 	// target: a start's container as given, when Docker could not resolve
-	// it, or a tart run's VM. composeDir: a compose call's project
+	// it, or a tart run's VM. A compose lease's key is its project.
 	labelled bool
 	// oneoff is set for a compose run's lease: it binds the one one-off
 	// container Compose labels as such (hasOneoff once it has), and the
@@ -221,6 +221,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost.
 		var reserved, used uint64
+		earliest := e.Expires
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
 			if o.Kind != "compose" || e.oneoff || o.oneoff || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
 				// Only its own worktree's, and not a compose run's (its
@@ -230,8 +231,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 			e.took = append(e.took, o)
 			reserved, used = reserved+o.reserved(), used+o.used
-			if o.Expires.Before(e.Expires) {
-				e.Expires = o.Expires // compose up in a loop must not hold forever
+			if o.Expires.Before(earliest) {
+				earliest = o.Expires
 			}
 			for k := range o.bound {
 				e.bound[k] = true
@@ -244,6 +245,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// estimate and what the old leases still reserved, on top of
 			// what their containers use. Bounded however often it repeats,
 			// and never below what was held.
+			if e.cost <= reserved+used {
+				// Nothing beyond what is held (compose up again, in a loop):
+				// no fresh timeout, or a loop would hold it forever.
+				e.Expires = earliest
+			}
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
 	}
@@ -437,7 +443,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// the name.
 	gatedProject := map[string]bool{}
 	for _, r := range res {
-		if v := b.verdicts[r.key]; r.kind == "compose" && v != nil && v.how == gated {
+		// A compose run's one-off vouches for no service of its project.
+		if v := b.verdicts[r.key]; r.kind == "compose" && !r.oneoff && v != nil && v.how == gated {
 			gatedProject[r.project+"\x00"+r.dir] = true
 		}
 	}
@@ -515,7 +522,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			return true
 		case len(e.bound) > 0 && e.used >= e.cost:
 			return true // its resources use the cost
-		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff):
+		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff && e.hasOneoff):
 			// Its container or VM is gone. A compose project's first
 			// container may be a one-shot; the services come after it.
 			return true
@@ -653,7 +660,9 @@ func (e *entry) key(r resource, based bool) bool {
 		case r.oneoff:
 			return e.oneoff && !e.hasOneoff // a compose run's own, one each
 		}
-		return true // a service: an up's, or a compose run's dependency
+		// A service: an up's, or a compose run's dependency, which starts
+		// before its one-off container.
+		return !e.oneoff || !e.hasOneoff
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.containerID != "":

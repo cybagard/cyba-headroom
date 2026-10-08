@@ -118,7 +118,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget = c.MultiTarget
-	if c.Kind == "compose" && c.Target == "" && name == "docker" {
+	if c.Kind == "compose" && name == "docker" {
 		// Compose names the project (-p needs no asking; podman compose is
 		// not asked). Bounded by composeTimeout, also when the daemon
 		// turns out to be down (R7).

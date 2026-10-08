@@ -588,3 +588,50 @@ func TestATakeoverKeepsTheEarliestExpiry(t *testing.T) {
 		t.Fatalf("leases = %+v, want the first lease's expiry", l)
 	}
 }
+
+// compose run app, app depends on a one-shot migrate: migrate binds the
+// run's lease and exits before app's one-off appears. The lease lives on,
+// and app's container binds it.
+func TestAOneShotDependencyDoesNotEndARunsLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(service("migrate", "p", "w1")(snap()))
+	b.Observe(snap()) // migrate done
+	b.Observe(oneoff("app", "p", "w1")(snap()))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// Once its one-off is there, a run's lease takes no more services: one
+// started past the shim is ungated.
+func TestARunsLeaseTakesNoServiceAfterItsOneOff(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	s := oneoff("r1", "p", "w1")(snap())
+	b.Observe(s)
+	b.Observe(service("worker", "p", "w1")(oneoff("r1", "p", "w1")(snap())))
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:worker" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A takeover that asks for more than the old lease still reserves gets a
+// fresh timeout: compose --profile heavy up just before the old lease
+// expires keeps its 6 GiB.
+func TestATakeoverThatNeedsMoreGetsAFreshTimeout(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	s := service("web", "app", "w1")(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	b.Observe(s)
+	c.t = c.t.Add(115 * time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 6 * gib, Target: "app"}, s, cfg)
+	c.t = c.t.Add(10 * time.Second)
+	b.Observe(s)
+	if r := reserved(b); r < 6*gib-gib/4 {
+		t.Fatalf("reserved %d GiB after the old lease's timeout, want the new 6", r>>30)
+	}
+}

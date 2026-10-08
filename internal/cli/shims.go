@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/cybagard/cyba-headroom/internal/shim"
 )
@@ -112,9 +113,11 @@ func shimState(dir, n, self string) (target, problem string) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "", "missing"
-	case err != nil:
+	case errors.Is(err, syscall.EINVAL):
 		// headroom install leaves what is not a link alone.
 		return "", "is not a link: remove it"
+	case err != nil:
+		return "", "cannot read: " + err.Error()
 	}
 	if _, err := os.Stat(p); err != nil || !isHeadroom(p, target, self) {
 		return target, "→ " + target + " (not a headroom binary that exists)"

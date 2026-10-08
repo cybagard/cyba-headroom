@@ -58,10 +58,11 @@ func runDoctor(e Env) int {
 
 func doctor(e Env) []finding {
 	h := e.withDefaults()
+	self, _ := os.Executable()
 	// The login shell runs the user's whole profile: start it now, beside
 	// the other checks.
 	login := make(chan finding, 1)
-	go func() { login <- loginFinding(e.Getenv, h.loginShell) }()
+	go func() { login <- loginFinding(e.Getenv, h.loginShell, self) }()
 	var out []finding
 
 	cfg, err := config.Load(e.Getenv)
@@ -74,11 +75,15 @@ func doctor(e Env) []finding {
 		}
 		cfg = config.Defaults(dir)
 	} else {
-		out = append(out, finding{mark: pass, name: "config", detail: filepath.Join(cfg.Dir, config.FileName)})
+		file := filepath.Join(cfg.Dir, config.FileName)
+		if _, err := os.Stat(file); err != nil {
+			file += " (no file: defaults in effect)"
+		}
+		out = append(out, finding{mark: pass, name: "config", detail: file})
 	}
 
-	out = append(out, shimsFinding(cfg.ShimDir))
-	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks))
+	out = append(out, shimsFinding(cfg.ShimDir, self))
+	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks, self))
 
 	snap, serr := h.status(cfg)
 	if serr != nil {
@@ -100,8 +105,7 @@ func daemonStatus(cfg config.Config) (*protocol.Snapshot, error) {
 
 // shimsFinding checks that each shim in dir links to a headroom binary
 // that exists.
-func shimsFinding(dir string) finding {
-	self, _ := os.Executable()
+func shimsFinding(dir, self string) finding {
 	var bad []string
 	target := ""
 	for _, n := range shimList() {
@@ -120,10 +124,10 @@ func shimsFinding(dir string) finding {
 
 // pathFinding checks that each tool resolves to its shim on this shell's
 // PATH, as `command -v` finds it, and names the real binary behind it.
-func pathFinding(getenv func(string) string, shimDir string, fallbacks map[string][]string) finding {
-	self, _ := os.Executable()
+func pathFinding(getenv func(string) string, shimDir string, fallbacks map[string][]string, self string) finding {
 	var wrong, more []string
 	gated := 0
+	via := "" // the dir of the first shim found on PATH
 	for _, n := range shimList() {
 		first := binpath.Search(n, getenv, nil, nil)
 		bin, rerr := shim.Resolve(n, []string{self}, getenv, fallbacks[n])
@@ -142,6 +146,9 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 			gated++
 			more = append(more, fmt.Sprintf("%s: shim first, runs %s", n, bin))
 		}
+		if isHeadroom(first, first, self) && via == "" {
+			via = filepath.Dir(first)
+		}
 	}
 	const restart = ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after `headroom install`)"
 	switch {
@@ -152,15 +159,19 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 	case gated == 0:
 		return finding{mark: fail, name: "PATH", detail: "the shims in " + shimDir + " are not on this PATH" + restart, more: more}
 	}
-	// The shell, unlike headroom, also searches empty and relative entries:
-	// one ahead of the shims runs a tool from the current directory.
+	// The shell, unlike headroom, also searches empty and relative entries
+	// ("", ".", "bin", and "~/bin", which bash expands): one ahead of the
+	// shims can run a tool there, ungated.
 	for _, d := range filepath.SplitList(getenv("PATH")) {
-		if d != "" && sameDir(d, shimDir) {
+		if d != "" && sameDir(d, via) {
 			break
 		}
 		if !filepath.IsAbs(d) {
-			return finding{mark: warn, name: "PATH", detail: fmt.Sprintf("the entry %q comes before the shims: the shell runs a docker, podman or tart in the current directory there, ungated", d), more: more}
+			return finding{mark: warn, name: "PATH", detail: fmt.Sprintf("the entry %q comes before the shims and is not an absolute path: the shell may run a docker, podman or tart from it, ungated", d), more: more}
 		}
+	}
+	if !sameDir(via, shimDir) {
+		return finding{mark: warn, name: "PATH", detail: fmt.Sprintf("calls go through the shims in %s, not the configured %s: another headroom install comes first", via, shimDir), more: more}
 	}
 	return finding{mark: pass, name: "PATH", detail: strings.Join(shimList(), ", ") + " go through the shims in " + shimDir, more: more}
 }
@@ -224,23 +235,37 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 		}
 		return finding{mark: warn, name: "identity", detail: fmt.Sprintf("worktree %s, from %s, is not one of Orca's worktrees: its calls are charged to an unknown worktree", id, source)}
 	}
-	// As the view names it: Orca may leave the display name empty.
-	name := wt.Name
-	if name == "" {
-		name = filepath.Base(wt.Path)
-	}
-	f := finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %q (%s), from %s", name, id, source)}
+	f := finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %q (%s), from %s", worktreeName(snap, id), id, source)}
 	if by == protocol.IdentifiedByCaller {
-		// The environment wins; say so when the directory says otherwise.
-		// callerRequest leaves the directory out once the env names one.
+		// The environment wins; say so when where the shell runs says
+		// otherwise. callerRequest leaves that out once the env names one.
 		cwd, _ := h.getwd()
 		resolved, _ := filepath.EvalSymlinks(cwd)
-		if cwdID, _ := attribution.Identify(snap, attribution.Caller{Cwd: cwd, RealCwd: resolved}); cwdID != "" && cwdID != id {
+		where := attribution.Caller{Cwd: cwd, RealCwd: resolved, Ancestors: h.ancestors()}
+		if hereID, hereBy := attribution.Identify(snap, where); hereID != "" && hereID != id {
 			f.mark = warn
-			f.more = append(f.more, fmt.Sprintf("the working directory is in worktree %s; calls are charged to %s, from %s", cwdID, id, source))
+			place := "the working directory is"
+			if hereBy == protocol.IdentifiedByProcess {
+				place = "this shell runs"
+			}
+			f.more = append(f.more, fmt.Sprintf("%s in worktree %q (%s); calls are charged to %s, from %s", place, worktreeName(snap, hereID), hereID, id, source))
 		}
 	}
 	return f
+}
+
+// worktreeName names worktree id as the view does: Orca may leave the
+// display name empty.
+func worktreeName(snap *protocol.Snapshot, id string) string {
+	for _, w := range snap.Orca.Worktrees {
+		if w.ID == id {
+			if w.Name != "" {
+				return w.Name
+			}
+			return filepath.Base(w.Path)
+		}
+	}
+	return id
 }
 
 // loginScript prints where a login shell finds each tool.
@@ -260,29 +285,36 @@ func askLoginShell(sh string) (string, error) {
 	return string(out), err
 }
 
+// posixShells take loginScript; for another $SHELL (fish, nu, csh), the
+// login shell a script starts is zsh, macOS's default.
+var posixShells = map[string]bool{"zsh": true, "bash": true, "sh": true, "ksh": true, "dash": true}
+
 // loginFinding warns when a login shell started from here puts a real
-// tool first: scripts that start one (`zsh -l`, `bash -l`) run ungated.
-func loginFinding(getenv func(string) string, ask func(string) (string, error)) finding {
+// tool first, or an alias or function in front of it: scripts that start
+// one (`zsh -l`, `bash -l`) run ungated.
+func loginFinding(getenv func(string) string, ask func(string) (string, error), self string) finding {
 	sh := getenv("SHELL")
-	if !filepath.IsAbs(sh) {
+	if !filepath.IsAbs(sh) || !posixShells[filepath.Base(sh)] {
 		sh = "/bin/zsh"
 	}
 	out, err := ask(sh)
 	if err != nil {
 		return finding{mark: warn, name: "login", detail: fmt.Sprintf("could not run `%s -l`: %s", sh, oneLine(err))}
 	}
-	self, _ := os.Executable()
 	var ungated []string
 	found := 0
 	sc := bufio.NewScanner(strings.NewReader(out))
 	for sc.Scan() {
 		n, p, ok := strings.Cut(sc.Text(), "=")
-		// A function or alias prints its name, not a path: not a binary.
-		if !ok || !ShimNames[n] || !filepath.IsAbs(p) {
+		if !ok || !ShimNames[n] || p == "" {
 			continue
 		}
 		found++
-		if !isHeadroom(p, p, self) {
+		switch {
+		case !filepath.IsAbs(p):
+			// command -v prints a function's name, or an alias's definition.
+			ungated = append(ungated, n+" is an alias or function")
+		case !isHeadroom(p, p, self):
 			ungated = append(ungated, n+" → "+p)
 		}
 	}

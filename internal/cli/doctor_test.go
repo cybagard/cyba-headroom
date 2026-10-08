@@ -73,7 +73,7 @@ func (r *doctorRig) run() (int, string) {
 		},
 		loginShell: func(shell string) (string, error) {
 			want := r.env["SHELL"]
-			if want == "" {
+			if want == "" || strings.HasSuffix(want, "/fish") {
 				want = "/bin/zsh"
 			}
 			if shell != want {
@@ -219,7 +219,22 @@ func TestDoctorRelativePATHEntryBeforeTheShims(t *testing.T) {
 	r := newDoctorRig(t)
 	r.env["PATH"] = ".:" + r.shims + ":" + r.tools
 	_, out := r.run()
-	wantMark(t, out, "PATH", "!", `"."`, "current directory")
+	wantMark(t, out, "PATH", "!", `"."`, "not an absolute path")
+}
+
+func TestDoctorShimsFromAnotherShimDir(t *testing.T) {
+	r := newDoctorRig(t)
+	other := filepath.Join(r.cfg, "old-shims")
+	if _, err := linkShims(other, r.bin); err != nil {
+		t.Fatal(err)
+	}
+	r.env["PATH"] = other + ":/usr/bin:bin:" + r.shims + ":" + r.tools
+	_, out := r.run()
+	l := doctorLine(t, out, "PATH")
+	wantMark(t, out, "PATH", "!", other, "not the configured")
+	if strings.Contains(l, `"bin"`) {
+		t.Errorf("relative entry after the shims flagged: %q", l)
+	}
 }
 
 func TestDoctorShimDirByAnotherSpelling(t *testing.T) {
@@ -271,6 +286,26 @@ func TestDoctorDanglingShims(t *testing.T) {
 		t.Fatalf("exit %d, want 1:\n%s", code, out)
 	} else {
 		wantMark(t, out, "shims", "✗", "headroom install")
+	}
+}
+
+func TestDoctorNoConfigFile(t *testing.T) {
+	r := newDoctorRig(t)
+	_, out := r.run()
+	wantMark(t, out, "config", "✓", "no file", "defaults")
+}
+
+func TestDoctorUnreadableShim(t *testing.T) {
+	r := newDoctorRig(t)
+	// The shim dir's parent component is a file: ENOTDIR, not "not a link".
+	r.env["HEADROOM_CONFIG_DIR"] = r.cfg
+	if err := os.WriteFile(filepath.Join(r.cfg, config.FileName), []byte("shim_dir = \""+filepath.Join(r.bin, "shims")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out := r.run()
+	l := doctorLine(t, out, "shims")
+	if strings.Contains(l, "remove it") || !strings.Contains(l, "missing") && !strings.Contains(l, "cannot read") {
+		t.Fatalf("shims line %q", l)
 	}
 }
 
@@ -329,6 +364,10 @@ func TestDoctorIdentity(t *testing.T) {
 		"env and directory disagree": {func(r *doctorRig) {
 			r.cwd = "/Users/dev/src/b"
 		}, "!", []string{`"Fix login"`}},
+		"env and terminal disagree": {func(r *doctorRig) {
+			r.env["HEADROOM_WORKTREE"] = "wt-b"
+			r.cwd, r.ancestors = "/tmp", []int{900, 500}
+		}, "!", []string{`"Release prep"`}},
 		"daemon down, nothing in the env": {func(r *doctorRig) {
 			delete(r.env, "HEADROOM_WORKTREE")
 			r.snap, r.statusErr = nil, errors.New("refused")
@@ -416,9 +455,15 @@ func TestDoctorLoginShell(t *testing.T) {
 		"finds none of the tools": {func(r *doctorRig) {
 			r.login = "docker=\npodman=\ntart=\n"
 		}, "✓", []string{"finds none"}},
-		"a function is not a path": {func(r *doctorRig) {
+		"a function": {func(r *doctorRig) {
 			r.login = "docker=docker\npodman=" + filepath.Join(r.shims, "podman") + "\ntart=\n"
-		}, "✓", []string{"keeps the shims first"}},
+		}, "!", []string{"docker", "alias or function"}},
+		"an alias": {func(r *doctorRig) {
+			r.login = "docker=alias docker=/usr/local/bin/docker\npodman=\ntart=\n"
+		}, "!", []string{"docker", "alias or function"}},
+		"fish: probe with zsh": {func(r *doctorRig) {
+			r.env["SHELL"] = "/opt/homebrew/bin/fish"
+		}, "✓", []string{"/bin/zsh -l"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -467,7 +512,7 @@ func TestLoginFindingKnowsTheRunningBinary(t *testing.T) {
 	}
 	f := loginFinding(func(string) string { return "/bin/zsh" }, func(string) (string, error) {
 		return "docker=" + self + "\n", nil
-	})
+	}, self)
 	if f.mark != pass {
 		t.Fatalf("login = %+v, want pass", f)
 	}

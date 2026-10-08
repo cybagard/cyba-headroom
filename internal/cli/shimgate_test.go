@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -217,7 +216,7 @@ func TestShimGateChecksAChildOfACheckedCall(t *testing.T) {
 func TestShimGateOldDaemon(t *testing.T) {
 	r := newShimRig(t)
 	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
-		return nil, fmt.Errorf("%w (unknown op)", errCannotCheck)
+		return nil, daemonError{said: `unknown op "check"`}
 	}
 	code, stderr := r.run("docker", "run", "alpine")
 	if code != 0 || r.execed == "" || !strings.Contains(stderr, "headroom install") || strings.Contains(stderr, "not reachable") {
@@ -505,11 +504,13 @@ func TestDaemonCause(t *testing.T) {
 		err  error
 		want string
 	}{
-		{fmt.Errorf("%w (%s)", errCannotCheck, `unknown op "check"`), "headroom install"},
-		{fmt.Errorf("%w (%s)", errCannotCheck, "check: not supported by this daemon"), "headroom install"},
-		{fmt.Errorf("%w (%s)", errCannotCheck, "bad request: unexpected EOF"), "error: bad request: unexpected EOF"},
+		{daemonError{said: `unknown op "check"`}, "headroom install"},
+		{daemonError{said: "check: not supported by this daemon"}, "headroom install"},
+		{daemonError{}, "headroom install"},
+		{daemonError{said: "bad request: unexpected EOF"}, "error: bad request: unexpected EOF"},
+		{daemonError{said: "policy: not supported for this kind"}, "error: policy: not supported"},
 	} {
-		if got := daemonCause(c.err, time.Second); !strings.Contains(got, c.want) {
+		if got := daemonCause(c.err, time.Second, "/nonexistent/d.sock"); !strings.Contains(got, c.want) {
 			t.Errorf("%v: %q, want %q", c.err, got, c.want)
 		}
 	}

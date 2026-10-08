@@ -29,9 +29,20 @@ const (
 	waitPoll = 2 * time.Second
 )
 
-// errCannotCheck means the daemon answered but cannot check calls: most
-// likely an older build still running after an upgrade.
+// errCannotCheck means the daemon answered but gave no decision; a
+// daemonError carries what it said.
 var errCannotCheck = errors.New("the daemon cannot check calls")
+
+// daemonError is a daemon's answer without a decision.
+type daemonError struct{ said string }
+
+func (e daemonError) Error() string { return errCannotCheck.Error() + " (" + e.said + ")" }
+func (e daemonError) Unwrap() error { return errCannotCheck }
+
+// olderDaemon are the answers of a daemon that does not know the check: a
+// build from before #24, or one without its check wired ("": an OK reply
+// with no decision).
+var olderDaemon = map[string]bool{`unknown op "check"`: true, "check: not supported by this daemon": true, "": true}
 
 // gated is how gate decided.
 type gated struct {
@@ -115,7 +126,7 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		case err != nil:
 			// Also while waiting: a daemon that went away must not hold
 			// the call (R7).
-			notGated(e, "daemon "+daemonCause(err, cfg.Policy.DaemonTimeout.Duration), c.Command)
+			notGated(e, "daemon "+daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket), c.Command)
 			return gated{proceed: true}
 		case d.Allow:
 			if getenv("HEADROOM_SHIM_DEBUG") != "" {
@@ -184,33 +195,29 @@ func notGated(e Env, cause, command string) {
 	fmt.Fprintf(e.Stderr, "headroom: not gated (%s); running `%s` anyway. See: headroom status\n", cause, command)
 }
 
-// daemonCause says briefly why the daemon gave no decision.
-func daemonCause(err error, timeout time.Duration) string {
+// daemonCause says briefly why the daemon at socket gave no decision.
+func daemonCause(err error, timeout time.Duration, socket string) string {
 	var ne net.Error
+	var de daemonError
 	switch {
-	case errors.Is(err, client.ErrVersion), errors.Is(err, errCannotCheck) && oldDaemon(err):
+	case errors.Is(err, client.ErrVersion), errors.As(err, &de) && olderDaemon[de.said]:
 		return "is another version: restart it with this build: headroom install"
-	case errors.Is(err, errCannotCheck):
-		// "the daemon cannot check calls (<its error>)": show its error.
-		m := strings.TrimPrefix(oneLine(err), errCannotCheck.Error()+" ")
-		return "error: " + strings.TrimSuffix(strings.TrimPrefix(m, "("), ")")
+	case errors.As(err, &de):
+		return "error: " + strings.Join(strings.Fields(de.said), " ")
 	case errors.Is(err, client.ErrBadReply):
 		return "gave a bad reply"
 	case errors.As(err, &ne) && ne.Timeout(): // deadlines of conn and context alike
 		return fmt.Sprintf("gave no answer in %s", timeout)
 	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
 		return "socket not accessible"
-	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.ENOTSOCK):
+	}
+	if fi, statErr := os.Lstat(socket); statErr == nil && fi.Mode()&os.ModeSocket == 0 {
+		return "socket path " + socket + " is not a socket"
+	}
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOTSOCK) {
 		return "not running"
 	}
 	return "unreachable: " + oneLine(err)
-}
-
-// oldDaemon reports whether the daemon refused the check as an op it does
-// not know: an older build.
-func oldDaemon(err error) bool {
-	m := err.Error()
-	return strings.Contains(m, "unknown op") || strings.Contains(m, "not supported") || strings.Contains(m, "no decision")
 }
 
 // oneLine is err's text on one line.
@@ -225,11 +232,11 @@ func askDaemon(cfg config.Config, req protocol.CheckRequest) (*protocol.Decision
 		protocol.Request{Op: protocol.OpCheck, Check: &req})
 	switch {
 	case err != nil && rep.Error != "":
-		return nil, fmt.Errorf("%w (%s)", errCannotCheck, rep.Error)
+		return nil, daemonError{said: rep.Error}
 	case err != nil:
 		return nil, err
 	case rep.Decision == nil:
-		return nil, fmt.Errorf("%w (no decision in its reply)", errCannotCheck)
+		return nil, daemonError{}
 	}
 	return rep.Decision, nil
 }

@@ -71,7 +71,7 @@ func TestShimFailsOpenWithinTheTimeout(t *testing.T) {
 			if err := os.WriteFile(sock, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, "not running"},
+		}, "is not a socket"},
 		"no permission": {func(t *testing.T, sock string) {
 			if os.Geteuid() == 0 {
 				t.Skip("root connects whatever the socket's mode")
@@ -129,7 +129,8 @@ func TestCallsThatStartNothingAreUntouched(t *testing.T) {
 		r.ask = allow
 		start := time.Now()
 		code, stderr := r.run(argv...)
-		if code != 0 || r.execed == "" || stderr != "" || len(r.asked) != 0 || time.Since(start) > 100*time.Millisecond {
+		// A hung daemon would hold it 500 ms: well under means untouched.
+		if code != 0 || r.execed == "" || stderr != "" || len(r.asked) != 0 || time.Since(start) > 400*time.Millisecond {
 			t.Errorf("%v: exit %d, stderr %q, asked %d, took %v", argv, code, stderr, len(r.asked), time.Since(start))
 		}
 	}

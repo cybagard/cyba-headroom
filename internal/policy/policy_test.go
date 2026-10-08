@@ -317,3 +317,33 @@ func TestAnOldSnapshotKeepsWhatIsKnown(t *testing.T) {
 		t.Fatalf("its own leases fill the cap: %+v", d)
 	}
 }
+
+// An old snapshot is decided by the same rules as any other, on nothing it
+// held: retry only if every reason can clear, no old headroom reported.
+func TestAnOldSnapshotUsesTheSameRules(t *testing.T) {
+	s := snap()
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	c := cfg
+	c.MaxSnapshotAge, c.MaxMacOSVMs, c.PerWorktreeCapBytes = time.Minute, 2, 4*gib
+	mac := policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true,
+		PendingMacOS: 2, WorktreeLeasedBytes: 4 * gib}
+	d := policy.Decide(mac, s, c)
+	if d.Allow || d.Retry || d.HeadroomBytes != nil || !strings.Contains(d.Message, "2m old") {
+		t.Fatalf("%+v", d)
+	}
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || d.HeadroomBytes != nil || d.Reasons[0].Code != policy.StaleSnapshot {
+		t.Fatalf("allowed: %+v", d)
+	}
+}
+
+// What the config says is known whatever the readings: no macOS VMs at all
+// means none, also before Tart was read.
+func TestNoMacOSVMsWithoutATartReading(t *testing.T) {
+	s := snap()
+	s.Tart = nil
+	c := cfg
+	c.MaxMacOSVMs = 0
+	if d := policy.Decide(policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", MacOS: true}, s, c); d.Allow {
+		t.Fatalf("%+v", d)
+	}
+}

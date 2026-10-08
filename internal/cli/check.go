@@ -61,9 +61,9 @@ func runCheck(e Env) int {
 	}
 	d, err := askDaemon(cfg, req)
 	switch {
-	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion):
+	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion), errors.Is(err, client.ErrBadReply):
 		// Answered, but not with a decision: the shim's advice applies.
-		fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", daemonCause(err, cfg.Policy.DaemonTimeout.Duration))
+		fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket))
 		return 1
 	case err != nil:
 		unreachable(e, cfg.Socket, err)

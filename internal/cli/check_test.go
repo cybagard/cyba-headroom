@@ -102,3 +102,13 @@ func TestCheckAgainstAnotherVersion(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 }
+
+// Something that answers garbage is not "not reachable".
+func TestCheckAgainstGarbage(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), "nope", 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "bad reply") || strings.Contains(stderr, "not reachable") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}

@@ -421,8 +421,15 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 		book.Observe(s)
 		s.Leases = book.List()
 	})
-	d.SetCheck(gateCheck(book, cfg.Policy.Config()))
+	d.SetCheck(gateCheck(book, gatePolicy(cfg)))
 	d.SetRelease(book.Release)
+}
+
+// gatePolicy is the policy's settings from the config.
+func gatePolicy(cfg config.Config) policy.Config {
+	p := cfg.Policy.Config()
+	p.MaxMacOSVMs = cfg.Budget.MaxMacOSVMs
+	return p
 }
 
 // gateCheck answers a check: it finds the calling worktree (#28), then
@@ -430,7 +437,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
+		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

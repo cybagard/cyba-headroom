@@ -40,12 +40,18 @@ func serveDaemon(t *testing.T) (map[string]string, *daemon.Daemon) {
 // serves, as runDaemon sets its hooks.
 func serveDaemonWith(t *testing.T, setup func(*daemon.Daemon)) (map[string]string, *daemon.Daemon) {
 	t.Helper()
+	return serveDaemonFrom(t, []daemon.Source{hostSource{}}, setup)
+}
+
+// serveDaemonFrom is serveDaemonWith with the given sources.
+func serveDaemonFrom(t *testing.T, sources []daemon.Source, setup func(*daemon.Daemon)) (map[string]string, *daemon.Daemon) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	d, err := daemon.New([]daemon.Source{hostSource{}}, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d, err := daemon.New(sources, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

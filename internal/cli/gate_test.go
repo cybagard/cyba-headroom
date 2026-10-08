@@ -12,6 +12,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/lease"
+	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
@@ -70,5 +71,22 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 	d = check(&protocol.CheckRequest{Kind: "container", Command: "docker run c", Cwd: "/Users/dev"}, s)
 	if !d.Allow || d.Worktree != "" || d.LeaseID != "" {
 		t.Fatalf("manual: %+v", d)
+	}
+}
+
+// The daemon gates a macOS tart run on its slots first (R6).
+func TestGateCountsMacOSSlots(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	cfg := config.Defaults("/x")
+	check := gateCheck(book, gatePolicy(cfg))
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{
+		Budget: &protocol.Budget{HeadroomBytes: &headroom},
+		Tart: &protocol.Tart{Installed: true, MacOSRunning: 2, VMs: []protocol.TartVM{
+			{Name: "a-mac", OS: "darwin"}, {Name: "b-mac", OS: "darwin"}}},
+	}
+	d := check(&protocol.CheckRequest{Worktree: "w", Kind: "tart", Command: "tart run c-mac", MacOS: true}, s)
+	if d.Allow || d.Reasons[0].Code != policy.VMSlots || !strings.Contains(d.Message, "a-mac (manual)") {
+		t.Fatalf("third macOS VM: %+v", d)
 	}
 }

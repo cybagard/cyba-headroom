@@ -514,3 +514,39 @@ func TestLeaseIDsDifferBetweenBooks(t *testing.T) {
 		t.Fatalf("ids %q and %q", da.LeaseID, db.LeaseID)
 	}
 }
+
+// A macOS VM allowed but not yet running holds a slot (R6, #29): of two
+// simultaneous requests for the last slot, one gets it.
+func TestTheLastMacOSSlotGoesToOneRequest(t *testing.T) {
+	b, _, _ := book(t)
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true, MacOSRunning: 1, VMs: []protocol.TartVM{{Name: "held", OS: "darwin"}}}
+	c := cfg
+	c.MaxMacOSVMs = 2
+	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}
+	var wg sync.WaitGroup
+	allowed := make(chan bool, 8)
+	for range 8 {
+		wg.Go(func() { allowed <- b.Check(mac, s, c).Allow })
+	}
+	wg.Wait()
+	close(allowed)
+	n := 0
+	for a := range allowed {
+		if a {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d of 8 got the last slot", n)
+	}
+	// Once its VM runs, the lease no longer counts as starting: the
+	// snapshot counts it as running instead.
+	s.Tart.VMs = append(s.Tart.VMs, protocol.TartVM{Name: "m", OS: "darwin"})
+	s.Tart.MacOSRunning = 2
+	b.Observe(s)
+	c.MaxMacOSVMs = 3
+	if d := b.Check(mac, s, c); !d.Allow {
+		t.Fatalf("the bound lease still counts as starting: %+v", d)
+	}
+}

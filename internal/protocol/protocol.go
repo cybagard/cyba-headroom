@@ -46,6 +46,9 @@ type CheckRequest struct {
 	// its working directory, and its parent PIDs, nearest first.
 	Cwd       string `json:"cwd,omitempty"`
 	Ancestors []int  `json:"ancestors,omitempty"`
+	// MacOS is set for a tart run of a macOS VM, which takes one of the
+	// macOS VM slots (R6, #29).
+	MacOS bool `json:"macos,omitempty"`
 	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
 	// may be known by either spelling.
 	RealCwd string `json:"real_cwd,omitempty"`

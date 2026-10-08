@@ -63,6 +63,8 @@ type entry struct {
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
+	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
+	macOS bool
 }
 
 // reserved is what the lease still holds back: its cost less what its
@@ -101,6 +103,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if e.Worktree == r.Worktree {
 			r.WorktreeLeasedBytes += e.reserved()
 		}
+		if e.macOS && len(e.bound) == 0 {
+			r.PendingMacOS++ // once bound, its VM counts as running
+		}
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -120,7 +125,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{},
+		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS,
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID

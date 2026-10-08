@@ -18,11 +18,13 @@ package lease
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/policy"
@@ -38,6 +40,8 @@ type Book struct {
 	mu     sync.Mutex
 	open   []*entry // oldest first
 	nextID int
+	// alive reports whether a process runs (a tart lease's tart run).
+	alive func(pid int) bool
 	// run tells this book's lease IDs from an earlier daemon run's, so a
 	// release for one of those cannot end one of these.
 	run string
@@ -63,6 +67,11 @@ type entry struct {
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
+	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
+	macOS bool
+	// pid is the tart run process, for a tart lease: if it exits before its
+	// VM appears, the run failed.
+	pid int
 }
 
 // reserved is what the lease still holds back: its cost less what its
@@ -73,7 +82,7 @@ func (e *entry) reserved() uint64 { return e.cost - min(e.used, e.cost) }
 func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
-	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:])}
+	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive}
 }
 
 // stale is how much newer the daemon's snapshot must be than the one leases
@@ -101,6 +110,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if e.Worktree == r.Worktree {
 			r.WorktreeLeasedBytes += e.reserved()
 		}
+		if e.macOS && len(e.bound) == 0 {
+			r.PendingMacOS++ // once bound, its VM counts as running
+		}
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -120,7 +132,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{},
+		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
@@ -133,6 +145,8 @@ type resource struct {
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
 	worktree string // "" when unattributed
+	os       string // a VM's OS
+	runPID   int    // a VM's tart run process
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
 	bytes uint64
@@ -164,7 +178,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes})
+			out = append(out, resource{key: k, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
 		}
 	}
 	return out
@@ -187,6 +201,9 @@ func (e *entry) waitsFor() string {
 func (e *entry) takes(r resource) bool {
 	if e.Kind == "compose" {
 		return e.project == "" || e.project == r.project
+	}
+	if e.macOS && r.os != "darwin" && r.os != "" {
+		return false // a macOS lease's slot is freed by a macOS VM only ("": unknown, counted as one)
 	}
 	return len(e.bound) == 0
 }
@@ -259,6 +276,10 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			alive = alive || ok || !readable(s, e.waitsFor())
 		}
 		switch {
+		case e.Kind == "tart" && len(e.bound) == 0 && e.pid > 0 && !b.alive(e.pid):
+			b.log.Info("lease ended: its tart run exited before its VM appeared", "lease", e.ID, "worktree", e.Worktree,
+				"command", e.Command)
+			return true
 		case len(e.bound) > 0 && e.used >= e.cost:
 			return true // its resources use the cost
 		case len(e.bound) > 0 && !alive && e.Kind != "compose":
@@ -306,6 +327,15 @@ func (b *Book) boundAnywhere(key string) bool {
 // so a lease whose own call failed cannot take a newer lease's resource on
 // its last tick.
 func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
+	// A VM whose tart run is a lease's own process is that lease's: the
+	// shim became tart run, keeping its PID.
+	if r.runPID > 0 {
+		for _, e := range b.open {
+			if e.pid == r.runPID && e.waitsFor() == r.kind && len(e.bound) == 0 {
+				return e // its own VM, whatever the shim guessed its OS to be
+			}
+		}
+	}
 	for _, live := range []bool{true, false} {
 		var other *entry
 		for _, e := range b.open {
@@ -324,6 +354,12 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 		}
 	}
 	return nil
+}
+
+// processAlive reports whether pid runs: signal 0 checks without sending.
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // Release ends the open lease id, whose call never started (its exec

@@ -17,6 +17,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/shim"
 )
@@ -381,5 +382,118 @@ func TestShimGateWaitCancelledDuringTheAsk(t *testing.T) {
 	code, _ := r.run("docker", "run", "alpine")
 	if code != 130 || r.execed != "" || r.raised != syscall.SIGINT || !slices.Equal(r.released, []string{"lease-7"}) {
 		t.Fatalf("exit %d, exec %q, raised %v, released %q", code, r.execed, r.raised, r.released)
+	}
+}
+
+// tart run asks with the VM's own memory and whether it takes a macOS
+// slot; tart clone runs nothing and is not asked about (#29).
+func TestShimGateTartVMs(t *testing.T) {
+	r := newShimRig(t)
+	tartHome := filepath.Join(r.dir, "tarthome")
+	if err := os.MkdirAll(filepath.Join(tartHome, "vms", "mac-ci"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tartHome, "vms", "mac-ci", "config.json"), []byte(`{"os":"darwin","memorySize":17179869184}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.env = append(r.env, "TART_HOME="+tartHome)
+	r.ask = allow
+	r.run("tart", "run", "--no-graphics", "mac-ci")
+	if len(r.asked) != 1 || !r.asked[0].MacOS || r.asked[0].CostBytes != 16<<30 || r.asked[0].Kind != "tart" {
+		t.Fatalf("asked %+v", r.asked)
+	}
+	r.env = append(r.env, "HEADROOM_SHIM_DEBUG=1")
+	_, stderr := r.run("tart", "run", "not-here")
+	if len(r.asked) != 2 || !r.asked[1].MacOS || !r.asked[1].VMUnknown || r.asked[1].CostBytes != 0 || !strings.Contains(stderr, "no config for the VM in `tart run not-here`") {
+		t.Fatalf("unknown VM asked %+v, stderr %q", r.asked[1], stderr)
+	}
+	if r.asked[0].PID != os.Getpid() {
+		t.Fatalf("a tart run must name its process, which becomes tart's: %+v", r.asked[0])
+	}
+	if code, _ := r.run("tart", "clone", "mac-ci", "mac-ci-2"); code != 0 || len(r.asked) != 2 || r.execed == "" {
+		t.Fatalf("clone: exit %d, asked %d", code, len(r.asked))
+	}
+}
+
+// fakeTart is a Tart source whose running VMs a test can change.
+type fakeTart struct {
+	mu  sync.Mutex
+	vms []protocol.TartVM
+}
+
+func (f *fakeTart) Name() string { return "tart" }
+func (f *fakeTart) Collect(context.Context) (daemon.Reading, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := protocol.Tart{Installed: true, VMs: slices.Clone(f.vms)}
+	for _, vm := range t.VMs {
+		if vm.OS == "darwin" {
+			t.MacOSRunning++
+		}
+	}
+	return tartReading{t}, nil
+}
+
+type tartReading struct{ t protocol.Tart }
+
+func (r tartReading) Apply(s *protocol.Snapshot) { s.Tart = &r.t }
+
+// End to end: a third macOS VM is denied naming both holders; waiting, it
+// starts once one of them stops (R6).
+func TestShimGateMacOSSlotsAgainstTheDaemon(t *testing.T) {
+	tart := &fakeTart{vms: []protocol.TartVM{{Name: "a-mac", OS: "darwin"}, {Name: "b-mac", OS: "darwin"}}}
+	envMap, d := serveDaemonFrom(t, []daemon.Source{hostSource{}, tart}, func(d *daemon.Daemon) {
+		wireGate(d, config.Defaults("/x"), discardLog())
+	})
+	r := newShimRig(t)
+	tartHome := filepath.Join(r.dir, "tarthome")
+	if err := os.MkdirAll(filepath.Join(tartHome, "vms", "c-mac"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tartHome, "vms", "c-mac", "config.json"), []byte(`{"os":"darwin","memorySize":8589934592}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w", "TART_HOME=" + tartHome}
+	var stderr strings.Builder
+	execed := false
+	shimEnv := Env{Args: []string{"tart", "run", "c-mac"}, Stdout: io.Discard, Stderr: &stderr,
+		Getenv: func(string) string { return "" }, Environ: func() []string { return env },
+		exec: func(string, []string, []string) error { execed = true; return nil }}
+	if code := Run(shimEnv); code != exitDenied || execed || !strings.Contains(stderr.String(), "a-mac (manual)") ||
+		!strings.Contains(stderr.String(), "b-mac (manual)") {
+		t.Fatalf("exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	env = append(env, "BUDGET_WAIT=1")
+	shimEnv.wait = func(dur time.Duration) os.Signal {
+		if dur == 0 {
+			return nil // no signal pending
+		}
+		tart.mu.Lock()
+		tart.vms = tart.vms[1:] // a-mac stops
+		tart.mu.Unlock()
+		d.Tick(context.Background())
+		return nil
+	}
+	if code := Run(shimEnv); code != 0 || !execed {
+		t.Fatalf("waiting: exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+}
+
+func TestDenyHintFitsTheReason(t *testing.T) {
+	for _, c := range []struct {
+		d    protocol.Decision
+		want string
+	}{
+		{protocol.Decision{Retry: true, Reasons: []protocol.Reason{{Code: policy.Headroom, Retry: true}}}, "BUDGET_WAIT=1 to wait for room"},
+		{protocol.Decision{Retry: true, Reasons: []protocol.Reason{{Code: policy.VMSlots, Retry: true}}}, "BUDGET_WAIT=1 to wait for a slot"},
+		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.VMSlots}}}, "budget.max_macos_vms"},
+		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.WorktreeCap}}}, "reuse or stop"},
+		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.IdleHolder}}}, "reuse or stop"},
+		// Full slots can wait; the cap that also fails cannot.
+		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.VMSlots, Retry: true}, {Code: policy.WorktreeCap}}}, "reuse or stop"},
+	} {
+		if got := denyHint(&c.d); !strings.Contains(got, c.want) {
+			t.Errorf("%+v: hint %q, want %q", c.d.Reasons, got, c.want)
+		}
 	}
 }

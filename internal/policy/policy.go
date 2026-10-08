@@ -6,6 +6,8 @@ package policy
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ const (
 	IdleHolder  = "idle_holder"
 	WorktreeCap = "worktree_cap"
 	Headroom    = "headroom"
+	VMSlots     = "vm_slots"
 )
 
 // Config is the policy's settings, in bytes.
@@ -42,6 +45,9 @@ type Config struct {
 	IdleGrace time.Duration
 	// Now is the clock for IdleGrace.
 	Now func() time.Time
+	// MaxMacOSVMs is how many macOS VMs may run at once (R6); Apple's
+	// licence allows two.
+	MaxMacOSVMs int
 }
 
 // Request describes one resource-creating call.
@@ -60,6 +66,15 @@ type Request struct {
 	// WorktreeLeasedBytes is the part of LeasedBytes promised to this
 	// worktree's own calls: it counts toward its cap.
 	WorktreeLeasedBytes uint64
+	// MacOS is set for a tart run of a macOS VM, which takes a slot (R6).
+	MacOS bool
+	// VMUnknown means the VM's config was not found, so MacOS is assumed.
+	VMUnknown bool
+	// PendingMacOS counts macOS VMs allowed but not yet running (#29).
+	PendingMacOS int
+	// PID is the calling process for a tart run, which becomes tart: the
+	// lease ends if it exits before its VM appears (#29).
+	PID int
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -102,6 +117,10 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	}
 	use, held := worktreeUse(s, r.Worktree)
 	d.Holding = held
+	// Count first, memory second (R6).
+	if reason, ok := slots(r, s, c); ok {
+		d.Reasons = append(d.Reasons, reason)
+	}
 	// The pressure guard and the idle-holder rule need no budget.
 	if reason, ok := pressure(s.Host, c); ok {
 		d.Reasons = append(d.Reasons, reason)
@@ -141,6 +160,147 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	}
 	d.Message = message(r, s, d)
 	return d
+}
+
+// slots is the macOS VM slot rule: running plus starting macOS VMs must
+// stay below the slot count for one more to start. Without a fresh Tart reading the count is unknown, and
+// the call is decided on memory alone (R7).
+func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
+	if !r.MacOS || s.Tart == nil || s.Sources["tart"].Stale {
+		return Reason{}, false
+	}
+	inUse := s.Tart.MacOSRunning + r.PendingMacOS
+	if inUse < c.MaxMacOSVMs {
+		return Reason{}, false
+	}
+	if c.MaxMacOSVMs <= 0 {
+		return Reason{Code: VMSlots, Text: "this Mac allows no macOS VMs (budget.max_macos_vms = 0)"}, true
+	}
+	text := fmt.Sprintf("the macOS VM slots are full (%d of %d in use", inUse, c.MaxMacOSVMs)
+	if r.PendingMacOS > 0 {
+		text += fmt.Sprintf(", %d starting", r.PendingMacOS)
+	}
+	text += ")"
+	if r.VMUnknown {
+		text = "its VM's config was not found, so it counts as macOS, and " + text
+	}
+	holders, idle := slotHolders(s, c)
+	if len(holders) > 0 {
+		text += ": " + strings.Join(holders, ", ")
+	}
+	if idle != "" {
+		text += fmt.Sprintf(". Nobody is using %s: stop it with `tart stop %s`, or wait for a slot", idle, idle)
+	}
+	return Reason{Code: VMSlots, Retry: true, Text: text}, true
+}
+
+// slotHolders describes the running macOS VMs, those whose worktree's
+// agents are idle first (longest idle first), then manual ones, then those
+// in use; stop is the first one safe to suggest stopping.
+func slotHolders(s *protocol.Snapshot, c Config) (holders []string, stop string) {
+	owner := map[string]protocol.WorktreeUsage{}
+	if s.Attribution != nil {
+		for _, w := range s.Attribution.Worktrees {
+			for _, vm := range w.TartVMs {
+				owner[vm.Name] = w
+			}
+		}
+	}
+	type holder struct {
+		text  string
+		rank  int           // 0 idle, 1 manual, 2 in use
+		idle  time.Duration // for idle ones
+		name  string
+		offer bool // safe to suggest stopping: idle past the grace, plain name
+	}
+	var hs []holder
+	for _, vm := range s.Tart.VMs {
+		if vm.OS != "darwin" && vm.OS != "" { // "": unknown, counted as macOS
+			continue
+		}
+		shown := vmName(vm.Name)
+		w, ok := owner[vm.Name]
+		if !ok {
+			hs = append(hs, holder{text: shown + " (manual)", rank: 1, name: vm.Name})
+			continue
+		}
+		state, since, working := agentState(s, w.ID, c)
+		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, w.Name, state)}
+		if !working {
+			h.rank, h.idle = 0, since
+			// Offered for stopping only when the idle-holder rule calls
+			// it idle and how long is known, and only under a plain name
+			// that cannot read as a flag.
+			h.offer = idle(s, w.ID, c) && (since > 0 || state == "no agents") &&
+				shown == vm.Name && !strings.HasPrefix(vm.Name, "-")
+		}
+		hs = append(hs, h)
+	}
+	slices.SortStableFunc(hs, func(a, b holder) int {
+		if a.rank != b.rank {
+			return a.rank - b.rank
+		}
+		return int(b.idle - a.idle)
+	})
+	for _, h := range hs {
+		holders = append(holders, h.text)
+		if h.offer && stop == "" {
+			stop = h.name
+		}
+	}
+	return holders, stop
+}
+
+// vmName shows a VM name: as is if plain (letters, digits, . _ -), else
+// quoted, so a name with spaces, control or shell characters is neither
+// misread nor offered as a command.
+func vmName(n string) string {
+	for _, r := range n {
+		plain := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-'
+		if !plain {
+			return strconv.Quote(n)
+		}
+	}
+	return n
+}
+
+// agentState describes a worktree's agents for a slot holder: whether one
+// is working, else the latest one's state and how long it has been in it.
+func agentState(s *protocol.Snapshot, id string, c Config) (text string, idle time.Duration, working bool) {
+	if s.Orca == nil {
+		return "agents unknown", 0, true // unknown is never called idle
+	}
+	for _, w := range s.Orca.Worktrees {
+		if w.ID != id {
+			continue
+		}
+		if len(w.Agents) == 0 {
+			return "no agents", 0, false
+		}
+		latest := w.Agents[0]
+		for _, a := range w.Agents {
+			if a.State == "working" {
+				return "an agent working", 0, true
+			}
+			if a.StateSince.After(latest.StateSince) {
+				latest = a
+			}
+		}
+		if c.Now == nil || latest.StateSince.IsZero() {
+			return "agents " + latest.State, 0, false
+		}
+		idle = c.Now().Sub(latest.StateSince)
+		return fmt.Sprintf("agents %s for %s", latest.State, shortDuration(idle)), idle, false
+	}
+	return "agents unknown", 0, true
+}
+
+// shortDuration is d to the minute: "14m", "1h0m".
+func shortDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "under a minute"
+	}
+	return strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
 }
 
 // guardLevels orders pressure levels for the guard.

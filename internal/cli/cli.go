@@ -421,7 +421,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 		book.Observe(s)
 		s.Leases = book.List()
 	})
-	d.SetCheck(gateCheck(book, cfg.Policy.Config()))
+	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
 	d.SetRelease(book.Release)
 }
 
@@ -430,7 +430,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
+		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

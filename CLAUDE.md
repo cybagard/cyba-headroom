@@ -41,6 +41,6 @@ The default for every issue. Each step ends when its condition holds.
    - `make test` and `make lint` are green.
    - `make test-host` is green. Run `make test-tart` as well when the change touches macOS-only code.
    - Smoke-test `bin/headroom` on the host when the CLI or daemon behaviour changed.
-6. **Review.** Run `/code-review` on the branch, then `/security-review`. Fix every finding that holds up, and re-run `make test lint` after the fixes.
+6. **Review.** Run three rounds, each one `/code-review` on the branch and then `/security-review`. After each round, fix every finding that holds up, re-run `make test lint`, and commit before the next round. If a finding holds up but has no obvious fix, investigate it with `mattpocock-skills:diagnosing-bugs` before deciding. For a finding that belongs in another issue or is out of scope, open a follow-up issue and link it from the PR. Done when the third round's fixes are in, or each remaining finding is fixed, explained in the PR, or tracked in an issue.
 7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and what each review found and how it was resolved. Done when CI is green.
 8. **Learn.** Record whatever the issue taught you that later issues need: a spike note, a new acceptance criterion on a later issue, or a line in this file.

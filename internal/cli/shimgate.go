@@ -12,6 +12,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
+	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/shim"
 )
@@ -80,6 +81,21 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	h := e.withDefaults()
 	req := callerRequest(getenv, h.ancestors)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
+	if c.Kind == "tart" {
+		// The VM's own memory, and whether it takes a macOS slot (R6).
+		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {
+			req.MacOS, req.CostBytes = macOS, mem
+		} else {
+			// Unknown: count it as macOS rather than let a third one by.
+			req.MacOS, req.VMUnknown = true, true
+			if getenv("HEADROOM_SHIM_DEBUG") != "" {
+				fmt.Fprintf(e.Stderr, "headroom: no config for the VM in `%s` under TART_HOME: counted as a macOS VM\n", c.Command)
+			}
+		}
+		// This process becomes tart run: when it exits before its VM
+		// appears, the daemon ends the lease (#29).
+		req.PID = os.Getpid()
+	}
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
 	for {
@@ -237,7 +253,19 @@ func reraise(sig os.Signal) {
 // denyHint tells an agent what to do about a deny.
 func denyHint(d *protocol.Decision) string {
 	if d.Retry {
+		if len(d.Reasons) > 0 && d.Reasons[0].Code == policy.VMSlots {
+			return "headroom: retry later, or run it with BUDGET_WAIT=1 to wait for a slot"
+		}
 		return "headroom: retry later, or run it with BUDGET_WAIT=1 to wait for room"
+	}
+	// Speak to the first reason waiting cannot fix.
+	for _, r := range d.Reasons {
+		if !r.Retry {
+			if r.Code == policy.VMSlots {
+				return "headroom: waiting will not help: set budget.max_macos_vms in headroom's config to allow macOS VMs"
+			}
+			break
+		}
 	}
 	return "headroom: waiting will not help: reuse or stop what this worktree holds, or ask for less memory"
 }

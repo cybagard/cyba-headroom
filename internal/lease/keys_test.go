@@ -1106,3 +1106,24 @@ func TestAnIdleUpTakingAnIdleUpOverEndsQuietly(t *testing.T) {
 		t.Fatalf("log: %s", log)
 	}
 }
+
+// A compose up waiting for its containers, then two idle ups: the second
+// still waits for what the first took over.
+func TestIdleUpsKeepWaitingForWhatTheyTookOver(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}, snap(), cfg)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	b.Observe(s)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Services: []string{"db", "web"}}
+	b.Check(up, s, cfg) // web not running: it waits for web
+	up.Services = []string{"db"}
+	b.Check(up, s, cfg) // idle
+	b.Check(up, s, cfg) // idle
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if !strings.Contains(log.String(), "never appeared") {
+		t.Fatal("web never came, and nothing said so")
+	}
+}

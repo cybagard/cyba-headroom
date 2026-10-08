@@ -117,9 +117,9 @@ type entry struct {
 	// container Compose labels as such (hasOneoff once it has), and the
 	// services it starts first (depends_on) when no up lease takes them.
 	oneoff, hasOneoff bool
-	// idle is set for a compose up of a stack whose every service ran: it
-	// reserves nothing, and binding nothing (another lease holds the
-	// stack) is no failure.
+	// idle is set for a compose up of a stack whose every service ran, and
+	// that took over only such ups' leases: it waits for nothing, so binding
+	// nothing (another lease holds the stack) is no failure.
 	idle bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
@@ -369,7 +369,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		})
 		if len(e.took) > 0 && idle {
 			// It adds nothing: what it took over ends when that would
-			// have, however often the up repeats.
+			// have, however often the up repeats. And it waits for what
+			// that waited for, which may still fail to come.
+			e.idle = !slices.ContainsFunc(e.took, func(o *entry) bool { return !o.idle })
 			for _, o := range e.took {
 				if o.Expires.Before(e.Expires) {
 					e.Expires = o.Expires
@@ -807,9 +809,7 @@ func (b *Book) expire(now time.Time) {
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
-		case e.idle && !slices.ContainsFunc(e.took, func(o *entry) bool { return !o.idle }):
-			// Unless it took over a lease that waited for something, which
-			// may still fail to come.
+		case e.idle:
 			b.log.Debug("lease of an up that started nothing ended at its timeout", "lease", e.ID, "worktree", e.Worktree)
 			return true
 		case e.Worktree == "":

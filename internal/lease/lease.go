@@ -214,15 +214,19 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// (-p, COMPOSE_PROJECT_NAME, name: in the file, the directory).
 		// Compose labels each container with it.
 		e.target, e.project = "", r.Target
-		// compose up again for the project an open lease already waits
-		// for or holds (compose stop, then up): this call's lease takes that
-		// one over, with its containers, and keeps the larger cost.
+		// compose up again for the project an open lease of this worktree
+		// already waits for or holds (compose stop, then up): this call's
+		// lease takes that one over, with its containers and its cost.
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			if o.Kind != "compose" || e.project == "" || o.project != e.project || r.Worktree == "" && o.Worktree != "" {
-				return false // a manual call reserves nothing: it takes no worktree's lease
+			if o.Kind != "compose" || e.project == "" || o.project != e.project || o.Worktree != r.Worktree {
+				// Only its own worktree's: another's keeps its lease, against
+				// its own cap (a manual call reserves nothing at all).
+				return false
 			}
+			// Both reservations stand: a compose run's new container needs
+			// its own, and a takeover must never lower what is held.
 			e.took = append(e.took, o)
-			e.cost, e.used = max(e.cost, o.cost), e.used+o.used
+			e.cost, e.used = e.cost+max(o.cost, o.used), e.used+o.used
 			for k := range o.bound {
 				e.bound[k] = true
 			}

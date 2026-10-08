@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -95,7 +95,7 @@ func (e Env) withDefaults() Env {
 // nothing, calls already checked and calls to a remote engine are not asked
 // about; nor, failing open (R7), is anything when the config or the daemon
 // cannot answer.
-func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
+func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gated {
 	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() ||
 		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
 		return gated{proceed: true}
@@ -114,7 +114,15 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	}
 	req.MultiTarget = c.MultiTarget
 	if c.Kind == "compose" {
-		req.Target = composeProject(c, getenv, h.getwd)
+		ask := h.composeAsk
+		if ask == nil {
+			env, _ := e.envOf()
+			ask = func(bin string, args []string) (string, error) { return askCompose(bin, args, env, "") }
+		}
+		if name != "docker" {
+			ask = func(string, []string) (string, error) { return "", errors.New("only docker compose is asked") }
+		}
+		req.Target = composeProject(bin, c, ask)
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -215,194 +223,57 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 	return r
 }
 
-// composeProject is a compose call's project, named as Compose names it
-// (#33): -p, else COMPOSE_PROJECT_NAME (the environment, then the
-// project's .env or the --env-files), else the last name: in its compose
-// files (with ${VAR} expanded), else the project directory's name. The
-// files are the -f ones, else COMPOSE_FILE's, else the nearest compose file
-// up from the working directory; the project directory is
-// --project-directory, else the first file's. Compose labels each
-// container with the project, so the name is the lease's key. "" when it
-// cannot be told (no working directory to resolve against).
-func composeProject(c shim.Call, getenv func(string) string, getwd func() (string, error)) string {
-	cwd, err := getwd()
-	if err != nil && !filepath.IsAbs(c.ComposeProjectDir) {
-		if c.Target != "" {
-			return normalProject(c.Target)
-		}
-		return ""
+// composeProject is a compose call's project, as Compose itself names it
+// (#33): -p, else the name docker compose config gives, run with the call's
+// own -f, --project-directory and --env-file in its own environment and
+// working directory. Compose labels each container with the project, so
+// the name is the lease's key. Asking Compose, rather than reading .env,
+// override files and name: the way it does, keeps the two from parting.
+// "" when Compose cannot say (the call will fail too): no key, failing
+// closed.
+func composeProject(bin string, c shim.Call, ask func(bin string, args []string) (string, error)) string {
+	if c.Target != "" {
+		return c.Target
 	}
-	abs := func(base, p string) string {
-		if filepath.IsAbs(p) {
-			return filepath.Clean(p)
-		}
-		return filepath.Join(base, p)
+	args := []string{"compose"}
+	for _, f := range c.ComposeFiles {
+		args = append(args, "-f", f)
 	}
-	files := slices.DeleteFunc(slices.Clone(c.ComposeFiles), func(f string) bool { return f == "-" })
-	for i, f := range files {
-		files[i] = abs(cwd, f)
+	if c.ComposeProjectDir != "" {
+		args = append(args, "--project-directory", c.ComposeProjectDir)
 	}
-	if len(files) == 0 {
-		for _, f := range filepath.SplitList(getenv("COMPOSE_FILE")) {
-			files = append(files, abs(cwd, f))
-		}
+	for _, f := range c.ComposeEnvFiles {
+		args = append(args, "--env-file", f)
 	}
-	dir := ""
-	switch {
-	case c.ComposeProjectDir != "":
-		dir = abs(cwd, c.ComposeProjectDir)
-	case len(files) > 0:
-		dir = filepath.Dir(files[0])
-	default:
-		dir = findComposeDir(cwd)
-	}
-	// The .env, or the --env-files, in order: the environment wins.
-	env := map[string]string{}
-	envFiles := []string{filepath.Join(dir, ".env")}
-	if len(c.ComposeEnvFiles) > 0 {
-		envFiles = nil
-		for _, f := range c.ComposeEnvFiles {
-			envFiles = append(envFiles, abs(cwd, f))
-		}
-	}
-	for _, f := range envFiles {
-		for k, v := range dotEnv(f) {
-			env[k] = v
-		}
-	}
-	lookup := func(k string) string {
-		if v := getenv(k); v != "" {
-			return v
-		}
-		return env[k]
-	}
-	if len(files) == 0 {
-		for _, f := range filepath.SplitList(env["COMPOSE_FILE"]) {
-			files = append(files, abs(dir, f))
-		}
-		if len(files) > 0 && c.ComposeProjectDir == "" {
-			dir = filepath.Dir(files[0])
-		}
-	}
-	if len(files) == 0 {
-		files = foundComposeFile(dir)
-	}
-	switch {
-	case c.Target != "":
-		return normalProject(c.Target)
-	case lookup("COMPOSE_PROJECT_NAME") != "":
-		return normalProject(lookup("COMPOSE_PROJECT_NAME"))
-	}
-	name := ""
-	for _, f := range files {
-		if n := fileProjectName(f, lookup); n != "" {
-			name = n // a later file overrides an earlier one
-		}
-	}
-	if name != "" {
-		return normalProject(name)
-	}
-	return normalProject(filepath.Base(dir))
-}
-
-// fileProjectName is a compose file's top-level name:, with $VAR, ${VAR}
-// and ${VAR:-default} expanded; "" when it has none.
-func fileProjectName(path string, lookup func(string) string) string {
-	b, err := os.ReadFile(path)
+	name, err := ask(bin, append(args, "config", "--format", "json"))
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		v, ok := strings.CutPrefix(line, "name:")
-		if !ok {
-			continue // only a top-level key: no indentation
-		}
-		v = strings.TrimSpace(v)
-		if i := strings.Index(v, " #"); i >= 0 {
-			v = strings.TrimSpace(v[:i])
-		}
-		v = strings.Trim(v, `"'`)
-		return os.Expand(v, func(k string) string {
-			k, def, hasDef := strings.Cut(k, ":-")
-			if val := lookup(k); val != "" || !hasDef {
-				return val
-			}
-			return def
-		})
-	}
-	return ""
+	return name
 }
 
-// normalProject is a project name as Compose normalises it: lower case,
-// only letters, digits, - and _, and no leading - or _.
-func normalProject(s string) string {
-	return strings.TrimLeft(strings.Map(func(c rune) rune {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
-			return c
-		case c >= 'A' && c <= 'Z':
-			return c + 'a' - 'A'
-		}
-		return -1
-	}, s), "_-")
-}
+// composeTimeout bounds docker compose config: it reads the compose files,
+// as the call itself is about to.
+const composeTimeout = 5 * time.Second
 
-// composeFiles are the names Compose looks for, in each directory up from
-// the working one.
-var composeFiles = []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"}
-
-// findComposeDir is the nearest directory from dir up that holds a compose
-// file, or dir.
-func findComposeDir(dir string) string {
-	for d := dir; ; d = filepath.Dir(d) {
-		if len(foundComposeFile(d)) > 0 {
-			return d
-		}
-		if filepath.Dir(d) == d {
-			return dir
-		}
-	}
-}
-
-// foundComposeFile is the compose file Compose would read in dir, if any.
-func foundComposeFile(dir string) []string {
-	for _, f := range composeFiles {
-		p := filepath.Join(dir, f)
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			return []string{p}
-		}
-	}
-	return nil
-}
-
-// dotEnv reads a .env file as Compose does: KEY=VALUE lines, an optional
-// "export ", a quoted value as is, an unquoted one up to an inline " #"
-// comment. It names the project (COMPOSE_*) and fills ${VAR} in a name:.
-// A missing file is empty.
-func dotEnv(path string) map[string]string {
-	out := map[string]string{}
-	b, err := os.ReadFile(path)
+// askCompose runs docker compose config (args) at bin in env and dir ("":
+// this process's) and returns the project's name.
+func askCompose(bin string, args, env []string, dir string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
+	out, err := cmd.Output()
 	if err != nil {
-		return out
+		return "", err
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimPrefix(strings.TrimSpace(line), "export ")
-		k, v, ok := strings.Cut(line, "=")
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if !ok || k == "" || strings.HasPrefix(k, "#") {
-			continue
-		}
-		switch {
-		case len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && strings.IndexByte(v[1:], v[0]) >= 0:
-			v = v[1 : 1+strings.IndexByte(v[1:], v[0])]
-		default:
-			if i := strings.Index(v, " #"); i >= 0 {
-				v = strings.TrimSpace(v[:i])
-			}
-		}
-		out[k] = v
+	var cfg struct {
+		Name string `json:"name"`
 	}
-	return out
+	if err := json.Unmarshal(out, &cfg); err != nil || cfg.Name == "" {
+		return "", errors.New("docker compose config: no project name")
+	}
+	return cfg.Name, nil
 }
 
 // dockerEndpointIn is the endpoint the docker CLI talks to: DOCKER_HOST,

@@ -73,6 +73,7 @@ type Env struct {
 	getwd      func() (string, error)                                                 // os.Getwd
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
+	composeAsk func(bin string, args []string) (string, error)                        // askCompose
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
@@ -327,7 +328,7 @@ func runShim(e Env, name string) int {
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
 	h := e.withDefaults()
-	g := gate(e, name, c, getenv)
+	g := gate(e, name, target, c, getenv)
 	if g.signal != nil {
 		// Die of it, as the real binary would have, so a shell loop
 		// around the call stops too.

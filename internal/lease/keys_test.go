@@ -93,7 +93,8 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b.Check(up, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // compose up -d again
-	if l := b.List(); len(l) != 1 || l[0].Bytes != gib-gib/4 {
+	// Both calls' cost stands, less what the container uses.
+	if l := b.List(); len(l) != 1 || l[0].Bytes != 2*gib-gib/4 {
 		t.Fatalf("leases = %+v, want one, holding the container", l)
 	}
 	c.t = c.t.Add(3 * time.Minute)
@@ -411,5 +412,22 @@ func TestAMultiTargetStartOfAHeldContainerEndsQuietly(t *testing.T) {
 	b.Observe(s)
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("logged: %s", log)
+	}
+}
+
+// A compose takeover never lowers what is reserved: the costs add up (a
+// compose run's new container needs its own), and it stays in one worktree
+// (another worktree's call keeps its own lease, against its own cap).
+func TestAComposeTakeoverKeepsBothReservations(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose run", CostBytes: gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 1 || l[0].Bytes != 3*gib {
+		t.Fatalf("leases = %+v, want one holding both 3 GiB", l)
+	}
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	if l := b.List(); len(l) != 2 || reserved(b) != 4*gib {
+		t.Fatalf("leases = %+v, want w2's apart", l)
 	}
 }

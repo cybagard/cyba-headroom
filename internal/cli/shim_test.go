@@ -81,7 +81,7 @@ func TestShimDebugLine(t *testing.T) {
 }
 
 func TestMemoryText(t *testing.T) {
-	for b, want := range map[uint64]string{512 << 10: "512 KB", 32 << 20: "32 MB", 3 << 29: "1.5 GB"} {
+	for b, want := range map[uint64]string{512: "512 B", 512 << 10: "512 KB", 32 << 20: "32 MB", 3000 << 10: "3 MB", 3 << 29: "1.5 GB"} {
 		if got := memoryText(b); got != want {
 			t.Errorf("memoryText(%d) = %q, want %q", b, got, want)
 		}

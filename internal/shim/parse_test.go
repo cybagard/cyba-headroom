@@ -53,6 +53,11 @@ func TestParse(t *testing.T) {
 		{"podman -r --log-level=debug run -m 16g img", Call{Kind: "container", Op: "run", Command: "podman run img", Target: "img", MemoryBytes: 16 * g}},
 		{"docker --unknown value run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker --unknown", Call{}},
+		{"podman --remote -c conn run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Endpoint: "conn"}},
+		{"docker --newbool -H unix:///x run img", Call{Kind: "container", Op: "run", Command: "docker run img", Target: "img", Endpoint: "unix:///x"}},
+		{"docker run --newflag x alpine stress -m 64g", Call{Kind: "container", Op: "run", Command: "docker run"}},
+		{"docker run --newflag x -dm2g img", Call{Kind: "container", Op: "run", Command: "docker run", MemoryBytes: 2 * g}},
+		{"docker run --newbool -m 1g img", Call{Kind: "container", Op: "run", Command: "docker run", MemoryBytes: g}},
 		{"docker -v run img", Call{}},
 		{"docker --version=true run img", Call{}},
 		{"docker run --newflag x -m 8g img", Call{Kind: "container", Op: "run", Command: "docker run", MemoryBytes: 8 * g}},
@@ -78,6 +83,11 @@ func TestParse(t *testing.T) {
 		{"docker compose scale web=5", Call{Kind: "compose", Op: "scale", Command: "docker compose scale"}},
 		{"docker compose watch", Call{Kind: "compose", Op: "watch", Command: "docker compose watch"}},
 		{"docker compose watch --no-up", Call{}},
+		{"docker compose --verbose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
+		{"docker compose up web --dry-run", Call{}},
+		{"docker compose watch web --no-up", Call{}},
+		{"docker compose up web --help", Call{}},
+		{"docker compose run web echo --dry-run", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
 		{"docker compose up -d --dry-run", Call{}},
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
@@ -127,7 +137,8 @@ func TestParseBytes(t *testing.T) {
 	for in, want := range map[string]uint64{
 		"512": 512, "512b": 512, "4k": 4 << 10, "4K": 4 << 10, "256m": 256 << 20, "256MB": 256 << 20,
 		"2g": 2 << 30, "2GiB": 2 << 30, "1.5g": 3 << 29, "1t": 1 << 40,
-		"": 0, "lots": 0, "-1g": 0, "1x": 0, "1e9": 0, "99999999999p": 0,
+		"1 g": 1 << 30, "1ib": 1,
+		"": 0, "lots": 0, "-1g": 0, "1x": 0, "1e9": 0, "99999999999p": 0, "g": 0, ".5g": 0, "1.g": 0, "1.2.3g": 0, "2bi": 0, "+1g": 0,
 	} {
 		if got := parseBytes(in); got != want {
 			t.Errorf("parseBytes(%q) = %d, want %d", in, got, want)

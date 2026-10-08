@@ -2,7 +2,6 @@ package shim
 
 import (
 	"math"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -44,33 +43,17 @@ func Parse(name string, args []string) Call {
 
 func parseEngine(name string, args []string) Call {
 	var c Call
-	for {
-		version := false
-		rest, res := scan(args, engineGlobal, func(f, v string) {
-			switch f {
-			case "--context", "-H", "--host", "-c", "--connection", "--url":
-				c.Endpoint = v
-			case "-v":
-				version = true // docker -v and podman -v print the version
-			}
-		})
-		if res == askedHelp || version || len(rest) == 0 {
-			return Call{}
+	version := false
+	args, res, _ := scanPast(args, engineGlobal, engineCommand, func(f, v string) {
+		switch f {
+		case "--context", "-H", "--host", "-c", "--connection", "--url":
+			c.Endpoint = v
+		case "-v":
+			version = true // docker -v and podman -v print the version
 		}
-		if res != unknownFlag {
-			args = rest
-			break
-		}
-		// A global flag newer than the tables: it takes a value unless a
-		// subcommand follows it. Gating too much beats letting a call by.
-		switch {
-		case len(rest) > 1 && engineCommand(rest[1]):
-			args = rest[1:]
-		case len(rest) > 2:
-			args = rest[2:]
-		default:
-			return Call{}
-		}
+	})
+	if res == askedHelp || version || len(args) == 0 {
+		return Call{}
 	}
 	words := []string{name}
 	if args[0] == "container" {
@@ -95,7 +78,8 @@ func parseEngine(name string, args []string) Call {
 		return Call{}
 	}
 	var mem string
-	pos, res := scan(args[1:], flags, func(f, v string) {
+	// Flags after the image are its command's: scan stops there.
+	pos, res, guessed := scanPast(args[1:], flags, nil, func(f, v string) {
 		if f == "-m" || f == "--memory" {
 			mem = v
 		}
@@ -104,39 +88,10 @@ func parseEngine(name string, args []string) Call {
 		return Call{}
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
-	switch {
-	case res == unknownFlag:
-		// The image is a guess from here on, but a memory limit after the
-		// unknown flag still counts.
-		if m := lastMemory(pos); m > 0 {
-			c.MemoryBytes = m
-		}
-	case len(pos) > 0:
-		c.Target = pos[0]
+	if !guessed && len(pos) > 0 {
+		c.Target = pos[0] // past a guess, it may be a flag's value
 	}
 	return c.named(append(words, c.Op))
-}
-
-// lastMemory is the last -m/--memory limit anywhere in args; 0 if none.
-func lastMemory(args []string) uint64 {
-	var mem uint64
-	for i, a := range args {
-		v := ""
-		switch {
-		case a == "-m" || a == "--memory":
-			if i+1 < len(args) {
-				v = args[i+1]
-			}
-		case strings.HasPrefix(a, "--memory="):
-			v = a[len("--memory="):]
-		case strings.HasPrefix(a, "-m") && !strings.HasPrefix(a, "--"):
-			v = strings.TrimPrefix(a[2:], "=")
-		}
-		if b := parseBytes(v); b > 0 {
-			mem = b
-		}
-	}
-	return mem
 }
 
 // engineCommand reports whether w is a docker or podman command Parse looks
@@ -152,54 +107,45 @@ func engineCommand(w string) bool {
 func parseCompose(endpoint string, words, args []string) Call {
 	var project string
 	dryRun, noUp := false, false
-	for {
-		rest, res := scan(args, composeGlobal, func(f, v string) {
-			switch f {
-			case "-p", "--project-name":
-				project = v
-			case "--dry-run":
-				dryRun = isTrue(v)
-			}
-		})
-		if res == askedHelp || len(rest) == 0 {
-			return Call{}
+	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
+		switch f {
+		case "-p", "--project-name":
+			project = v
+		case "--dry-run":
+			dryRun = isTrue(v)
 		}
-		if res != unknownFlag {
-			args = rest
-			break
-		}
-		// A flag the table lacks (another provider's, such as
-		// podman-compose's --podman-path): as for the engine, it takes a
-		// value unless a compose command follows it.
-		switch {
-		case len(rest) > 1 && composeFlags(rest[1]) != nil:
-			args = rest[1:]
-		case len(rest) > 2:
-			args = rest[2:]
-		default:
-			return Call{}
-		}
+	})
+	if res == askedHelp || len(args) == 0 {
+		return Call{}
 	}
 	op := args[0]
 	flags := composeFlags(op)
 	if flags == nil {
 		return Call{}
 	}
-	// The subcommand's own flags: -p is --publish here, not the project.
-	_, res := scan(args[1:], flags, func(f, v string) {
+	// The command's own flags: -p is --publish here, not the project.
+	seen := func(f, v string) {
 		switch f {
 		case "--dry-run":
 			dryRun = isTrue(v)
 		case "--no-up":
 			noUp = isTrue(v)
 		}
-	})
+	}
+	if op == "run" {
+		// Flags after the service are its command's.
+		_, res, _ = scanPast(args[1:], flags, nil, seen)
+	} else {
+		_, res, _ = scanAll(args[1:], flags, seen) // flags may follow services
+	}
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
+
+func isComposeCommand(w string) bool { return composeFlags(w) != nil }
 
 // composeFlags is the flag table of a compose command that starts
 // containers; nil for the others.
@@ -246,24 +192,12 @@ func parseTart(args []string) Call {
 	}
 	// swift-argument-parser takes options before, between and after the
 	// positionals.
-	var pos []string
-	for args = args[1:]; ; {
-		rest, res := scan(args, flags, nil)
-		if res == askedHelp {
-			return Call{}
-		}
-		if res == unknownFlag {
-			pos = nil // what follows may be its value
-			break
-		}
-		if res == endOfFlags {
-			pos = append(pos, rest...)
-			break
-		}
-		if len(rest) == 0 {
-			break
-		}
-		pos, args = append(pos, rest[0]), rest[1:]
+	pos, res, guessed := scanAll(args[1:], flags, nil)
+	if res == askedHelp {
+		return Call{}
+	}
+	if guessed {
+		pos = nil // a positional may be an unknown option's value
 	}
 	if len(pos) > n {
 		c.Target = pos[n]
@@ -377,27 +311,66 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 	return nil, scanned
 }
 
-// byteSize is docker's memory syntax: a number, an optional unit (b, k, m, g,
-// t or p, powers of 1024) and optional "i" and "b".
-var byteSize = regexp.MustCompile(`^(?i)(\d+(?:\.\d+)?) ?([kmgtp])?i?b?$`)
+// scanPast is scan reading on past flags missing from the table. Such a flag
+// takes a value unless the next word is a flag or, by isCommand, a command:
+// a guess, which guessed reports. Gating too much beats letting a call by.
+func scanPast(args []string, flags flagSet, isCommand func(string) bool, seen func(flag, value string)) (rest []string, res scanResult, guessed bool) {
+	for {
+		rest, res = scan(args, flags, seen)
+		if res != unknownFlag {
+			return rest, res, guessed
+		}
+		guessed = true
+		switch {
+		case len(rest) < 2:
+			return nil, scanned, true
+		case strings.HasPrefix(rest[1], "-") || (isCommand != nil && isCommand(rest[1])):
+			args = rest[1:]
+		default:
+			args = rest[2:]
+		}
+	}
+}
 
-// parseBytes reads a -m/--memory value; 0 if it is missing or invalid.
+// scanAll reads flags anywhere among the positionals, as commands that
+// intersperse them do, and returns the positionals.
+func scanAll(args []string, flags flagSet, seen func(flag, value string)) (pos []string, res scanResult, guessed bool) {
+	for {
+		rest, r, g := scanPast(args, flags, nil, seen)
+		guessed = guessed || g
+		switch {
+		case r == askedHelp:
+			return nil, r, guessed
+		case r == endOfFlags:
+			return append(pos, rest...), r, guessed
+		case len(rest) == 0:
+			return pos, scanned, guessed
+		}
+		pos, args = append(pos, rest[0]), rest[1:]
+	}
+}
+
+// parseBytes reads a -m/--memory value in docker's syntax: a number, an
+// optional unit (b, k, m, g, t or p, powers of 1024) and optional "i" and
+// "b". 0 if it is missing or invalid.
 func parseBytes(s string) uint64 {
-	m := byteSize.FindStringSubmatch(s)
-	if m == nil {
+	s = strings.TrimSuffix(strings.ToLower(s), "b")
+	s = strings.TrimSuffix(s, "i")
+	mult := 1.0
+	if n := len(s); n > 0 {
+		if i := strings.IndexByte("kmgtp", s[n-1]); i >= 0 {
+			mult, s = math.Pow(1024, float64(i+1)), strings.TrimSuffix(s[:n-1], " ")
+		}
+	}
+	// Digits with at most one inner dot: no sign, exponent or bare dot.
+	if s == "" || s[0] == '.' || s[len(s)-1] == '.' || strings.Count(s, ".") > 1 || strings.Trim(s, "0123456789.") != "" {
 		return 0
 	}
-	n, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil || n*mult >= 1<<60 {
 		return 0
 	}
-	if m[2] != "" {
-		n *= math.Pow(1024, float64(strings.Index("kmgtp", strings.ToLower(m[2]))+1))
-	}
-	if n >= 1<<60 {
-		return 0
-	}
-	return uint64(n)
+	return uint64(n * mult)
 }
 
 // flags builds a flagSet from space-separated flags that take a value and

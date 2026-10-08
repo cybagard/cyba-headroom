@@ -350,9 +350,11 @@ func memoryText(b uint64) string {
 	case b >= 1<<30:
 		return units.GB(b) + " GB"
 	case b >= 1<<20:
-		return fmt.Sprintf("%d MB", b>>20)
+		return fmt.Sprintf("%.0f MB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
 	}
-	return fmt.Sprintf("%d KB", b>>10)
+	return fmt.Sprintf("%d B", b)
 }
 
 func notYet(e Env, what string, issue int) int {

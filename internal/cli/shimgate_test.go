@@ -789,12 +789,22 @@ func TestComposeProjectListsProfilesAndReplicas(t *testing.T) {
 // A service that pulls or builds on every up replaces its containers: the
 // up keeps its estimate.
 func TestComposeProjectListsNoServicesThatPullOrBuild(t *testing.T) {
-	for _, policy := range []string{"always", "build"} {
+	for _, policy := range []string{"always", "build", "daily", "every_12h"} {
 		ask := func(string, []string) ([]byte, error) {
 			return []byte(`{"name":"x","services":{"web":{"pull_policy":"` + policy + `"},"db":{}}}`), nil
 		}
 		if _, services := composeProject("/d", shim.Call{Op: "up"}, ask); services != nil {
 			t.Errorf("pull_policy %s: services = %q, want none", policy, services)
 		}
+	}
+}
+
+// A service that pulls only when its image is missing starts nothing new.
+func TestComposeProjectListsServicesThatPullWhenMissing(t *testing.T) {
+	ask := func(string, []string) ([]byte, error) {
+		return []byte(`{"name":"x","services":{"web":{"pull_policy":"missing"}}}`), nil
+	}
+	if _, services := composeProject("/d", shim.Call{Op: "up"}, ask); len(services) != 1 {
+		t.Fatalf("services = %q", services)
 	}
 }

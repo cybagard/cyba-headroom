@@ -1015,3 +1015,23 @@ func TestAStartIsNotChargedForTheCreateItTakesOver(t *testing.T) {
 		t.Fatalf("start: %+v", d)
 	}
 }
+
+// docker create -m 8g x, then docker start x: the start's lease holds the
+// create's 8 GiB, so that is what its check weighs.
+func TestAStartIsCheckedAtTheCostItTakesOver(t *testing.T) {
+	b, _, _ := book(t)
+	c := cfg
+	c.PerWorktreeCapBytes = 9 * gib
+	b.Observe(snap())
+	cr := labelled("w1", "x")
+	cr.Command, cr.CostBytes = "docker create x", 8*gib
+	created := b.Check(cr, snap(), c)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", Target: "x", ContainerID: "X",
+		TakesOver: created.LeaseID}, snap(), c)
+	if !d.Allow || d.CostBytes != 8*gib {
+		t.Fatalf("decision %+v, want allowed at the create's 8 GiB", d)
+	}
+	if reserved(b) != 8*gib {
+		t.Fatalf("reserved %d GiB, want the create's 8, once", reserved(b)>>30)
+	}
+}

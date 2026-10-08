@@ -265,6 +265,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			r.PendingMacOS++ // once bound, its VM counts as running
 		}
 	}
+	est := cmp.Or(r.CostBytes, c.DefaultContainerBytes) // one container's, or the stack's
 	n := len(starts) + unresolved
 	if n > 1 {
 		// docker start a b c: each costs what one would.
@@ -305,6 +306,25 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// Decided at a byte (0 means the default): the reading may be
 		// seconds old, so the pressure guard still holds.
 		r.CostBytes = 1
+	}
+	// What this call's lease takes over is part of what it will hold (see
+	// the takeovers below): the check sees that, not the estimate alone.
+	var reservedTaken, surplus uint64
+	composeTook := false
+	for _, o := range b.open {
+		switch {
+		case composeTakes(r, o):
+			reservedTaken, composeTook = reservedTaken+o.reserved(), true
+		case startTakes(r, starts, o):
+			surplus += max(est, o.cost) - est // that container's cost: the larger
+		}
+	}
+	if composeTook {
+		r.CostBytes = max(cmp.Or(r.CostBytes, c.DefaultContainerBytes), reservedTaken)
+	}
+	if surplus > 0 {
+		r.CostBytes = cmp.Or(r.CostBytes, c.DefaultContainerBytes)
+		r.CostBytes += min(surplus, math.MaxUint64-r.CostBytes)
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -353,10 +373,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		})
 		if len(e.took) > 0 {
 			// The same stack again: it holds the larger of this call's
-			// estimate and what the old leases still reserved, on top of
-			// what their containers use, never below what was held and
-			// bounded however often it repeats, with a fresh timeout: this
-			// call was admitted, and its containers may be a pull away.
+			// estimate and what the old leases still reserved (as
+			// decided), on top of what their containers use, never below
+			// what was held and bounded however often it repeats, with a
+			// fresh timeout: this call was admitted, and its containers
+			// may be a pull away.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
 		// compose up -d of a stack that already runs, once its lease
@@ -377,21 +398,19 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// open lease holds it (docker start a b: the lease is for b).
 		e.target = ""
 	}
-	per := d.CostBytes / uint64(max(1, n))
 	for _, t := range starts {
 		if t.TakesOver == "" {
 			continue
 		}
 		// A start of a container a run or create made that has not run
-		// yet: that lease ends here, and this one keeps the larger cost
-		// for that container.
+		// yet: that lease ends here, and this one holds the larger cost
+		// for that container (decided above).
 		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
 			*list = slices.DeleteFunc(*list, func(o *entry) bool {
 				if o.ID != t.TakesOver || !takesCreate(r, o) {
 					return false
 				}
 				if list == &b.open {
-					e.cost += max(per, o.cost) - per
 					e.took = append(e.took, o)
 				} else {
 					e.tookLapsed = append(e.tookLapsed, o)

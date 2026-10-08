@@ -293,8 +293,12 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 		if replicas > maxReplicas {
 			return name, nil // too many to list: the up keeps its estimate
 		}
-		if p := cfg.Services[sv].PullPolicy; p == "always" || p == "build" {
-			return name, nil // a pull or build on every up replaces its containers
+		switch cfg.Services[sv].PullPolicy {
+		case "", "missing", "if_not_present", "never":
+		default:
+			// always, build, daily, every_12h: a pull or build may replace
+			// its containers.
+			return name, nil
 		}
 		for range replicas {
 			services = append(services, sv)

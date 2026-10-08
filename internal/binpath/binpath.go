@@ -9,36 +9,50 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
-// Find returns configured if set, else name on PATH, else the first
-// executable fallback. A fallback starting with "~/" is under HOME; only
-// absolute results are used. Empty means not installed.
+// Find returns configured if set, else the first usable name on PATH or in
+// fallbacks (see Search). Empty means not installed.
 func Find(configured, name string, getenv func(string) string, fallbacks ...string) string {
 	if configured != "" {
 		return configured
 	}
+	return Search(name, getenv, fallbacks, nil)
+}
+
+// Search returns the first file called name on PATH, then in fallbacks, that
+// this user can execute and skip (if set) does not reject. Empty and relative
+// PATH entries are not searched: they name the current directory, where a
+// repository could plant a fake binary. A fallback starting with "~/" is
+// under HOME; only absolute paths are used. Empty means none.
+func Search(name string, getenv func(string) string, fallbacks []string, skip func(path string, fi os.FileInfo) bool) string {
+	var candidates []string
 	for _, dir := range filepath.SplitList(getenv("PATH")) {
-		if p := filepath.Join(dir, name); executable(p) {
-			return p
-		}
+		candidates = append(candidates, filepath.Join(dir, name))
 	}
 	home := getenv("HOME")
 	for _, p := range fallbacks {
 		if rest, ok := strings.CutPrefix(p, "~/"); ok {
 			p = filepath.Join(home, rest)
 		}
-		// A relative HOME would resolve against the daemon's cwd.
-		if filepath.IsAbs(p) && executable(p) {
+		candidates = append(candidates, p)
+	}
+	for _, p := range candidates {
+		// A relative HOME or PATH entry would resolve against the cwd.
+		if !filepath.IsAbs(p) {
+			continue
+		}
+		fi, err := os.Stat(p) // follows symlinks
+		if err != nil || !fi.Mode().IsRegular() || unix.Access(p, unix.X_OK) != nil {
+			continue // missing, or not executable by this user, as the shell checks
+		}
+		if skip == nil || !skip(p, fi) {
 			return p
 		}
 	}
 	return ""
-}
-
-func executable(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0
 }
 
 // Exec runs the binary at Path.

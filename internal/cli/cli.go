@@ -6,12 +6,15 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +31,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/samples"
+	"github.com/cybagard/cyba-headroom/internal/shim"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
@@ -55,10 +59,16 @@ type Env struct {
 	// means: ask the OS about Stdout.
 	Terminal func() (tty bool, width int)
 
-	// Test hooks for --watch; zero values mean the real behaviour.
-	watchEvery time.Duration  // poll interval (1s)
-	suspend    chan os.Signal // delivers Ctrl-Z (SIGTSTP)
-	stopSelf   func()         // stops the process (SIGSTOP)
+	// Environ is the process environment, passed on to the real binary by
+	// the shim. Nil means os.Environ.
+	Environ func() []string
+
+	// Test hooks; zero values mean the real behaviour.
+	exec       func(path string, argv, env []string) error // syscall.Exec
+	fallbacks  map[string][]string                         // shim.Fallbacks
+	watchEvery time.Duration                               // poll interval (1s)
+	suspend    chan os.Signal                              // delivers Ctrl-Z (SIGTSTP)
+	stopSelf   func()                                      // stops the process (SIGSTOP)
 }
 
 // signalContext is e.Context (or Background) that also ends on sigs.
@@ -256,10 +266,74 @@ func runStatus(e Env) int {
 	return 0
 }
 
-// runShim is the gate shim placeholder; the real passthrough lands in #26.
+// shimSelvesVar lists the headroom binaries a shim call has passed through,
+// so a later shim on the way (another headroom build's shim dir also on PATH)
+// skips them all rather than exec back into one.
+const shimSelvesVar = "HEADROOM_SHIM_SELVES"
+
+// runShim replaces this process with the real docker, podman or tart (R5,
+// #26). It passes every call through for now: #27 and #28 add the gate.
 func runShim(e Env, name string) int {
-	fmt.Fprintf(e.Stderr, "headroom: %s shim is not implemented yet (#26); remove the shim dir from PATH\n", name)
-	return 127
+	environ := e.Environ
+	if environ == nil {
+		environ = os.Environ
+	}
+	env := environ()
+	// One source for the shim's view of the environment and the child's.
+	getenv := func(k string) string {
+		for i := len(env) - 1; i >= 0; i-- {
+			if v, ok := strings.CutPrefix(env[i], k+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	self, err := os.Executable()
+	if err == nil {
+		_, err = os.Stat(self)
+	}
+	if err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: %s: headroom's own binary is gone (%v); was it upgraded? Run `headroom install` again\n", name, err)
+		return 126
+	}
+	selves := []string{self}
+	for _, s := range filepath.SplitList(getenv(shimSelvesVar)) {
+		if s != "" && s != self {
+			selves = append(selves, s)
+		}
+	}
+	fallbacks := e.fallbacks
+	if fallbacks == nil {
+		fallbacks = shim.Fallbacks
+	}
+	target, err := shim.Resolve(name, selves, getenv, fallbacks[name])
+	if err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
+		return 127 // as the shell says for a missing command
+	}
+	if getenv("HEADROOM_SHIM_DEBUG") != "" {
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, target, shim.Engine(name, target))
+	}
+	// Replace, not add: Go's and libc's getenv read the first of duplicates.
+	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, shimSelvesVar+"=") })
+	env = append(env, shimSelvesVar+"="+strings.Join(selves, string(filepath.ListSeparator)))
+	// argv[0] is the bare name, as the shell passes a command found on PATH:
+	// the shim's own path would point the real binary back at the shim dir.
+	argv := append([]string{name}, e.Args[1:]...)
+	exec := e.exec
+	if exec == nil {
+		exec = syscall.Exec
+	}
+	// On success this never returns: the real binary takes over the
+	// process, with its PID, terminal, signals and exit code.
+	if err := exec(target, argv, env); err != nil {
+		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", target, err)
+		if errors.Is(err, syscall.ENOENT) {
+			return 127 // gone since it was found (an upgrade): not found
+		}
+		return 126 // found but not runnable
+	}
+	return 0
 }
 
 func notYet(e Env, what string, issue int) int {

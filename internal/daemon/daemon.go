@@ -194,12 +194,14 @@ func (d *Daemon) Tick(ctx context.Context) {
 		}
 		next.Sources[s.src.Name()] = s.status
 	}
+	// Stamped before derive: what derive keeps (the lease book's copy)
+	// must know its age (#30).
+	next.CollectedAt = d.now()
 	if d.derive != nil {
 		next = d.safeDerive(next)
 	}
 	d.seq++
 	next.Seq = d.seq
-	next.CollectedAt = d.now()
 	d.snap.Store(next)
 	if d.publish != nil {
 		d.publish(next)

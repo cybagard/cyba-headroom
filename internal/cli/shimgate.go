@@ -188,11 +188,15 @@ func notGated(e Env, cause, command string) {
 func daemonCause(err error, timeout time.Duration) string {
 	var ne net.Error
 	switch {
-	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion):
+	case errors.Is(err, client.ErrVersion), errors.Is(err, errCannotCheck) && oldDaemon(err):
 		return "is another version: restart it with this build: headroom install"
+	case errors.Is(err, errCannotCheck):
+		// "the daemon cannot check calls (<its error>)": show its error.
+		m := strings.TrimPrefix(oneLine(err), errCannotCheck.Error()+" ")
+		return "error: " + strings.TrimSuffix(strings.TrimPrefix(m, "("), ")")
 	case errors.Is(err, client.ErrBadReply):
 		return "gave a bad reply"
-	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+	case errors.As(err, &ne) && ne.Timeout(): // deadlines of conn and context alike
 		return fmt.Sprintf("gave no answer in %s", timeout)
 	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
 		return "socket not accessible"
@@ -200,6 +204,13 @@ func daemonCause(err error, timeout time.Duration) string {
 		return "not running"
 	}
 	return "unreachable: " + oneLine(err)
+}
+
+// oldDaemon reports whether the daemon refused the check as an op it does
+// not know: an older build.
+func oldDaemon(err error) bool {
+	m := err.Error()
+	return strings.Contains(m, "unknown op") || strings.Contains(m, "not supported") || strings.Contains(m, "no decision")
 }
 
 // oneLine is err's text on one line.

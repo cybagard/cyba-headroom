@@ -245,8 +245,9 @@ func TestPolicyConfigSnapshotAge(t *testing.T) {
 	if got := c.PolicyConfig().MaxSnapshotAge; got != 30*time.Second {
 		t.Fatalf("5s interval: max snapshot age %v, want the 30s floor", got)
 	}
+	// Three ticks, each up to an interval plus the source timeout.
 	c.Daemon.Interval = Duration{time.Minute}
-	if got := c.PolicyConfig().MaxSnapshotAge; got != 3*time.Minute {
-		t.Fatalf("1m interval: max snapshot age %v, want 3 intervals", got)
+	if got := c.PolicyConfig().MaxSnapshotAge; got != 3*(time.Minute+3*time.Second) {
+		t.Fatalf("1m interval: max snapshot age %v", got)
 	}
 }

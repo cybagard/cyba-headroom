@@ -309,3 +309,15 @@ func TestDerivePanicPublishesNoHalfDerivedSections(t *testing.T) {
 		t.Fatalf("published %+v", s)
 	}
 }
+
+// derive sees when its snapshot was collected: the lease book keeps a copy
+// and checks decide on it, so its age must be known (#30).
+func TestDeriveSeesTheCollectionTime(t *testing.T) {
+	d := newDaemon(t, time.Second)
+	var seen time.Time
+	d.SetDerive(func(s *protocol.Snapshot) { seen = s.CollectedAt })
+	d.Tick(context.Background())
+	if seen.IsZero() || !seen.Equal(d.Snapshot().CollectedAt) {
+		t.Fatalf("derive saw %v, published %v", seen, d.Snapshot().CollectedAt)
+	}
+}

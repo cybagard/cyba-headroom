@@ -122,12 +122,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		return d
 	}
 	if age, ok := snapshotAge(s, c); ok && age > c.MaxSnapshotAge {
-		// Fail open (R7): decide on nothing rather than on old readings.
-		d.Allow = true
-		d.Reasons = []Reason{{Code: StaleSnapshot, Text: fmt.Sprintf(
-			"the daemon's readings are %s old (its collector has stalled), so headroom cannot gate this call", shortDuration(age))}}
-		d.Message = message(r, s, d)
-		return d
+		return decideUnknown(r, d, age, c)
 	}
 	use, held := worktreeUse(s, r.Worktree)
 	d.Holding = held
@@ -173,6 +168,34 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Retry = d.Retry && reason.Retry
 	}
 	d.Message = message(r, s, d)
+	return d
+}
+
+// decideUnknown decides when the snapshot is too old to trust (the
+// collector has stalled): on what is still known, never blocking on what
+// is not (R7). Known are the slot count from the config, the macOS VMs
+// still starting, and the worktree's own leases against its cap.
+func decideUnknown(r Request, d Decision, age time.Duration, c Config) Decision {
+	if r.MacOS && (c.MaxMacOSVMs <= 0 || r.PendingMacOS >= c.MaxMacOSVMs) {
+		text := "this Mac allows no macOS VMs (budget.max_macos_vms = 0)"
+		if c.MaxMacOSVMs > 0 {
+			text = fmt.Sprintf("the macOS VM slots are promised to %d VMs still starting", r.PendingMacOS)
+		}
+		d.Reasons = append(d.Reasons, Reason{Code: VMSlots, Retry: c.MaxMacOSVMs > 0, Text: text})
+	}
+	if c.PerWorktreeCapBytes > 0 && r.WorktreeLeasedBytes+d.CostBytes > c.PerWorktreeCapBytes {
+		d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap, Text: fmt.Sprintf(
+			"this worktree's calls still starting already hold %s GB of its %s GB cap", units.GB(r.WorktreeLeasedBytes), units.GB(c.PerWorktreeCapBytes))})
+	}
+	unknown := fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
+	if len(d.Reasons) > 0 {
+		d.Retry = d.Reasons[0].Retry
+		d.Message = fmt.Sprintf("headroom: not starting `%s` (≈ %s GB): %s; %s", r.Command, units.GB(d.CostBytes), d.Reasons[0].Text, unknown)
+		return d
+	}
+	d.Allow = true
+	d.Reasons = []Reason{{Code: StaleSnapshot, Text: unknown + ", so headroom cannot gate this call"}}
+	d.Message = fmt.Sprintf("headroom: allowed `%s` (≈ %s GB): %s", r.Command, units.GB(d.CostBytes), d.Reasons[0].Text)
 	return d
 }
 

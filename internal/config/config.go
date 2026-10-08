@@ -121,8 +121,10 @@ type Policy struct {
 func (c Config) PolicyConfig() policy.Config {
 	p := c.Policy.config()
 	p.MaxMacOSVMs = c.Budget.MaxMacOSVMs
-	// Three missed ticks mean the collector has stalled (#30).
-	p.MaxSnapshotAge = max(3*c.Daemon.Interval.Duration, 30*time.Second)
+	// Three ticks missed, each up to an interval plus the source timeout,
+	// mean the collector has stalled (#30). Right after the Mac wakes,
+	// calls pass as unknown until the first tick, a few seconds.
+	p.MaxSnapshotAge = max(3*(c.Daemon.Interval.Duration+c.Daemon.SourceTimeout.Duration), 30*time.Second)
 	return p
 }
 

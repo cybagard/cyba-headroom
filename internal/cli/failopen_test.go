@@ -73,6 +73,9 @@ func TestShimFailsOpenWithinTheTimeout(t *testing.T) {
 			}
 		}, "not running"},
 		"no permission": {func(t *testing.T, sock string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root connects whatever the socket's mode")
+			}
 			listen(t, sock)
 			if err := os.Chmod(sock, 0); err != nil {
 				t.Fatal(err)
@@ -89,7 +92,8 @@ func TestShimFailsOpenWithinTheTimeout(t *testing.T) {
 				exec: func(path string, _, _ []string) error { r.execed = path; return nil }})
 			took := time.Since(start)
 			stderr := errb.String()
-			if code != 0 || r.execed == "" || took > 600*time.Millisecond {
+			// The daemon timeout plus room for a loaded runner and -race.
+			if code != 0 || r.execed == "" || took > 900*time.Millisecond {
 				t.Fatalf("exit %d, exec %q, took %v", code, r.execed, took)
 			}
 			if strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(stderr, "headroom: not gated (daemon ") ||

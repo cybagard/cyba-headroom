@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,3 +92,13 @@ func TestCheckAgainstADaemonWithoutCheck(t *testing.T) {
 }
 
 var _ = context.Background
+
+// headroom check gives the shim's advice for a daemon on another version.
+func TestCheckAgainstAnotherVersion(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), `{"v":99,"ok":true}`, 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "headroom install") || strings.Contains(stderr, "not reachable") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}

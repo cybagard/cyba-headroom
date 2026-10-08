@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -60,8 +61,9 @@ func runCheck(e Env) int {
 	}
 	d, err := askDaemon(cfg, req)
 	switch {
-	case errors.Is(err, errCannotCheck):
-		fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install\n", err)
+	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion):
+		// Answered, but not with a decision: the shim's advice applies.
+		fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", daemonCause(err, cfg.Policy.DaemonTimeout.Duration))
 		return 1
 	case err != nil:
 		unreachable(e, cfg.Socket, err)

@@ -90,3 +90,17 @@ func TestGateCountsMacOSSlots(t *testing.T) {
 		t.Fatalf("third macOS VM: %+v", d)
 	}
 }
+
+// Through the daemon's wiring: a snapshot the collector stopped refreshing
+// is not decided on (#30).
+func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	check := gateCheck(book, config.Defaults("/x").PolicyConfig())
+	headroom := int64(0) // would deny
+	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}, CollectedAt: time.Now().Add(-5 * time.Minute)}
+	book.Observe(s)
+	d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Command: "docker run a"}, s)
+	if !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot {
+		t.Fatalf("%+v", d)
+	}
+}

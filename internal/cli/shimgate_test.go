@@ -497,3 +497,20 @@ func TestDenyHintFitsTheReason(t *testing.T) {
 		}
 	}
 }
+
+// Only a daemon that does not know the check is called another version;
+// any other daemon error is shown as it is.
+func TestDaemonCause(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("%w (%s)", errCannotCheck, `unknown op "check"`), "headroom install"},
+		{fmt.Errorf("%w (%s)", errCannotCheck, "check: not supported by this daemon"), "headroom install"},
+		{fmt.Errorf("%w (%s)", errCannotCheck, "bad request: unexpected EOF"), "error: bad request: unexpected EOF"},
+	} {
+		if got := daemonCause(c.err, time.Second); !strings.Contains(got, c.want) {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+	}
+}

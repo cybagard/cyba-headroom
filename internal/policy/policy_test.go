@@ -287,3 +287,33 @@ func TestAnOldSnapshotIsUnknown(t *testing.T) {
 		t.Fatalf("an old snapshot: %+v", d)
 	}
 }
+
+// With an old snapshot, what is still known decides: the slot count from
+// the config and from leases starting, and the worktree's own leases
+// against its cap. And the message gives one explanation, not two.
+func TestAnOldSnapshotKeepsWhatIsKnown(t *testing.T) {
+	s := snap()
+	s.CollectedAt = now.Add(-2 * time.Minute)
+	s.Sources = map[string]protocol.SourceStatus{"docker": {Stale: true}}
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	c.MaxMacOSVMs = 2
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || strings.Contains(d.Message, "decided on stale readings") {
+		t.Fatalf("old snapshot: %+v", d)
+	}
+	mac := policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, PendingMacOS: 2}
+	if d := policy.Decide(mac, s, c); d.Allow || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("both slots promised: %+v", d)
+	}
+	c.MaxMacOSVMs = 0
+	mac.PendingMacOS = 0
+	if d := policy.Decide(mac, s, c); d.Allow || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("no macOS VMs allowed: %+v", d)
+	}
+	c.PerWorktreeCapBytes = 4 * gib
+	r := req("busy", gib)
+	r.WorktreeLeasedBytes = 4 * gib
+	if d := policy.Decide(r, s, c); d.Allow || d.Reasons[0].Code != policy.WorktreeCap {
+		t.Fatalf("its own leases fill the cap: %+v", d)
+	}
+}

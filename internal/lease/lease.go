@@ -293,9 +293,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 		}
 	}
-	if r.ContainerID != "" && !slices.ContainsFunc(starts, func(t policy.Start) bool { return t.ID == r.ContainerID }) {
-		// docker start a b with a running, or held by an open lease: the
-		// lease is for the others, so it is not keyed by a's name.
+	if r.ContainerID != "" {
+		// Resolved, a is keyed by its ID, or not at all when it runs or an
+		// open lease holds it (docker start a b: the lease is for b).
 		e.target = ""
 	}
 	per := d.CostBytes / uint64(max(1, n))
@@ -429,9 +429,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	now := b.now()
 	res := resources(s)
 	// The reading is the word on what runs, for events before it began.
-	began := readingBegan(s)
+	began, current := readingBegan(s)
 	for k, v := range b.seen {
-		if v.at.Before(began) {
+		if current && v.at.Before(began) {
 			delete(b.seen, k)
 		}
 	}
@@ -608,7 +608,22 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 // compose project's, whose first container may be a one-shot with the
 // services after it, nor a start's before each of its containers came.
 func (e *entry) over() bool {
-	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= len(e.containerIDs)
+	want := len(e.containerIDs)
+	if want > 0 && e.target != "" {
+		want++ // and the first, by its name
+	}
+	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= want
+}
+
+// boundIDs counts the containers e bound by their ID.
+func (e *entry) boundIDs() int {
+	n := 0
+	for _, id := range e.containerIDs {
+		if e.bound["container:"+id] {
+			n++
+		}
+	}
+	return n
 }
 
 // seen is what Docker's events last said of a container, and when.
@@ -618,12 +633,17 @@ type seen struct {
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
-// missing from it. Unknown: when s was stamped.
-func readingBegan(s *protocol.Snapshot) time.Time {
-	if st, ok := s.Sources["docker"]; ok && !st.At.IsZero() {
-		return st.At.Add(-st.Took)
+// missing from it. fresh is false when the reading is the last good one,
+// kept after a failed attempt: it says nothing new of any event.
+func readingBegan(s *protocol.Snapshot) (began time.Time, fresh bool) {
+	st, ok := s.Sources["docker"]
+	switch {
+	case !ok:
+		return s.CollectedAt, true // no status: a reading stamped as a whole
+	case st.Stale || st.Began.IsZero():
+		return time.Time{}, false
 	}
-	return s.CollectedAt
+	return st.Began, true
 }
 
 // ContainerEvent takes Docker's word that a container started or exited
@@ -760,7 +780,9 @@ func rank(e *entry, r resource) int {
 // e does: only r's attribution can tell them apart.
 func tied(es []*entry, r resource, e *entry) bool {
 	return slices.ContainsFunc(es, func(o *entry) bool {
-		return o != e && o.Worktree != e.Worktree && o.key(r, true) && rank(o, r) == rank(e, r)
+		// A manual call's lease reserves nothing: the worktree's wins, as
+		// in keyed.
+		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.key(r, true) && rank(o, r) == rank(e, r)
 	})
 }
 
@@ -817,7 +839,11 @@ func (e *entry) key(r resource, based bool) bool {
 		// before its one-off container.
 		return !e.oneoff || !e.hasOneoff
 	case e.Kind == "container" && len(e.containerIDs) > 0:
-		return slices.Contains(e.containerIDs, r.id) && !e.bound[r.key] // docker start a b c: each once
+		if slices.Contains(e.containerIDs, r.id) {
+			return !e.bound[r.key] // docker start a b c: each once
+		}
+		// The first, named but not resolved in time.
+		return based && e.target != "" && (e.target == r.name || e.target == r.id) && len(e.bound) == e.boundIDs()
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.name != "":

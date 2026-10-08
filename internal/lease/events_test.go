@@ -76,7 +76,7 @@ func TestAnEventBindsNothingUnchecked(t *testing.T) {
 
 // read is a snapshot whose Docker reading began at began.
 func read(s *protocol.Snapshot, began time.Time) *protocol.Snapshot {
-	s.Sources = map[string]protocol.SourceStatus{"docker": {At: began.Add(time.Second), Took: time.Second}}
+	s.Sources = map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}}
 	return s
 }
 
@@ -132,5 +132,30 @@ func TestAnEventLeavesATieToTheReading(t *testing.T) {
 		if want := map[string]uint64{"w1": 2 * gib, "w2": 2*gib - gib/2}[l.Worktree]; l.Bytes != want {
 			t.Errorf("%s holds %d MiB, want %d", l.Worktree, l.Bytes>>20, want>>20)
 		}
+	}
+}
+
+// A failed Docker read keeps the last good reading: it drops no event.
+func TestAStaleReadingDropsNoEvent(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		Others: []policy.Start{{ID: "B"}}}, snap(), cfg)
+	both := func() *protocol.Snapshot {
+		return addContainer(addContainer(snap(), protocol.Container{ID: "A", Name: "a"}, "w1"), protocol.Container{ID: "B", Name: "b"}, "w1")
+	}
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(both(), t0.Add(4*time.Second)))
+	c.t = t0.Add(7 * time.Second)
+	b.ContainerEvent("die", "A", "a", nil)
+	stale := read(both(), t0.Add(9*time.Second)) // the last good reading, kept
+	st := stale.Sources["docker"]
+	st.Stale = true
+	stale.Sources["docker"] = st
+	c.t = t0.Add(10 * time.Second)
+	b.Observe(stale)
+	b.ContainerEvent("die", "B", "b", nil)
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want none: both exited", l)
 	}
 }

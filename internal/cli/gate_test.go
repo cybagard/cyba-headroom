@@ -314,3 +314,12 @@ func TestGateLooksUpTheOthersWhenTheFirstIsUnknown(t *testing.T) {
 		t.Fatalf("leases %+v: want all four named reserved", l)
 	}
 }
+
+// podman start db db: one container, though no lookup tells.
+func TestGateCountsARepeatedTargetOnce(t *testing.T) {
+	var req policy.Request
+	lookUpStarts(&req, &protocol.CheckRequest{Target: "db", Targets: []string{"db", "db"}, Engine: "unix:///other.sock"}, nil, "/s.sock")
+	if req.Unresolved != 0 {
+		t.Fatalf("Unresolved = %d, want 0", req.Unresolved)
+	}
+}

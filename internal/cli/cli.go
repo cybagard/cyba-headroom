@@ -450,6 +450,13 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspecto
 	if len(targets) == 0 {
 		targets = []string{r.Target}
 	}
+	// docker start db db: one container. The first stays first.
+	seen := map[string]bool{}
+	targets = slices.DeleteFunc(slices.Clone(targets), func(t string) bool {
+		dup := seen[t]
+		seen[t] = true
+		return dup
+	})
 	if docker == nil || !sameSocket(r.Engine, socket) {
 		req.Unresolved = len(targets) - 1
 		return
@@ -462,8 +469,11 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspecto
 	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
 	defer cancel()
 	var wg sync.WaitGroup
+	slots := make(chan struct{}, lookUps) // docker start $(docker ps -aq): a few at a time
 	for i, t := range targets {
 		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
 			if cid, labels, running, err := docker.Inspect(ctx, t); err == nil {
 				got[i] = found{true, policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running}}
 			}
@@ -546,6 +556,9 @@ type Inspector interface {
 // inspectTimeout bounds the Docker lookup a start's check makes: well within
 // the shim's daemon timeout.
 const inspectTimeout = 200 * time.Millisecond
+
+// lookUps bounds the lookups a start of many containers makes at once.
+const lookUps = 8
 
 // gateCheckOn answers a check: it finds the calling worktree (#28), then
 // decides with the lease book. The daemon reads the Docker engine at

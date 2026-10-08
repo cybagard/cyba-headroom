@@ -527,6 +527,9 @@ type SourceStatus struct {
 	At time.Time `json:"at"`
 	// Took is how long the latest attempt ran.
 	Took time.Duration `json:"took_ns"`
+	// Began is when the last good reading's attempt began: a change after
+	// it may be missing from the reading.
+	Began time.Time `json:"began,omitzero"`
 	// Err is the latest attempt's error, if it failed.
 	Err string `json:"error,omitempty"`
 	// Stale means the latest attempt failed and the snapshot holds the last

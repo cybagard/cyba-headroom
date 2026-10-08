@@ -816,3 +816,38 @@ func TestAStartsCostDoesNotWrap(t *testing.T) {
 		t.Fatalf("allowed %+v", d)
 	}
 }
+
+// docker start a b with a not resolved in time: a still binds by its name,
+// and the lease waits for it too.
+func TestAnUnresolvedFirstTargetKeepsItsName(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a",
+		Others: []policy.Start{{ID: "B"}}}, snap(), cfg)
+	b.ContainerEvent("start", "B", "b", nil)
+	b.ContainerEvent("die", "B", "b", nil)
+	if len(b.List()) != 1 {
+		t.Fatal("the lease ended before a came")
+	}
+	b.Observe(addContainer(snap(), protocol.Container{ID: "A", Name: "a"}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A manual call's lease reserves nothing: it ties with no worktree's.
+func TestAnEventPrefersAWorktreesLeaseToAManualOne(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	up := policy.Request{Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
+	b.Check(up, snap(), cfg)
+	up.Worktree = "w1"
+	b.Check(up, snap(), cfg)
+	b.ContainerEvent("start", "job", "job", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "job", "job", map[string]string{protocol.ComposeProjectLabel: "app"})
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(snap())
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("w1's lease bound nothing: %s", log)
+	}
+}

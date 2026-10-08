@@ -46,6 +46,7 @@ The default for every issue. Each step ends when its condition holds.
    - **Verify before fixing.** Confirm each finding with a failing test, or by reading the code it names. A finding can be wrong: it may describe intended behaviour, or a bug in a test. Fix the ones that hold up, re-run `make test lint` and `make test-host`, and smoke-test again if the fix changes behaviour. Commit before the next round.
    - **Hard findings.** If a finding holds up but has no obvious fix, investigate it with `mattpocock-skills:diagnosing-bugs` before deciding. If several findings come from one design, change the design rather than adding a special case for each.
    - **Out of scope.** For a finding that belongs in another issue, open a follow-up issue and link it from the PR.
+   - **Declining a finding.** Before you decline a finding or leave it open, state its consequence: what goes wrong, when, and how often. Then decide whether it hurts someone using headroom: a wrong allow or deny, a reservation that is lost or held for no reason, or a false or missing warning that users will meet. If it does, fix it, even when the fix is large. If it does not, accept it and write that reason down. Each declined or open finding goes into the PR with its consequence and the reason.
    - **Done when:**
      - at least three rounds have run, and
      - the last round found no confirmed correctness or security finding, and
@@ -53,5 +54,5 @@ The default for every issue. Each step ends when its condition holds.
 
      Stop at five rounds and say in the PR what is still open.
    - **Late scope.** New behaviour added after the review started (a follow-up asked for in review, a redesign) restarts the count: it gets its own three rounds, covering the whole branch.
-7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and, per round, what each review found and how it was resolved, including findings declined and why. Name the commit the last round reviewed. Done when CI is green.
+7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and, per round, what each review found and how it was resolved. For each finding declined or left open, give its consequence and why it does not hurt users. Name the commit the last round reviewed. Done when CI is green.
 8. **Learn.** Record whatever the issue taught you that later issues need: a spike note, a new acceptance criterion on a later issue, or a line in this file.

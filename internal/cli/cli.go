@@ -316,11 +316,8 @@ func runShim(e Env, name string) int {
 		gate := "pass"
 		if c := shim.Parse(name, e.Args[1:]); c.Kind != "" {
 			gate = "gate: " + c.Command
-			switch {
-			case c.MemoryBytes >= 1<<30:
-				gate += ", " + units.GB(c.MemoryBytes) + " GB"
-			case c.MemoryBytes > 0:
-				gate += fmt.Sprintf(", %d MB", c.MemoryBytes>>20)
+			if c.MemoryBytes > 0 {
+				gate += ", " + memoryText(c.MemoryBytes)
 			}
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
@@ -345,6 +342,17 @@ func runShim(e Env, name string) int {
 		return 126 // found but not runnable
 	}
 	return 0
+}
+
+// memoryText shows a memory limit in the unit it was likely given in.
+func memoryText(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return units.GB(b) + " GB"
+	case b >= 1<<20:
+		return fmt.Sprintf("%d MB", b>>20)
+	}
+	return fmt.Sprintf("%d KB", b>>10)
 }
 
 func notYet(e Env, what string, issue int) int {

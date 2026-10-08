@@ -45,13 +45,16 @@ func Parse(name string, args []string) Call {
 func parseEngine(name string, args []string) Call {
 	var c Call
 	for {
+		version := false
 		rest, res := scan(args, engineGlobal, func(f, v string) {
 			switch f {
 			case "--context", "-H", "--host", "-c", "--connection", "--url":
 				c.Endpoint = v
+			case "-v":
+				version = true // docker -v and podman -v print the version
 			}
 		})
-		if res == askedHelp || len(rest) == 0 {
+		if res == askedHelp || version || len(rest) == 0 {
 			return Call{}
 		}
 		if res != unknownFlag {
@@ -101,10 +104,39 @@ func parseEngine(name string, args []string) Call {
 		return Call{}
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
-	if res != unknownFlag && len(pos) > 0 {
+	switch {
+	case res == unknownFlag:
+		// The image is a guess from here on, but a memory limit after the
+		// unknown flag still counts.
+		if m := lastMemory(pos); m > 0 {
+			c.MemoryBytes = m
+		}
+	case len(pos) > 0:
 		c.Target = pos[0]
 	}
 	return c.named(append(words, c.Op))
+}
+
+// lastMemory is the last -m/--memory limit anywhere in args; 0 if none.
+func lastMemory(args []string) uint64 {
+	var mem uint64
+	for i, a := range args {
+		v := ""
+		switch {
+		case a == "-m" || a == "--memory":
+			if i+1 < len(args) {
+				v = args[i+1]
+			}
+		case strings.HasPrefix(a, "--memory="):
+			v = a[len("--memory="):]
+		case strings.HasPrefix(a, "-m") && !strings.HasPrefix(a, "--"):
+			v = strings.TrimPrefix(a[2:], "=")
+		}
+		if b := parseBytes(v); b > 0 {
+			mem = b
+		}
+	}
+	return mem
 }
 
 // engineCommand reports whether w is a docker or podman command Parse looks
@@ -119,40 +151,82 @@ func engineCommand(w string) bool {
 
 func parseCompose(endpoint string, words, args []string) Call {
 	var project string
-	dryRun := false
-	seen := func(f, v string) {
-		switch f {
-		case "-p", "--project-name":
-			project = v
-		case "--dry-run":
-			dryRun = v != "false"
+	dryRun, noUp := false, false
+	for {
+		rest, res := scan(args, composeGlobal, func(f, v string) {
+			switch f {
+			case "-p", "--project-name":
+				project = v
+			case "--dry-run":
+				dryRun = isTrue(v)
+			}
+		})
+		if res == askedHelp || len(rest) == 0 {
+			return Call{}
+		}
+		if res != unknownFlag {
+			args = rest
+			break
+		}
+		// A flag the table lacks (another provider's, such as
+		// podman-compose's --podman-path): as for the engine, it takes a
+		// value unless a compose command follows it.
+		switch {
+		case len(rest) > 1 && composeFlags(rest[1]) != nil:
+			args = rest[1:]
+		case len(rest) > 2:
+			args = rest[2:]
+		default:
+			return Call{}
 		}
 	}
-	rest, res := scan(args, composeGlobal, seen)
-	if res != scanned || len(rest) == 0 {
+	op := args[0]
+	flags := composeFlags(op)
+	if flags == nil {
 		return Call{}
 	}
-	op := rest[0]
-	var flags flagSet
-	switch op {
-	case "up":
-		flags = composeUp
-	case "run":
-		flags = composeRun
-	case "start":
-		flags = composeStart
-	case "restart":
-		flags = composeRestart
-	case "create":
-		flags = composeCreate
-	default:
-		return Call{}
-	}
-	if _, res := scan(rest[1:], flags, seen); res == askedHelp || dryRun {
+	// The subcommand's own flags: -p is --publish here, not the project.
+	_, res := scan(args[1:], flags, func(f, v string) {
+		switch f {
+		case "--dry-run":
+			dryRun = isTrue(v)
+		case "--no-up":
+			noUp = isTrue(v)
+		}
+	})
+	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, Endpoint: endpoint}
 	return c.named(append(words, op))
+}
+
+// composeFlags is the flag table of a compose command that starts
+// containers; nil for the others.
+func composeFlags(op string) flagSet {
+	switch op {
+	case "up":
+		return composeUp
+	case "run":
+		return composeRun
+	case "start":
+		return composeStart
+	case "restart":
+		return composeRestart
+	case "create":
+		return composeCreate
+	case "scale":
+		return composeScale
+	case "watch":
+		return composeWatch // builds and starts the services first
+	}
+	return nil
+}
+
+// isTrue reads a boolean flag's value as the CLIs do (Go's ParseBool).
+func isTrue(v string) bool {
+	b, err := strconv.ParseBool(v)
+	return err == nil && b
 }
 
 func parseTart(args []string) Call {
@@ -231,8 +305,8 @@ const (
 )
 
 // scan reads the flags in args up to the first positional argument, calling
-// seen (if set) for each with its value, or "" for a boolean, and returns the
-// arguments from there on.
+// seen (if set) for each with its value ("true" for a boolean given bare),
+// and returns the arguments from there on.
 func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string, scanResult) {
 	if seen == nil {
 		seen = func(string, string) {}
@@ -244,8 +318,12 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 			return args[i+1:], endOfFlags
 		case strings.HasPrefix(a, "--"):
 			f, v, hasValue := strings.Cut(a, "=")
-			if (f == "--help" || f == "--version") && v != "false" {
-				return nil, askedHelp
+			if f == "--help" || f == "--version" {
+				// --help=false asks for nothing; a bad value fails the call.
+				if b, err := strconv.ParseBool(v); !hasValue || err != nil || b {
+					return nil, askedHelp
+				}
+				continue
 			}
 			takes, known := flags[f]
 			switch {
@@ -259,6 +337,8 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 				}
 				i++
 				v = args[i]
+			case !takes && !hasValue:
+				v = "true"
 			}
 			seen(f, v)
 		case len(a) > 1 && a[0] == '-':
@@ -273,7 +353,7 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 					return args[i:], unknownFlag
 				}
 				if !takes {
-					seen(f, "")
+					seen(f, "true")
 					continue
 				}
 				v, explicit := a[j+1:], false
@@ -380,7 +460,9 @@ var (
 	composeRestart = flags("--timeout -t", "--dry-run --no-deps")
 	composeCreate  = flags("--pull --scale",
 		"--build --dry-run --force-recreate --no-build --no-recreate --quiet-pull --remove-orphans --yes -y")
-	tartRun = flags(
+	composeScale = flags("", "--dry-run --no-deps")
+	composeWatch = flags("", "--dry-run --no-up --prune --quiet")
+	tartRun      = flags(
 		"--dir --disk --net-bridged --net-softnet-allow --net-softnet-block --net-softnet-control-fd --net-softnet-expose "+
 			"--provisioning-opts --root-disk-opts --rosetta --serial-path",
 		"--capture-system-keys --help --nested --net-host --net-softnet --no-audio --no-clipboard --no-graphics "+

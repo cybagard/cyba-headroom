@@ -80,6 +80,14 @@ func TestShimDebugLine(t *testing.T) {
 	}
 }
 
+func TestMemoryText(t *testing.T) {
+	for b, want := range map[uint64]string{512 << 10: "512 KB", 32 << 20: "32 MB", 3 << 29: "1.5 GB"} {
+		if got := memoryText(b); got != want {
+			t.Errorf("memoryText(%d) = %q, want %q", b, got, want)
+		}
+	}
+}
+
 func TestShimDebugLineNamesAGatedCall(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!real\n"), 0o755); err != nil {

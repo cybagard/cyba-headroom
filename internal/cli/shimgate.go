@@ -69,6 +69,15 @@ func (e Env) withDefaults() Env {
 	if e.getwd == nil {
 		e.getwd = os.Getwd
 	}
+	if e.fallbacks == nil {
+		e.fallbacks = shim.Fallbacks
+	}
+	if e.status == nil {
+		e.status = daemonStatus
+	}
+	if e.loginShell == nil {
+		e.loginShell = askLoginShell
+	}
 	if e.now == nil {
 		e.now = time.Now
 	}

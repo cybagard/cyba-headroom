@@ -3,9 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,12 +58,10 @@ func runDoctor(e Env) int {
 
 func doctor(e Env) []finding {
 	h := e.withDefaults()
-	if h.status == nil {
-		h.status = daemonStatus
-	}
-	if h.loginShell == nil {
-		h.loginShell = askLoginShell
-	}
+	// The login shell runs the user's whole profile: start it now, beside
+	// the other checks.
+	login := make(chan finding, 1)
+	go func() { login <- loginFinding(e.Getenv, h.loginShell) }()
 	var out []finding
 
 	cfg, err := config.Load(e.Getenv)
@@ -74,7 +70,7 @@ func doctor(e Env) []finding {
 		// The shims fail open on a bad config (R7), from the default dir.
 		dir, derr := config.Dir(e.Getenv)
 		if derr != nil {
-			return out
+			return append(out, <-login)
 		}
 		cfg = config.Defaults(dir)
 	} else {
@@ -82,15 +78,10 @@ func doctor(e Env) []finding {
 	}
 
 	out = append(out, shimsFinding(cfg.ShimDir))
-	fallbacks := h.fallbacks
-	if fallbacks == nil {
-		fallbacks = shim.Fallbacks
-	}
-	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, fallbacks))
+	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks))
 
 	snap, serr := h.status(cfg)
 	if serr != nil {
-		snap = nil
 		out = append(out, finding{mark: warn, name: "daemon",
 			detail: fmt.Sprintf("not reachable at %s (%s): calls run ungated until it is back; start it with `headroom install`", cfg.Socket, oneLine(serr))})
 	} else {
@@ -98,8 +89,7 @@ func doctor(e Env) []finding {
 	}
 
 	out = append(out, identityFinding(e.Getenv, h, snap))
-	out = append(out, loginFinding(e.Getenv, h.loginShell))
-	return out
+	return append(out, <-login)
 }
 
 // daemonStatus asks the daemon for its snapshot. A whole snapshot takes
@@ -115,19 +105,9 @@ func shimsFinding(dir string) finding {
 	var bad []string
 	target := ""
 	for _, n := range shimList() {
-		p := filepath.Join(dir, n)
-		t, err := os.Readlink(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			bad = append(bad, n+" missing")
-			continue
-		}
-		if err != nil {
-			// headroom install leaves what is not a link alone.
-			bad = append(bad, n+" is not a link: remove it")
-			continue
-		}
-		if _, err := os.Stat(p); err != nil || !isHeadroom(p, t, self) {
-			bad = append(bad, n+" → "+t+" (not a headroom binary that exists)")
+		t, problem := shimState(dir, n, self)
+		if problem != "" {
+			bad = append(bad, n+" "+problem)
 			continue
 		}
 		target = t
@@ -167,13 +147,15 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 	switch {
 	case len(wrong) > 0:
 		return finding{mark: fail, name: "PATH", detail: strings.Join(wrong, "; ") + restart, more: more}
-	case gated == 0 && !onPath(getenv("PATH"), shimDir):
+	case gated == 0 && onPath(getenv("PATH"), shimDir):
+		return finding{mark: fail, name: "PATH", detail: "no shim in " + shimDir + " works (see shims)", more: more}
+	case gated == 0:
 		return finding{mark: fail, name: "PATH", detail: "the shims in " + shimDir + " are not on this PATH" + restart, more: more}
 	}
 	// The shell, unlike headroom, also searches empty and relative entries:
 	// one ahead of the shims runs a tool from the current directory.
 	for _, d := range filepath.SplitList(getenv("PATH")) {
-		if filepath.Clean(d) == filepath.Clean(shimDir) {
+		if d != "" && sameDir(d, shimDir) {
 			break
 		}
 		if !filepath.IsAbs(d) {
@@ -183,14 +165,25 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 	return finding{mark: pass, name: "PATH", detail: strings.Join(shimList(), ", ") + " go through the shims in " + shimDir, more: more}
 }
 
-// onPath reports whether dir is an entry of path.
+// onPath reports whether dir is an entry of path, however spelled.
 func onPath(path, dir string) bool {
 	for _, d := range filepath.SplitList(path) {
-		if d != "" && filepath.Clean(d) == filepath.Clean(dir) {
+		if d != "" && sameDir(d, dir) {
 			return true
 		}
 	}
 	return false
+}
+
+// sameDir reports whether a and b name the same directory: equal paths, or
+// equal once symlinks are resolved (/tmp is /private/tmp).
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
 }
 
 // identityFinding resolves this shell's worktree as the shim would (#28).
@@ -210,22 +203,31 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 	switch {
 	case id == "" && snap == nil:
 		return finding{mark: warn, name: "identity", detail: "unknown: no worktree in the environment, and the daemon is needed to match the working directory or terminal"}
+	case id == "" && snap.Orca == nil:
+		return finding{mark: warn, name: "identity", detail: "unknown: no worktree in the environment, and the daemon has no Orca reading to match the working directory or terminal against"}
 	case id == "":
 		return finding{mark: warn, name: "identity", detail: "manual: no worktree matches this shell, so its calls are charged to no worktree. Agents launched by Orca get ORCA_WORKTREE_ID"}
 	case snap == nil || snap.Orca == nil:
 		return finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %s, from %s (not checked against Orca: no worktree list)", id, source)}
+	case !snap.Orca.Running:
+		return finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %s, from %s (not checked: Orca is not running)", id, source)}
 	}
-	name := ""
-	for _, w := range snap.Orca.Worktrees {
-		if w.ID == id {
-			name = w.Name
+	var wt *protocol.Worktree
+	for i := range snap.Orca.Worktrees {
+		if snap.Orca.Worktrees[i].ID == id {
+			wt = &snap.Orca.Worktrees[i]
 		}
 	}
-	if name == "" {
+	if wt == nil {
 		if snap.Attribution != nil && snap.Attribution.OrcaStale {
 			return finding{mark: warn, name: "identity", detail: fmt.Sprintf("worktree %s, from %s, is not in Orca's worktree list, which is out of date: it may be new", id, source)}
 		}
 		return finding{mark: warn, name: "identity", detail: fmt.Sprintf("worktree %s, from %s, is not one of Orca's worktrees: its calls are charged to an unknown worktree", id, source)}
+	}
+	// As the view names it: Orca may leave the display name empty.
+	name := wt.Name
+	if name == "" {
+		name = filepath.Base(wt.Path)
 	}
 	f := finding{mark: pass, name: "identity", detail: fmt.Sprintf("worktree %q (%s), from %s", name, id, source)}
 	if by == protocol.IdentifiedByCaller {
@@ -245,9 +247,10 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 const loginScript = `for c in docker podman tart; do printf '%s=%s\n' "$c" "$(command -v "$c")"; done`
 
 // askLoginShell runs loginScript in a login shell, which runs path_helper
-// and the user's profile, with a short timeout.
+// and the user's whole profile (oh-my-zsh, nvm and the like take seconds),
+// with a timeout.
 func askLoginShell(sh string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, sh, "-lc", loginScript)
 	// A profile can leave a background process holding stdout open: stop
@@ -268,6 +271,7 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error)) 
 	if err != nil {
 		return finding{mark: warn, name: "login", detail: fmt.Sprintf("could not run `%s -l`: %s", sh, oneLine(err))}
 	}
+	self, _ := os.Executable()
 	var ungated []string
 	found := 0
 	sc := bufio.NewScanner(strings.NewReader(out))
@@ -278,7 +282,7 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error)) 
 			continue
 		}
 		found++
-		if !shim.LeadsToHeadroom(p) {
+		if !isHeadroom(p, p, self) {
 			ungated = append(ungated, n+" → "+p)
 		}
 	}

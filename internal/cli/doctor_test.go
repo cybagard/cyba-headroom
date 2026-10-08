@@ -222,6 +222,34 @@ func TestDoctorRelativePATHEntryBeforeTheShims(t *testing.T) {
 	wantMark(t, out, "PATH", "!", `"."`, "current directory")
 }
 
+func TestDoctorShimDirByAnotherSpelling(t *testing.T) {
+	r := newDoctorRig(t)
+	link := filepath.Join(r.cfg, "shims-link")
+	if err := os.Symlink(r.shims, link); err != nil {
+		t.Fatal(err)
+	}
+	r.env["PATH"] = link + ":" + r.tools + ":."
+	code, out := r.run()
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	wantMark(t, out, "PATH", "✓")
+}
+
+func TestDoctorBrokenShimsOnPATHFail(t *testing.T) {
+	r := newDoctorRig(t)
+	if err := os.Remove(r.bin); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if err := os.Remove(filepath.Join(r.tools, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, out := r.run()
+	wantMark(t, out, "PATH", "✗", "no shim")
+}
+
 func TestDoctorMissingShims(t *testing.T) {
 	r := newDoctorRig(t)
 	if err := os.Remove(filepath.Join(r.shims, "tart")); err != nil {
@@ -319,6 +347,40 @@ func TestDoctorIdentity(t *testing.T) {
 	}
 }
 
+func TestDoctorIdentityWithoutOrcasList(t *testing.T) {
+	cases := map[string]struct {
+		edit func(*doctorRig)
+		subs []string
+	}{
+		"worktree without a display name": {func(r *doctorRig) {
+			r.snap.Orca.Worktrees[0].Name = ""
+		}, []string{`"a"`, "wt-a"}},
+		"Orca not running": {func(r *doctorRig) {
+			r.snap.Orca = &protocol.Orca{Installed: true}
+		}, []string{"wt-a", "Orca is not running"}},
+		"no Orca reading, nothing in the env": {func(r *doctorRig) {
+			delete(r.env, "HEADROOM_WORKTREE")
+			r.snap.Orca = nil
+		}, []string{"unknown", "no Orca reading"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			tc.edit(r)
+			_, out := r.run()
+			l := doctorLine(t, out, "identity")
+			for _, sub := range tc.subs {
+				if !strings.Contains(l, sub) {
+					t.Errorf("identity line %q lacks %q", l, sub)
+				}
+			}
+			if strings.Contains(l, "not one of Orca's worktrees") || strings.Contains(l, "manual") {
+				t.Errorf("identity line %q blames the worktree", l)
+			}
+		})
+	}
+}
+
 func TestDoctorUnknownIDWithAStaleOrcaList(t *testing.T) {
 	r := newDoctorRig(t)
 	r.env["HEADROOM_WORKTREE"] = "wt-new"
@@ -371,6 +433,46 @@ func TestDoctorLoginShell(t *testing.T) {
 	}
 }
 
+func TestDoctorLoginShellRunsBesideTheStatusCall(t *testing.T) {
+	r := newDoctorRig(t)
+	asked := make(chan struct{})
+	var out strings.Builder
+	Run(Env{Args: []string{"headroom", "doctor"}, Stdout: &out, Stderr: &out,
+		Getenv:    func(k string) string { return r.env[k] },
+		ancestors: func() []int { return nil },
+		getwd:     func() (string, error) { return r.cwd, nil },
+		fallbacks: map[string][]string{},
+		status: func(config.Config) (*protocol.Snapshot, error) {
+			select {
+			case <-asked:
+				return r.snap, nil
+			case <-time.After(5 * time.Second):
+				return nil, errors.New("login shell not started while the daemon was asked")
+			}
+		},
+		loginShell: func(string) (string, error) {
+			close(asked)
+			return r.login, nil
+		},
+	})
+	wantMark(t, out.String(), "daemon", "✓")
+}
+
+// A login shell that finds the running headroom under another name finds
+// the shims.
+func TestLoginFindingKnowsTheRunningBinary(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	f := loginFinding(func(string) string { return "/bin/zsh" }, func(string) (string, error) {
+		return "docker=" + self + "\n", nil
+	})
+	if f.mark != pass {
+		t.Fatalf("login = %+v, want pass", f)
+	}
+}
+
 func TestDoctorSanitisesWhatItPrints(t *testing.T) {
 	r := newDoctorRig(t)
 	r.snap.Orca.Worktrees[0].Name = "evil\x1b]52;c;cGF5bG9hZA==\x07name"
@@ -401,7 +503,7 @@ func TestAskLoginShellDoesNotHang(t *testing.T) {
 	if _, err := askLoginShell(sh); err == nil {
 		t.Fatal("want a timeout error")
 	}
-	if d := time.Since(start); d > 5*time.Second {
+	if d := time.Since(start); d > 8*time.Second {
 		t.Fatalf("took %v", d)
 	}
 }

@@ -309,11 +309,7 @@ func runShim(e Env, name string) int {
 			selves = append(selves, s)
 		}
 	}
-	fallbacks := e.fallbacks
-	if fallbacks == nil {
-		fallbacks = shim.Fallbacks
-	}
-	target, err := shim.Resolve(name, selves, getenv, fallbacks[name])
+	target, err := shim.Resolve(name, selves, getenv, e.withDefaults().fallbacks[name])
 	if err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
 		return 127 // as the shell says for a missing command

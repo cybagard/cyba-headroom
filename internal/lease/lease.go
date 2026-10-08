@@ -290,7 +290,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			reservedTaken, composeTook = reservedTaken+e.reserved(), true
 			continue
 		case startTakes(r, starts, e):
-			surplus += max(est, e.cost) - est // that container's cost: the larger
+			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // that container's cost: the larger
 			continue
 		}
 		r.LeasedBytes += e.reserved()
@@ -303,7 +303,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	for _, e := range b.lapsed {
 		if startTakes(r, starts, e) {
-			surplus += max(est, e.cost) - est // released when it lapsed: counted afresh
+			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // released when it lapsed: counted afresh
 		}
 	}
 	n := len(starts) + unresolved
@@ -367,6 +367,15 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
+		if len(e.took) > 0 && idle {
+			// It adds nothing: what it took over ends when that would
+			// have, however often the up repeats.
+			for _, o := range e.took {
+				if o.Expires.Before(e.Expires) {
+					e.Expires = o.Expires
+				}
+			}
+		}
 		if len(e.took) > 0 {
 			// The same stack again: it holds the larger of this call's
 			// estimate and what the old leases still reserved (as
@@ -798,8 +807,9 @@ func (b *Book) expire(now time.Time) {
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
-		case e.idle && len(e.took) == 0:
-			// What a lease it took over waited for may still fail to come.
+		case e.idle && !slices.ContainsFunc(e.took, func(o *entry) bool { return !o.idle }):
+			// Unless it took over a lease that waited for something, which
+			// may still fail to come.
 			b.log.Debug("lease of an up that started nothing ended at its timeout", "lease", e.ID, "worktree", e.Worktree)
 			return true
 		case e.Worktree == "":

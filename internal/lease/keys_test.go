@@ -1068,3 +1068,41 @@ func TestAnIdleRepeatUpIsWeighedAtAByte(t *testing.T) {
 		t.Fatalf("decision %+v, want allowed at a byte", d)
 	}
 }
+
+// A loop of idle ups (compose up -d every minute) does not keep the first
+// up's reservation forever: it ends when that lease would have.
+func TestIdleRepeatUpsKeepTheTakenExpiry(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true, Services: []string{"db"}}
+	b.Check(up, snap(), cfg)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	for range 3 {
+		c.t = c.t.Add(time.Minute)
+		s.CollectedAt = c.t
+		b.Observe(s)
+		b.Check(up, s, cfg)
+	}
+	if r := reserved(b); r != 0 {
+		t.Fatalf("reserved %d MiB: the first up's timeout passed", r>>20)
+	}
+}
+
+// docker start <db> binds db; two idle ups after it wait for nothing.
+func TestAnIdleUpTakingAnIdleUpOverEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}, snap(), cfg)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	b.Observe(s)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Services: []string{"db"}}
+	b.Check(up, s, cfg)
+	b.Check(up, s, cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}

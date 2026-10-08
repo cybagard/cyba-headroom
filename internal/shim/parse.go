@@ -167,6 +167,42 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 	return append(out, args[at:]...), true
 }
 
+// SetsLabel reports whether args set the label key: --label key=v,
+// --label=key=v, -l key=v, -lkey=v, or -l after run's boolean shorthands
+// (-dl key=v). The command after the image is scanned too: Labelled cannot
+// always tell where it starts, and a false match only refuses a call that
+// spells out headroom's own label.
+func SetsLabel(args []string, key string) bool {
+	names := func(v string) bool {
+		return strings.HasPrefix(v, key) && (len(v) == len(key) || v[len(key)] == '=')
+	}
+	for i, a := range args {
+		var v string
+		switch {
+		case a == "--label":
+			if i+1 < len(args) {
+				v = args[i+1]
+			}
+		case strings.HasPrefix(a, "--label="):
+			v = strings.TrimPrefix(a, "--label=")
+		case len(a) > 1 && a[0] == '-' && a[1] != '-':
+			// -l, -dl, -ldev.…: booleans, then l and its value.
+			flags := strings.TrimLeft(a[1:], "ditP")
+			if !strings.HasPrefix(flags, "l") {
+				continue
+			}
+			v = strings.TrimPrefix(flags[1:], "=")
+			if flags == "l" && i+1 < len(args) {
+				v = args[i+1]
+			}
+		}
+		if names(v) {
+			return true
+		}
+	}
+	return false
+}
+
 // DryRun returns a docker compose call's args with --dry-run added as a
 // compose option, so Compose says what the call would do and does none of
 // it. ok is false for any other call, for a compose run (its one-off

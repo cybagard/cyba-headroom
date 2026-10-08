@@ -89,7 +89,7 @@ const LeaseLabel = "dev.headroom.lease"
 // Compose made (its config hash), as the shim labels only a run or create,
 // so a service's labels cannot name another worktree's lease.
 func LeaseOf(labels map[string]string) string {
-	if labels["com.docker.compose.config-hash"] != "" {
+	if labels[ComposeConfigHashLabel] != "" {
 		return ""
 	}
 	return labels[LeaseLabel]
@@ -222,6 +222,15 @@ const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
 // ComposeProjectLabel is the label Docker Compose sets on a container to its
 // project name.
 const ComposeProjectLabel = "com.docker.compose.project"
+
+// Other labels Docker Compose sets on each container it makes: its
+// config's hash, whether it is a compose run's one-off ("True"), and its
+// service.
+const (
+	ComposeConfigHashLabel = "com.docker.compose.config-hash"
+	ComposeOneoffLabel     = "com.docker.compose.oneoff"
+	ComposeServiceLabel    = "com.docker.compose.service"
+)
 
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {

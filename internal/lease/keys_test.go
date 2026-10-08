@@ -1124,9 +1124,11 @@ func TestAComposeContainerCannotTakeALabelledLeaseOfAnotherWorktree(t *testing.T
 	t.Fatalf("w2's lease lost its reservation: %+v", b.List())
 }
 
-// A start takes over only its own worktree's create: another's keeps its
-// reservation.
-func TestAStartDoesNotTakeOverACreateOfAnotherWorktree(t *testing.T) {
+// Another worktree's start of a container a create made takes that
+// create's lease over: the label is only on the container that create made,
+// so it is that worktree's container being started. One lease, the larger
+// cost; nothing left waiting.
+func TestAStartTakesOverACreateOfAnotherWorktree(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(snap())
 	cr := labelled("w2", "postgres")
@@ -1134,15 +1136,12 @@ func TestAStartDoesNotTakeOverACreateOfAnotherWorktree(t *testing.T) {
 	created := b.Check(cr, snap(), cfg)
 	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db",
 		ContainerID: "db1", TakesOver: created.LeaseID}, snap(), cfg)
-	for _, l := range b.List() {
-		if l.ID == created.LeaseID {
-			return
-		}
+	if l := b.List(); len(l) != 1 || l[0].ID == created.LeaseID || l[0].Bytes != 4*gib {
+		t.Fatalf("leases %+v", l)
 	}
-	t.Fatalf("w2's create lease was taken over: %+v", b.List())
 }
 
-// A stack that ran before the up is held, not charged: compose down after
+// A stack that ran before the up is not charged: compose down after
 // a non-idle up leaves the up's own estimate reserved, not the stack's
 // memory on top of it.
 func TestAStackTheUpFoundRunningIsNotChargedAfterADown(t *testing.T) {
@@ -1187,5 +1186,77 @@ func TestATakeOverDoesNotChargeTheRunningContainers(t *testing.T) {
 	b.Observe(snap()) // compose down
 	if r := reserved(b); r != 2*gib {
 		t.Fatalf("reserved %d MiB after the down, want 2048", r>>20)
+	}
+}
+
+// A shim run that dresses its container as Compose's (config hash and
+// project, by --label or --label-file) loses its own label, but must not
+// bind another worktree's compose lease by the project name.
+func TestARunDressedAsComposeDoesNotBindAComposeLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	up := b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "web", OnEngine: true}, snap(), cfg)
+	run := b.Check(req("w1", gib), snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "x", Name: "x", MemoryBytes: 4 * gib, Labels: map[string]string{
+		protocol.ComposeProjectLabel: "web", "com.docker.compose.config-hash": "1", protocol.LeaseLabel: run.LeaseID}}, ""))
+	for _, l := range b.List() {
+		if l.ID == up.LeaseID && l.Bytes == 4*gib {
+			return
+		}
+	}
+	t.Fatalf("w2's compose lease lost its reservation: %+v", b.List())
+}
+
+// A repeated up takes over the first up's lease while its containers warm
+// up: their growth still counts, so the lease ends once they use what it
+// reserved.
+func TestATakenOverContainersGrowthStillCounts(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
+	b.Check(up, snap(), cfg)
+	s := withComposeContainer(snap(), "db", "w1", gib/2)
+	b.Observe(s)
+	c.t = c.t.Add(time.Second)
+	idle := up
+	idle.Idle = true
+	b.Check(idle, s, cfg)
+	b.Observe(withComposeContainer(snap(), "db", "w1", 2*gib))
+	if r := reserved(b); r != 0 {
+		t.Fatalf("reserved %d MiB once the stack used it, want 0", r>>20)
+	}
+}
+
+// A taken-over container that runs unattributed counts as one attributed
+// does: what it used then counts already, so the new lease does not end at
+// once.
+func TestATakeOverOfAnUnattributedContainerKeepsTheReservation(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
+	b.Check(up, snap(), cfg)
+	s := withComposeContainer(snap(), "db", "", 3*gib/2)
+	b.Observe(s) // 0.5 GiB still reserved
+	c.t = c.t.Add(time.Second)
+	up.CostBytes = gib
+	b.Check(up, s, cfg)
+	b.Observe(s)
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB, want 1024", r>>20)
+	}
+}
+
+// A container an up found running is not covered by its lease, which
+// reserves nothing for it: stopped and started again, it is checked.
+func TestAStartOfAContainerAnUpFoundRunningIsChecked(t *testing.T) {
+	b, _, _ := book(t)
+	s := withComposeContainer(snap(), "db", "w1", gib)
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
+	critical := snap()
+	critical.Host.Pressure = "critical"
+	b.Observe(critical) // docker stop db
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, critical, cfg); d.Allow {
+		t.Fatalf("allowed under critical pressure: %+v", d)
 	}
 }

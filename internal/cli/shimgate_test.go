@@ -934,12 +934,30 @@ func TestARunThatSetsTheLeaseLabelIsRefused(t *testing.T) {
 		{"run", "--new-flag", "x", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
 		{"create", "-l=dev.headroom.lease=lease-abc-7", "alpine"},
 		{"run", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "--label=dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-dl", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-ldev.headroom.lease=lease-abc-7", "alpine"},
 	} {
 		r := newShimRig(t)
 		r.ask = allow
 		code, stderr := r.run(append([]string{"docker"}, args...)...)
 		if code != exitDenied || r.execed != "" || len(r.asked) != 0 || !strings.Contains(stderr, "dev.headroom.lease") {
 			t.Errorf("%q: code %d, execed %q, asked %d, stderr %q", args, code, r.execed, len(r.asked), stderr)
+		}
+	}
+}
+
+// Only a label is refused: the string elsewhere sets none.
+func TestTheLeaseLabelNameElsewhereIsAllowed(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--rm", "alpine", "grep", "dev.headroom.lease", "/x"},
+		{"run", "-e", "NOTE=dev.headroom.lease", "alpine"},
+		{"run", "--label", "note=x", "alpine", "echo", "dev.headroom.lease"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 || r.execed == "" {
+			t.Errorf("%q: code %d, stderr %q", args, code, stderr)
 		}
 	}
 }

@@ -221,11 +221,13 @@ func Defaults(dir string) Config {
 // $XDG_CONFIG_HOME/headroom, then ~/.config/headroom. It deliberately does not
 // use os.UserConfigDir, which is ~/Library/Application Support on macOS.
 func Dir(getenv func(string) string) (string, error) {
+	// Absolute, so paths under it (the socket, the shim dir on agents'
+	// PATH) do not depend on a working directory.
 	if d := getenv("HEADROOM_CONFIG_DIR"); d != "" {
-		return d, nil
+		return filepath.Abs(d)
 	}
 	if x := getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "headroom"), nil
+		return filepath.Abs(filepath.Join(x, "headroom"))
 	}
 	home := getenv("HOME")
 	if home == "" {
@@ -300,6 +302,11 @@ func (c Config) Validate() error {
 	var errs []error
 	if len(c.Socket) > maxSocketPath {
 		errs = append(errs, fmt.Errorf("socket path is %d bytes, macOS allows %d: %s", len(c.Socket), maxSocketPath, c.Socket))
+	}
+	if !filepath.IsAbs(c.ShimDir) || strings.Contains(c.ShimDir, string(filepath.ListSeparator)) {
+		// It goes first on agents' PATH: relative, it would depend on their
+		// working directory; with a colon, it would be two entries.
+		errs = append(errs, fmt.Errorf("shim_dir must be an absolute path without %q: %s", string(filepath.ListSeparator), c.ShimDir))
 	}
 	if c.Daemon.Interval.Duration <= 0 {
 		errs = append(errs, errors.New("daemon.interval must be > 0"))

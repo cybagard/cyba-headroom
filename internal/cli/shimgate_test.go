@@ -514,3 +514,12 @@ func TestDaemonCause(t *testing.T) {
 		}
 	}
 }
+
+// The shim reads its environment as the child will: the first of
+// duplicates, as libc's getenv does.
+func TestEnvOfReadsTheFirstOfDuplicates(t *testing.T) {
+	_, getenv := Env{Environ: func() []string { return []string{"A=1", "A=2"} }}.envOf()
+	if got := getenv("A"); got != "1" {
+		t.Fatalf("A = %q", got)
+	}
+}

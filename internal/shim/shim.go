@@ -44,13 +44,23 @@ func Resolve(name string, selves []string, getenv func(string) string, fallbacks
 		if slices.ContainsFunc(skip, func(s os.FileInfo) bool { return os.SameFile(fi, s) }) {
 			return true
 		}
-		target, err := filepath.EvalSymlinks(p)
-		return err == nil && filepath.Base(target) == "headroom"
+		return LeadsToHeadroom(p)
 	})
 	if p == "" {
 		return "", ErrNotFound
 	}
 	return p, nil
+}
+
+// HeadroomName reports whether the binary at p is named as headroom is
+// installed: the one way to tell another headroom build from a real tool.
+func HeadroomName(p string) bool { return filepath.Base(p) == "headroom" }
+
+// LeadsToHeadroom reports whether p, through any links, ends at a binary
+// named headroom.
+func LeadsToHeadroom(p string) bool {
+	target, err := filepath.EvalSymlinks(p)
+	return err == nil && HeadroomName(target)
 }
 
 // podmanExec matches a wrapper script line that runs podman.

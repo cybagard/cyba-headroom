@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/launchd"
@@ -52,6 +53,11 @@ type installer struct {
 	getenv func(string) string
 	out    io.Writer
 	errw   io.Writer
+
+	// shimDir gets the docker, podman and tart links (#31); lookPath says
+	// whether an agent CLI is on PATH, for the Orca settings to print.
+	shimDir  string
+	lookPath func(name string) bool
 	// How long install waits for the daemon to answer, and how often it asks.
 	wait, poll time.Duration
 }
@@ -130,7 +136,47 @@ func (in *installer) install(ctx context.Context) int {
 	}
 	fmt.Fprintf(in.out, "headroom daemon running under launchd (%s)\n  binary  %s\n  agent   %s\n  log     %s (headroom logs)\n",
 		agentLabel, bin, in.plistPath(), logPath)
+	in.installShims(bin)
 	return 0
+}
+
+// orcaAgents are the agent CLIs whose Orca launch command install prints.
+var orcaAgents = []string{"claude", "codex", "kilo", "opencode", "gemini", "goose", "amp"}
+
+// installShims links the shims to bin and says how to launch Orca's agents
+// through them (R9, #31). A failure is reported, not fatal: the daemon runs.
+func (in *installer) installShims(bin string) {
+	if in.shimDir == "" {
+		return
+	}
+	notes, err := linkShims(in.shimDir, bin)
+	for _, n := range notes {
+		fmt.Fprintln(in.errw, "headroom:", n)
+	}
+	if err != nil {
+		fmt.Fprintf(in.errw, "headroom: linking the shims in %s: %v\n", in.shimDir, err)
+		return
+	}
+	fmt.Fprintf(in.out, "  shims   %s (docker, podman, tart)\n", in.shimDir)
+	// A config dir other than the default must reach the agents' shims too.
+	prefix := ""
+	if in.getenv("HEADROOM_CONFIG_DIR") != "" || in.getenv("XDG_CONFIG_HOME") != "" {
+		if dir, err := config.Dir(in.getenv); err == nil {
+			if abs, err := filepath.Abs(dir); err == nil {
+				prefix = "env HEADROOM_CONFIG_DIR=" + shellWord(abs) + " "
+			}
+		}
+	}
+	var lines []string
+	for _, a := range orcaAgents {
+		if in.lookPath != nil && in.lookPath(a) {
+			lines = append(lines, fmt.Sprintf("  %s: %s%s run -- %s", a, prefix, shellWord(bin), a))
+		}
+	}
+	if len(lines) > 0 {
+		fmt.Fprintf(in.out, "\nTo gate the agents Orca launches, set each one's command in Orca → Settings → Agents:\n%s\n"+
+			"Agents already running keep their old PATH until restarted.\n", strings.Join(lines, "\n"))
+	}
 }
 
 // waitUp waits until the launchd daemon itself answers on the socket.
@@ -160,15 +206,35 @@ func (in *installer) uninstall(ctx context.Context) int {
 	// The binary to remove is the one the installed agent runs, unless --bin
 	// names it; with neither, no binary is ours to delete.
 	remove := []string{in.plistPath()}
+	owned := "" // the binary the shims lead to, as install linked it
 	if in.binGiven {
-		remove = append(remove, in.bin)
+		owned, _ = filepath.Abs(in.bin)
 	} else if p, err := os.ReadFile(in.plistPath()); err == nil {
 		if bin, err := launchd.ProgramPath(p); err == nil && filepath.IsAbs(bin) {
-			remove = append(remove, bin)
+			owned = bin
 		}
+	}
+	if owned != "" {
+		remove = append(remove, owned)
 	}
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
+	}
+	if in.shimDir != "" {
+		bin := owned
+		if bin == "" {
+			bin, _ = filepath.Abs(in.bin)
+		}
+		// Best effort: the agent is already stopped, so finish the rest.
+		// The dir goes only if it is headroom's own default, not one the
+		// user chose (say ~/bin).
+		own := false
+		if dir, err := config.Dir(in.getenv); err == nil {
+			own = in.shimDir == config.Defaults(dir).ShimDir
+		}
+		if err := unlinkShims(in.shimDir, bin, own); err != nil {
+			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
+		}
 	}
 	for _, p := range remove {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -321,6 +387,8 @@ func newInstaller(e Env, bin string) (*installer, error) {
 		},
 		getenv: e.Getenv, out: e.Stdout, errw: e.Stderr,
 		wait: 10 * time.Second, poll: 200 * time.Millisecond,
+		shimDir:  cfg.ShimDir,
+		lookPath: func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
 	}, nil
 }
 

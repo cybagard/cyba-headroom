@@ -129,7 +129,7 @@ func Run(e Env) int {
 	case "check":
 		return runCheck(e)
 	case "run":
-		return notYet(e, "run", 31)
+		return runRun(e)
 	case "doctor":
 		return notYet(e, "doctor", 32)
 	default:
@@ -281,20 +281,8 @@ const shimSelvesVar = "HEADROOM_SHIM_SELVES"
 // runShim replaces this process with the real docker, podman or tart (R5,
 // #26). It passes every call through for now: #27 and #28 add the gate.
 func runShim(e Env, name string) int {
-	environ := e.Environ
-	if environ == nil {
-		environ = os.Environ
-	}
-	env := environ()
 	// One source for the shim's view of the environment and the child's.
-	getenv := func(k string) string {
-		for i := len(env) - 1; i >= 0; i-- {
-			if v, ok := strings.CutPrefix(env[i], k+"="); ok {
-				return v
-			}
-		}
-		return ""
-	}
+	env, getenv := e.envOf()
 	self, err := os.Executable()
 	if err == nil {
 		_, err = os.Stat(self)
@@ -361,6 +349,25 @@ func runShim(e Env, name string) int {
 		return 126 // found but not runnable
 	}
 	return 0
+}
+
+// envOf is the process environment (Environ, else os.Environ) and a lookup
+// in it. The first of duplicates wins, as libc's getenv in the child reads
+// it; setEnv leaves none of the keys it sets.
+func (e Env) envOf() ([]string, func(string) string) {
+	environ := e.Environ
+	if environ == nil {
+		environ = os.Environ
+	}
+	env := environ()
+	return env, func(k string) string {
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, k+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
 }
 
 // setEnv sets k=v in env, replacing rather than adding: Go's and libc's

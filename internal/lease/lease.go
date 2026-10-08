@@ -239,11 +239,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if len(e.took) > 0 {
 			// The same stack again: it holds the larger of this call's
 			// estimate and what the old leases still reserved, on top of
-			// what their containers use. Bounded however often it repeats,
-			// and never below what was held.
-			// A fresh timeout: this call was admitted, and its containers may
-			// be a pull or a build away. The cost stays bounded however often
-			// compose up repeats, and each repeat is an admitted call.
+			// what their containers use, never below what was held and
+			// bounded however often it repeats, with a fresh timeout: this
+			// call was admitted, and its containers may be a pull away.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
 	}
@@ -422,11 +420,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// Compose services before one-off containers: a compose run's
 	// dependencies are its lease's until its one-off binds, and Docker lists
 	// the newest first, whatever started first.
-	slices.SortStableFunc(fresh, func(a, b resource) int {
+	slices.SortStableFunc(fresh, func(x, y resource) int {
 		switch {
-		case !a.oneoff && b.oneoff:
+		case !x.oneoff && y.oneoff:
 			return -1
-		case a.oneoff && !b.oneoff:
+		case x.oneoff && !y.oneoff:
 			return 1
 		}
 		return 0

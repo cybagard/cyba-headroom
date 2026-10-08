@@ -9,13 +9,15 @@ import "time"
 // Version is the protocol version every request and reply carries.
 const Version = 1
 
-// Ops understood by the daemon. lease arrives with #25.
+// Ops understood by the daemon.
 const (
 	OpPing   = "ping"
 	OpStatus = "status"
 	// OpCheck asks the policy (#24) whether a resource-creating call may go
 	// ahead.
 	OpCheck = "check"
+	// OpRelease ends a check's lease when its call did not start (#28).
+	OpRelease = "release"
 )
 
 // MaxLine bounds a single request or reply line.
@@ -27,6 +29,8 @@ type Request struct {
 	Op string `json:"op"`
 	// Check is the call to decide, for OpCheck.
 	Check *CheckRequest `json:"check,omitempty"`
+	// Release is the lease to end, for OpRelease.
+	Release string `json:"release,omitempty"`
 }
 
 // CheckRequest describes a resource-creating call (#24).
@@ -42,6 +46,9 @@ type CheckRequest struct {
 	// its working directory, and its parent PIDs, nearest first.
 	Cwd       string `json:"cwd,omitempty"`
 	Ancestors []int  `json:"ancestors,omitempty"`
+	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
+	// may be known by either spelling.
+	RealCwd string `json:"real_cwd,omitempty"`
 }
 
 // How a check's worktree was found (Decision.IdentifiedBy).

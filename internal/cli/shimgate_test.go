@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +35,8 @@ type shimRig struct {
 	now      time.Time
 	sleepFor time.Duration // how far the clock moves per wait
 	stop     bool          // the wait is interrupted
+	execErr  error         // what exec returns
+	released []string
 }
 
 func newShimRig(t *testing.T) *shimRig {
@@ -56,6 +62,10 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 		Environ: func() []string { return r.env },
 		exec: func(path string, _, env []string) error {
 			r.execed, r.execEnv = path, env
+			return r.execErr
+		},
+		release: func(_ config.Config, id string) error {
+			r.released = append(r.released, id)
 			return nil
 		},
 		ask: func(_ config.Config, req protocol.CheckRequest) (*protocol.Decision, error) {
@@ -66,10 +76,13 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 		},
 		ancestors: func() []int { return []int{4321, 1} },
 		now:       func() time.Time { return r.now },
-		sleep: func(time.Duration) bool {
+		sleep: func(time.Duration) int {
 			r.sleeps++
 			r.now = r.now.Add(r.sleepFor)
-			return !r.stop
+			if r.stop {
+				return 130
+			}
+			return 0
 		},
 	})
 	return code, errb.String()
@@ -87,20 +100,51 @@ func TestShimGateAllows(t *testing.T) {
 	if code != 0 || r.execed != filepath.Join(r.dir, "docker") {
 		t.Fatalf("exit %d, exec %q, stderr %q", code, r.execed, stderr)
 	}
-	wd, _ := os.Getwd()
+	// The environment names the worktree: no cwd or ancestry needed.
 	want := protocol.CheckRequest{Worktree: "repo::/Users/dev/src/project-a", Kind: "container", Command: "docker run alpine",
-		CostBytes: 2 << 30, Cwd: wd, Ancestors: []int{4321, 1}}
+		CostBytes: 2 << 30}
 	if len(r.asked) != 1 || !equalRequest(r.asked[0], want) {
 		t.Fatalf("asked %+v, want %+v", r.asked, want)
 	}
-	if !slices.Contains(r.execEnv, "HEADROOM_SHIM_CHECKED=lease-7") {
+	// The marker is this process's PID, which the real binary keeps: only
+	// a binary it execs in its place skips the check, not its children.
+	if !slices.Contains(r.execEnv, "HEADROOM_SHIM_CHECKED="+strconv.Itoa(os.Getpid())) {
 		t.Fatalf("child env lacks the checked marker: %q", r.execEnv)
+	}
+}
+
+func TestShimGateSendsCwdAndAncestry(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	realDir := filepath.Join(r.dir, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(r.dir, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(link)
+	r.run("docker", "run", "alpine")
+	got := r.asked[0]
+	resolved, _ := filepath.EvalSymlinks(realDir)
+	if !slices.Equal(got.Ancestors, []int{4321, 1}) || got.Cwd == "" || (got.Cwd != resolved && got.RealCwd != resolved) {
+		t.Fatalf("asked %+v, want ancestry and the cwd resolved to %s", got, resolved)
+	}
+}
+
+func TestShimGateReleasesTheLeaseIfExecFails(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.execErr = syscall.ENOENT
+	if code, _ := r.run("docker", "run", "alpine"); code != 127 || !slices.Equal(r.released, []string{"lease-7"}) {
+		t.Fatalf("exit %d, released %q", code, r.released)
 	}
 }
 
 func equalRequest(a, b protocol.CheckRequest) bool {
 	return a.Worktree == b.Worktree && a.Kind == b.Kind && a.Command == b.Command && a.CostBytes == b.CostBytes &&
-		a.Cwd == b.Cwd && slices.Equal(a.Ancestors, b.Ancestors)
+		a.Cwd == b.Cwd && a.RealCwd == b.RealCwd && slices.Equal(a.Ancestors, b.Ancestors)
 }
 
 func TestShimGateHeadroomWorktreeOverridesOrca(t *testing.T) {
@@ -138,7 +182,7 @@ func TestShimGateDoesNotAsk(t *testing.T) {
 		env  []string
 	}{
 		"a call that starts nothing": {[]string{"docker", "ps"}, nil},
-		"already checked":            {[]string{"docker", "run", "alpine"}, []string{"HEADROOM_SHIM_CHECKED=lease-1"}},
+		"already checked":            {[]string{"docker", "run", "alpine"}, []string{"HEADROOM_SHIM_CHECKED=" + strconv.Itoa(os.Getpid())}},
 		"a remote engine":            {[]string{"docker", "run", "alpine"}, []string{"DOCKER_HOST=ssh://dev@build-box"}},
 		"a remote engine by flag":    {[]string{"docker", "-H", "tcp://10.0.0.5:2376", "run", "alpine"}, nil},
 	} {
@@ -151,6 +195,26 @@ func TestShimGateDoesNotAsk(t *testing.T) {
 		if code, _ := r.run(c.argv...); code != 0 || r.execed == "" {
 			t.Errorf("%s: exit %d, exec %q", name, code, r.execed)
 		}
+	}
+}
+
+func TestShimGateChecksAChildOfACheckedCall(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "HEADROOM_SHIM_CHECKED=1") // another process's marker
+	r.ask = allow
+	if r.run("docker", "run", "alpine"); len(r.asked) != 1 {
+		t.Fatalf("asked %d times", len(r.asked))
+	}
+}
+
+func TestShimGateOldDaemon(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		return nil, fmt.Errorf("%w (unknown op)", errCannotCheck)
+	}
+	code, stderr := r.run("docker", "run", "alpine")
+	if code != 0 || r.execed == "" || !strings.Contains(stderr, "headroom install") || strings.Contains(stderr, "not reachable") {
+		t.Fatalf("exit %d, exec %q, stderr %q", code, r.execed, stderr)
 	}
 }
 
@@ -276,5 +340,21 @@ func TestShimGateDebugNamesTheWorktree(t *testing.T) {
 	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) { return &protocol.Decision{Allow: true}, nil }
 	if _, stderr = r.run("docker", "run", "alpine"); !strings.Contains(stderr, "headroom: allowed as a manual call") {
 		t.Fatalf("stderr %q", stderr)
+	}
+}
+
+// A call whose exec fails hands its lease back to the daemon.
+func TestShimGateReleaseAgainstTheDaemon(t *testing.T) {
+	envMap, d := serveDaemonWith(t, func(d *daemon.Daemon) {
+		wireGate(d, config.Defaults("/x"), discardLog())
+	})
+	r := newShimRig(t)
+	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
+	code := Run(Env{Args: []string{"docker", "run", "-m", "40g", "alpine"}, Stdout: io.Discard, Stderr: io.Discard,
+		Getenv: func(string) string { return "" }, Environ: func() []string { return env },
+		exec: func(string, []string, []string) error { return syscall.ENOENT }})
+	d.Tick(context.Background())
+	if s := d.Snapshot(); code != 127 || len(s.Leases) != 0 {
+		t.Fatalf("exit %d, leases %+v", code, s.Leases)
 	}
 }

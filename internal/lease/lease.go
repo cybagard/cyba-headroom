@@ -319,6 +319,20 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	return nil
 }
 
+// Release ends the open lease id, whose call never started (its exec
+// failed); false if no such lease is open.
+func (b *Book) Release(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(b.open)
+	b.open = slices.DeleteFunc(b.open, func(e *entry) bool { return e.ID == id })
+	if len(b.open) == n {
+		return false
+	}
+	b.log.Debug("lease released: its call did not start", "lease", id)
+	return true
+}
+
 // List returns the open leases, oldest first, each with what it still
 // reserves.
 func (b *Book) List() []protocol.Lease {

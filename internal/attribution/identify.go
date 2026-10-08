@@ -11,8 +11,9 @@ type Caller struct {
 	// Worktree is the ID from the environment: HEADROOM_WORKTREE, else
 	// ORCA_WORKTREE_ID.
 	Worktree string
-	// Cwd is the call's working directory.
-	Cwd string
+	// Cwd is the call's working directory, and RealCwd the same with
+	// symlinks resolved ("" if no different).
+	Cwd, RealCwd string
 	// Ancestors are the call's parent PIDs, nearest first.
 	Ancestors []int
 }
@@ -32,8 +33,11 @@ func Identify(s *protocol.Snapshot, c Caller) (id, by string) {
 	for i, w := range s.Orca.Worktrees {
 		wts[i] = Worktree{ID: w.ID, Path: w.Path}
 	}
-	if id := NewMatcher(wts).owner(c.Cwd); id != "" {
-		return id, protocol.IdentifiedByCwd
+	m := NewMatcher(wts)
+	for _, p := range []string{c.Cwd, c.RealCwd} {
+		if id := m.owner(p); id != "" {
+			return id, protocol.IdentifiedByCwd
+		}
 	}
 	for _, pid := range c.Ancestors {
 		for _, w := range s.Orca.Worktrees {

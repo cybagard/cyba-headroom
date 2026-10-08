@@ -27,6 +27,8 @@ func TestIdentify(t *testing.T) {
 		{"cwd before ancestry", Caller{Cwd: "/tmp/project-b", Ancestors: []int{100}}, "repo::/tmp/project-b", protocol.IdentifiedByCwd},
 		{"manual", Caller{Cwd: "/Users/dev", Ancestors: []int{900, 1}}, "", ""},
 		{"relative cwd", Caller{Cwd: "project-a"}, "", ""},
+		{"through a symlink", Caller{Cwd: "/Users/dev/work/x", RealCwd: "/Users/dev/src/project-a/x"}, "repo::/Users/dev/src/project-a", protocol.IdentifiedByCwd},
+		{"spelled as Orca does", Caller{Cwd: "/tmp/project-b", RealCwd: "/Volumes/data/project-b"}, "repo::/tmp/project-b", protocol.IdentifiedByCwd},
 	} {
 		id, by := Identify(s, c.in)
 		if id != c.id || by != c.by {

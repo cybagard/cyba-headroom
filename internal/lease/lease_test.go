@@ -488,3 +488,18 @@ func TestExpiredLeasesStopCountingWithoutObserve(t *testing.T) {
 		t.Fatalf("expiry not logged: %s", log)
 	}
 }
+
+// A call whose exec failed hands its lease back (#28).
+func TestReleaseEndsALease(t *testing.T) {
+	b, _, _ := book(t)
+	d := b.Check(req("w1", 5*gib), snap(), cfg)
+	if !b.Release(d.LeaseID) || len(b.List()) != 0 {
+		t.Fatalf("release %s: leases %+v", d.LeaseID, b.List())
+	}
+	if b.Release(d.LeaseID) || b.Release("lease-99") {
+		t.Fatal("released a lease that is not open")
+	}
+	if d = b.Check(req("w2", 8*gib), snap(), cfg); !d.Allow {
+		t.Fatalf("the released cost still counts: %+v", d)
+	}
+}

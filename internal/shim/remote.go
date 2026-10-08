@@ -3,27 +3,36 @@ package shim
 import (
 	"net"
 	"net/url"
+	"os"
+	"strings"
 )
 
 // Remote reports whether a container call goes to an engine on another
-// machine, whose memory is not this Mac's: a tcp:// or ssh:// endpoint on a
-// host other than this one. The endpoint is the call's own (Call.Endpoint),
-// else DOCKER_HOST, else CONTAINER_HOST. Named contexts and connections
-// count as local. Podman machine's ssh://…@127.0.0.1 is local.
-func Remote(endpoint string, getenv func(string) string) bool {
-	for _, e := range []string{endpoint, getenv("DOCKER_HOST"), getenv("CONTAINER_HOST")} {
-		if e == "" {
-			continue
-		}
-		u, err := url.Parse(e)
-		if err != nil || (u.Scheme != "tcp" && u.Scheme != "ssh") {
-			return false
-		}
-		h := u.Hostname()
-		if ip := net.ParseIP(h); h == "" || h == "localhost" || (ip != nil && ip.IsLoopback()) {
-			return false
-		}
+// machine, whose memory is not this Mac's: a tcp:// or ssh:// endpoint on
+// a host other than this one. The endpoint is the call's own
+// (Call.Endpoint), else the engine's variable: DOCKER_HOST for docker,
+// CONTAINER_HOST for podman. Named contexts and connections count as local,
+// and so do podman machine's ssh://…@127.0.0.1 and this Mac's own names.
+func Remote(name, endpoint string, getenv func(string) string) bool {
+	if endpoint == "" {
+		endpoint = getenv(map[string]string{"docker": "DOCKER_HOST", "podman": "CONTAINER_HOST"}[name])
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "tcp" && u.Scheme != "ssh") || u.Hostname() == "" {
+		return false
+	}
+	return !thisMac(u.Hostname())
+}
+
+// thisMac reports whether host names this machine.
+func thisMac(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".local")
+	if host == "localhost" || host == "host.docker.internal" {
 		return true
 	}
-	return false
+	me, err := os.Hostname()
+	return err == nil && host == strings.TrimSuffix(strings.ToLower(me), ".local")
 }

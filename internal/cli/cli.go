@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -67,9 +68,10 @@ type Env struct {
 	// Test hooks; zero values mean the real behaviour.
 	exec       func(path string, argv, env []string) error                            // syscall.Exec
 	ask        func(config.Config, protocol.CheckRequest) (*protocol.Decision, error) // askDaemon
+	release    func(config.Config, string) error                                      // releaseLease
 	ancestors  func() []int                                                           // shim.Ancestors
 	now        func() time.Time                                                       // time.Now
-	sleep      func(time.Duration) bool                                               // sleepUnlessInterrupted
+	sleep      func(time.Duration) int                                                // sleepUnlessSignalled
 	fallbacks  map[string][]string                                                    // shim.Fallbacks
 	watchEvery time.Duration                                                          // poll interval (1s)
 	suspend    chan os.Signal                                                         // delivers Ctrl-Z (SIGTSTP)
@@ -327,12 +329,12 @@ func runShim(e Env, name string) int {
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
-	marker, code, proceed := gate(e, c, getenv)
-	if !proceed {
-		return code
+	g := gate(e, name, c, getenv)
+	if !g.proceed {
+		return g.code
 	}
-	if marker != "" {
-		env = setEnv(env, shimCheckedVar, marker)
+	if g.checked {
+		env = setEnv(env, shimCheckedVar, strconv.Itoa(os.Getpid()))
 	}
 	env = setEnv(env, shimSelvesVar, strings.Join(selves, string(filepath.ListSeparator)))
 	// argv[0] is the bare name, as the shell passes a command found on PATH:
@@ -346,6 +348,15 @@ func runShim(e Env, name string) int {
 	// process, with its PID, terminal, signals and exit code.
 	if err := exec(target, argv, env); err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", target, err)
+		if g.lease != "" {
+			// Nothing started: hand the lease back rather than hold the
+			// budget until it times out.
+			release := e.release
+			if release == nil {
+				release = releaseLease
+			}
+			_ = release(g.cfg, g.lease)
+		}
 		if errors.Is(err, syscall.ENOENT) {
 			return 127 // gone since it was found (an upgrade): not found
 		}
@@ -413,6 +424,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 		s.Leases = book.List()
 	})
 	d.SetCheck(gateCheck(book, cfg.Policy.Config()))
+	d.SetRelease(book.Release)
 }
 
 // gateCheck answers a check: it finds the calling worktree (#28), then

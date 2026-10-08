@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -127,26 +126,22 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool
 	if c.Kind == "compose" && name == "docker" {
-		// Compose names the project (-p needs no asking but for an up or
-		// restart; podman compose is not asked), and says whether an up or
-		// restart starts anything.
+		// Compose names the project (-p needs no asking; podman compose is
+		// not asked), and says whether a detached up starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
 		// down (R7).
-		switch {
-		case slices.Contains(c.ComposeFiles, "-"):
+		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
-		case c.Op == "up" || c.Op == "restart":
-			// Config also says whether the project may be dry-run. An
-			// attached up's dry run stops before Compose would start
-			// anything ("interactive run is not supported").
-			name, plain := composeConfig(bin, e.Args[1:], h.composeAsk)
-			req.Target = cmp.Or(c.Target, name)
-			if plain && (c.Op == "restart" || c.ComposeDetached) {
+		} else {
+			req.Target = composeProject(bin, e.Args[1:], c.Target, h.composeAsk)
+			// Only a detached up: an attached up's dry run stops before
+			// Compose would start anything ("interactive run is not
+			// supported"), and a restart's lists each container as
+			// restarting, running or not.
+			if c.Op == "up" && c.ComposeDetached && composePlain(bin, e.Args[1:], h.composeAsk) {
 				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
 			}
-		default:
-			req.Target = composeProject(bin, c, h.composeAsk)
 		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
@@ -253,32 +248,22 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 }
 
 // composeProject is a compose call's project, as Compose itself names it
-// (#33): -p, else the name docker compose config gives, run with the call's
-// own -f, --project-directory and --env-file in its own environment and
-// working directory. Compose labels each container with the project, so
-// the name is the lease's key. Asking Compose, rather than reading .env,
-// override files and name: the way it does, keeps the two from parting.
-// "" when Compose cannot say (the call will fail too): no key, failing
-// closed.
-func composeProject(bin string, c shim.Call, ask func(bin string, args []string) ([]byte, error)) string {
-	if c.Target != "" {
-		return c.Target
+// (#33): -p (target), else the name docker compose config gives, run with
+// the call's own global options (args: -f, --project-directory,
+// --env-file, --config, ...) in its own environment and working directory.
+// Compose labels each container with the project, so the name is the
+// lease's key. Asking Compose, rather than reading .env, override files and
+// name: the way it does, keeps the two from parting. "" when Compose cannot
+// say (the call will fail too): no key, failing closed.
+func composeProject(bin string, args []string, target string, ask func(bin string, args []string) ([]byte, error)) string {
+	if target != "" {
+		return target
 	}
-	var args []string
-	if c.ConfigDir != "" {
-		args = append(args, "--config", c.ConfigDir) // its plugins and settings
+	cargs, ok := shim.ComposeConfig(args, false)
+	if !ok {
+		return ""
 	}
-	args = append(args, "compose")
-	for _, f := range c.ComposeFiles {
-		args = append(args, "-f", f)
-	}
-	if c.ComposeProjectDir != "" {
-		args = append(args, "--project-directory", c.ComposeProjectDir)
-	}
-	for _, f := range c.ComposeEnvFiles {
-		args = append(args, "--env-file", f)
-	}
-	out, err := ask(bin, append(args, "config", "--format", "json"))
+	out, err := ask(bin, cargs)
 	var cfg struct {
 		Name string `json:"name"`
 	}
@@ -288,34 +273,44 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	return cfg.Name
 }
 
-// composeConfig asks docker compose config, with the call's own global
-// options (callArgs: -p, -f, --env-file, as the dry run will see them),
-// for the project's name, and whether it is plain: no model providers, in
-// any profile. A provider (a service's provider or models, or top-level
-// models) runs for real even in a dry run, so only a plain project is
-// dry-run. Config itself runs none.
-func composeConfig(bin string, callArgs []string, ask func(bin string, args []string) ([]byte, error)) (name string, plain bool) {
-	args, ok := shim.ComposeConfig(callArgs)
-	if !ok {
-		return "", false
+// composePlain reports whether a compose call's dry run tells what it
+// starts. Not when Compose's dry run cannot see it: a model provider (a
+// service's provider or models, in any profile) runs for real even in a
+// dry run; a pull or build (--pull always, --build, a pull_policy other
+// than missing or never) is not done, so a newer image's recreate is not
+// shown. Config, with the call's own options, runs none of them.
+func composePlain(bin string, args []string, ask func(bin string, args []string) ([]byte, error)) bool {
+	for i, a := range args {
+		if a == "--build" || a == "--pull=always" || a == "--pull" && i+1 < len(args) && args[i+1] == "always" {
+			return false
+		}
 	}
-	out, err := ask(bin, args)
+	cargs, ok := shim.ComposeConfig(args, true)
+	if !ok {
+		return false
+	}
+	out, err := ask(bin, cargs)
 	var cfg struct {
-		Name     string          `json:"name"`
 		Models   json.RawMessage `json:"models"`
 		Services map[string]struct {
-			Provider json.RawMessage `json:"provider"`
-			Models   json.RawMessage `json:"models"`
+			Provider   json.RawMessage `json:"provider"`
+			Models     json.RawMessage `json:"models"`
+			PullPolicy string          `json:"pull_policy"`
 		} `json:"services"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		return "", false
+		return false
 	}
-	plain = noJSON(cfg.Models)
+	plain := noJSON(cfg.Models)
 	for _, sv := range cfg.Services {
+		switch sv.PullPolicy {
+		case "", "missing", "if_not_present", "never":
+		default:
+			plain = false
+		}
 		plain = plain && noJSON(sv.Provider) && noJSON(sv.Models)
 	}
-	return cfg.Name, plain
+	return plain
 }
 
 // noJSON reports whether a JSON value is absent, null or empty.

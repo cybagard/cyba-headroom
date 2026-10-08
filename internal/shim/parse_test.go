@@ -363,12 +363,15 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 }
 
 func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
-	got, ok := ComposeConfig([]string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"})
+	got, ok := ComposeConfig([]string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
 	want := []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "--profile", "*", "config", "--format", "json"}
 	if !ok || !slices.Equal(got, want) {
 		t.Fatalf("ComposeConfig = %q, %v; want %q", got, ok, want)
 	}
-	if _, ok := ComposeConfig([]string{"run", "alpine"}); ok {
+	if got, _ := ComposeConfig([]string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
+		t.Fatalf("one profile set: %q", got)
+	}
+	if _, ok := ComposeConfig([]string{"run", "alpine"}, false); ok {
 		t.Fatal("not compose")
 	}
 }

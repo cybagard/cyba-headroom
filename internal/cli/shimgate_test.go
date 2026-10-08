@@ -664,19 +664,19 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 		asked = append(asked, append([]string{bin}, args...))
 		return []byte(`{"name":"shop","services":{"web":{},"db":{}}}`), nil
 	}
-	c := shim.Call{Op: "up", ComposeFiles: []string{"a.yml", "b.yml"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
-	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
+	call := []string{"compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "up", "-d"}
+	if got := composeProject("/usr/local/bin/docker", call, "", ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
 	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
-	if got := composeProject("/usr/local/bin/docker", shim.Call{Op: "up", Target: "p"}, ask); got != "p" || len(asked) != 1 {
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, "p", ask); got != "p" || len(asked) != 1 {
 		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
 	}
 	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	if got := composeProject("/usr/local/bin/docker", shim.Call{}, failing); got != "" {
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "up"}, "", failing); got != "" {
 		t.Fatalf("Compose could not say: %q, want no key", got)
 	}
 }
@@ -699,7 +699,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	write("compose.override.yaml", "name: ${STACK}-shop\n")
 	write(".env", "STACK=blue\n")
 	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
-	if got := composeProject(bin, shim.Call{Op: "up"}, ask); got != "blue-shop" {
+	if got := composeProject(bin, []string{"compose", "up"}, "", ask); got != "blue-shop" {
 		t.Fatalf("project = %q, want blue-shop", got)
 	}
 }
@@ -707,7 +707,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	var asked []string
 	ask := func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"x"}`), nil }
-	composeProject("/d", shim.Call{ConfigDir: "/work/.docker"}, ask)
+	composeProject("/d", []string{"--config", "/work/.docker", "compose", "up"}, "", ask)
 	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
 		t.Fatalf("asked %q", asked)
 	}
@@ -726,11 +726,11 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 		t.Fatalf("asked %d, dry %d, target %q", asked, dry, r.asked[0].Target)
 	}
 	r.run("docker", "compose", "up", "-d")
-	if asked != 1 || dry != 1 || r.asked[1].Target != "x" || !r.asked[1].Idle {
+	if asked != 2 || dry != 1 || r.asked[1].Target != "x" || !r.asked[1].Idle { // name, then providers
 		t.Fatalf("asked %d, dry %d, %+v", asked, dry, r.asked[1])
 	}
 	r.run("podman", "compose", "up", "-d")
-	if asked != 1 || dry != 1 {
+	if asked != 2 || dry != 1 {
 		t.Fatalf("podman: asked %d, dry %d", asked, dry)
 	}
 }
@@ -837,10 +837,10 @@ func TestComposeWithProvidersIsNotDryRun(t *testing.T) {
 }
 
 // An attached up's dry run stops before Compose would start anything
-// ("interactive run is not supported in dry-run mode"): only a detached up,
-// or a restart, is dry-run.
+// ("interactive run is not supported in dry-run mode"), and a restart's
+// lists every container: only a detached up is dry-run.
 func TestAnAttachedUpIsNotDryRun(t *testing.T) {
-	for args, want := range map[string]int{"up": 0, "up --abort-on-container-exit": 0, "up -d": 1, "up --wait": 1, "restart": 1} {
+	for args, want := range map[string]int{"up": 0, "up --abort-on-container-exit": 0, "up -d": 1, "up --wait": 1, "restart": 0} {
 		r := newShimRig(t)
 		r.ask = allow
 		dry := 0
@@ -866,5 +866,46 @@ func TestComposeConfigIsTheCallsOwnProject(t *testing.T) {
 	want := []string{"--config", "/work/.docker", "compose", "-p", "evil", "-f", "c.yml", "--profile", "*", "config", "--format", "json"}
 	if !slices.Equal(asked, want) {
 		t.Fatalf("config asked with %q, want %q", asked, want)
+	}
+}
+
+// A pull or build the dry run does not do may recreate: no dry run.
+func TestAPullOrBuildIsNotDryRun(t *testing.T) {
+	for _, tc := range []struct {
+		args, cfg string
+	}{
+		{"up -d --pull always", `{"name":"x"}`},
+		{"up -d --pull=always", `{"name":"x"}`},
+		{"up -d --build", `{"name":"x"}`},
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"always"}}}`},
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"daily"}}}`},
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"build"}}}`},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(tc.cfg), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run(append([]string{"docker", "compose"}, strings.Fields(tc.args)...)...)
+		if dry != 0 || r.asked[0].Idle {
+			t.Errorf("%s %s: dry run %d times, idle %v", tc.args, tc.cfg, dry, r.asked[0].Idle)
+		}
+	}
+}
+
+// A failing all-profiles config costs the name nothing: it comes from the
+// call's own profiles.
+func TestTheNameDoesNotNeedEveryProfile(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.composeAsk = func(_ string, args []string) ([]byte, error) {
+		if slices.Contains(args, "*") {
+			return nil, errors.New("env file ./prod.env not found")
+		}
+		return []byte(`{"name":"shop"}`), nil
+	}
+	r.run("docker", "compose", "up", "-d")
+	if r.asked[0].Target != "shop" || r.asked[0].Idle {
+		t.Fatalf("%+v", r.asked[0])
 	}
 }

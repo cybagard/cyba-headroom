@@ -356,3 +356,15 @@ func TestUngatedNamesAreCleaned(t *testing.T) {
 		}
 	}
 }
+
+func TestOneMarkPerRow(t *testing.T) {
+	s := busy()
+	// Release prep holds a VM while its agent is done (⚑); now also an
+	// ungated container: ⚠ alone, so the columns stay aligned.
+	s.Ungated = []protocol.Ungated{{Key: "vm:ci", Name: "ci", Kind: "vm", Worktree: "w2"}}
+	r := line(t, render(t, s, view.Options{}), "Release prep")
+	has(t, r, "⚠")
+	if strings.Contains(r, "⚑") {
+		t.Fatalf("two marks: %q", r)
+	}
+}

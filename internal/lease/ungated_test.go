@@ -122,15 +122,16 @@ func TestAManualCallThroughTheShimIsNotUngated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b, _, _ := book(t)
 			b.Observe(snap())
-			d := b.Check(req("", 6*gib), snap(), cfg)
-			if !d.Allow {
+			m := named("", "", "alpine")
+			m.CostBytes = 6 * gib
+			if d := b.Check(m, snap(), cfg); !d.Allow {
 				t.Fatalf("manual = %+v", d)
 			}
 			// It holds nothing back from gated calls.
 			if d := b.Check(req("w2", 7*gib), snap(), cfg); !d.Allow {
 				t.Fatalf("a manual call held back memory: %+v", d)
 			}
-			b.Observe(withContainer(snap(), "c2", wt))
+			b.Observe(withNamed(snap(), "c2", "c2", "alpine", wt))
 			for _, u := range b.Ungated() {
 				if u.Key == "container:c2" {
 					t.Fatalf("manual container flagged: %+v", u)
@@ -325,5 +326,126 @@ func TestAnUngatedContainerFollowsItsAttribution(t *testing.T) {
 	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
 	if u := b.Ungated(); len(u) != 1 || u[0].Worktree != "" {
 		t.Fatalf("ungated = %+v", u)
+	}
+}
+
+func TestAnUngatedContainerStaysFlaggedAfterACrash(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
+	since := b.Ungated()[0].Since
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // crashed
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(withNamed(snap(), "x", "x", "alpine", "")) // its restart policy
+	if u := b.Ungated(); len(u) != 1 || !u[0].Since.Equal(since) {
+		t.Fatalf("ungated = %+v", u)
+	}
+}
+
+func TestAnUngatedContainerStaysFlaggedAfterDockerRestarts(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
+	down := snap()
+	down.Docker = &protocol.Docker{}
+	b.Observe(down)
+	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAVMRunAgainPastTheShimIsUngated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run ci", CostBytes: gib, Target: "ci"}, snap(), cfg)
+	vm := snap()
+	vm.Tart.VMs = []protocol.TartVM{{Name: "ci", MemoryBytes: gib}}
+	b.Observe(vm)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // stopped
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(vm) // run again with the real tart
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "vm:ci" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestABaselineProjectDoesNotExemptLaterServices(t *testing.T) {
+	b, _, _ := book(t)
+	foo := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: "foo-" + id, Labels: map[string]string{"com.docker.compose.project": "foo"}}, "")
+	}
+	b.Observe(foo(snap(), "a"))           // running before the daemon
+	b.Observe(foo(foo(snap(), "a"), "b")) // a login shell's compose up
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:b" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAManualComposeWithAProjectIsGated(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Kind: "compose", Command: "docker compose up", Target: "foo"}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "a", Name: "foo-a", Labels: map[string]string{"com.docker.compose.project": "foo"}}, ""))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestPodmansLocalImagesMatch(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(named("", "", "myimg"), snap(), cfg)
+	b.Observe(withNamed(snap(), "a", "eager_turing", "localhost/myimg:latest", ""))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestStartByAShortIDPrefix(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Kind: "container", Command: "docker start 3f", Target: "3f"}, snap(), cfg)
+	b.Observe(withNamed(snap(), "3fab12", "db", "postgres", ""))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestWithoutABaselineAnImageNamesOnlyTheWorktreesOwn(t *testing.T) {
+	b, _, _ := book(t)
+	none := snap()
+	none.Docker = nil
+	b.Check(named("w1", "", "postgres"), none, cfg) // no baseline yet
+	s := addContainer(snap(), protocol.Container{ID: "earlier", Name: "earlier", Image: "postgres", MemoryBytes: 3 * gib}, "")
+	s = withNamed(s, "new", "new", "postgres", "w1")
+	b.Observe(s)
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want w1's bound to its own container", l)
+	}
+}
+
+func TestAManualLeaseWithoutATargetLeavesWorktreesContainers(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Kind: "container", Command: "docker run"}, snap(), cfg) // target unparsed
+	b.Observe(withNamed(snap(), "tc", "tc-redis", "redis", "w1"))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A check whose snapshot had a Tart reading but no Docker one is no
+// baseline for containers: those running are not ungated.
+func TestABaselineIsPerSource(t *testing.T) {
+	b, _, _ := book(t)
+	none := snap()
+	none.Docker = nil
+	b.Check(named("w1", "", "postgres"), none, cfg)
+	b.Observe(withNamed(snap(), "earlier", "earlier", "redis", ""))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
 	}
 }

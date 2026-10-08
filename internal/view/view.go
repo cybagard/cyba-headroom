@@ -137,7 +137,9 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 			mark = "⚑" // holds resources while no agent works (R4, #24)
 		}
 		if ungated[w.ID] {
-			mark += "⚠" // holds something started without a check (R4, #33)
+			// Holds something started without a check (R4, #33). One mark
+			// per row: two wide glyphs would shift the columns.
+			mark = "⚠"
 		}
 		r.add(rowFormat, short(name(w), 18), agentSummary(ag), mark,
 			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true), gbOrUnknown(w.AgentMemoryBytes))

@@ -58,14 +58,17 @@ type Book struct {
 	// resource not among them is new and may bind a lease: one started for
 	// the first time, or again after it stopped. A failed read keeps the
 	// previous set, so a resource missing from it does not come back new.
-	// nil until the first Observe: no baseline yet.
+	// Empty until a reading: no baseline yet.
 	prev map[string]bool
-	// ungated are new resources that bound no lease, by key (#33).
-	ungated map[string]protocol.Ungated
-	// seen is when each resource was last in a reading. One seen within the
-	// lease timeout is not flagged when it comes back: its stats failed for
-	// a tick, or a restart policy brought it back after a crash.
-	seen map[string]time.Time
+	// based says which sources (container, vm) prev holds a fresh reading
+	// of: until then, every resource of that source may have been there
+	// already.
+	based map[string]bool
+	// verdicts say, for each resource seen within the lease timeout, how it
+	// started (#33). A container keeps its verdict when it comes back after
+	// a tick or two away: its stats failed, a restart policy restarted it,
+	// or Docker itself restarted.
+	verdicts map[string]*verdict
 	// dockerDown is set while a fresh reading shows the Docker engine not
 	// running: its first reading after that is a baseline, since the
 	// engine restarts containers with a restart policy itself.
@@ -91,6 +94,21 @@ type entry struct {
 	target, name string
 }
 
+// How a resource started (#33).
+const (
+	baseline = iota // there before headroom could see it start
+	gated           // it bound a lease: its call was checked
+	ungated         // it bound none
+)
+
+type verdict struct {
+	how     int
+	u       protocol.Ungated // for ungated: what the snapshot lists
+	project string           // a compose container's project
+	last    time.Time        // last in a reading
+	present bool             // in the latest reading (or a failed read kept it)
+}
+
 // reserved is what the lease still holds back: its cost less what its
 // resources already use.
 func (e *entry) reserved() uint64 { return e.cost - min(e.used, e.cost) }
@@ -100,7 +118,7 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
 	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
-		ungated: map[string]protocol.Ungated{}, seen: map[string]time.Time{}}
+		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}}
 }
 
 // stale is how much newer the daemon's snapshot must be than the one leases
@@ -137,12 +155,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if !d.Allow {
 		return d
 	}
-	if b.prev == nil && s != nil && (s.Docker != nil || s.Tart != nil) {
-		// Before the first Observe, the check's own reading is the baseline.
-		b.prev = map[string]bool{}
-		for _, r := range resources(s) {
-			b.prev[r.key] = true
-		}
+	if s != nil {
+		// Before the first Observe, the check's own reading is the
+		// baseline, of each source it has one of.
+		b.baseline(s)
 	}
 	b.nextID++
 	e := &entry{
@@ -266,63 +282,71 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	var fresh []resource // new this tick, and bound to no lease yet
 	for _, r := range res {
 		present[r.key] = r.bytes
-		if u, ok := b.ungated[r.key]; ok {
-			u.Worktree = r.worktree // attribution can change, or come late
-			b.ungated[r.key] = u
-		}
 		if !b.prev[r.key] && !b.boundAnywhere(r.key) {
 			fresh = append(fresh, r)
 		}
 	}
+	// Without a baseline (a lease taken before the first reading), any
+	// resource may have been there already: only one attributed to the
+	// lease's own worktree is taken as its call's.
 	// Resources a call names bind first, so another one appearing in the
 	// same tick cannot take their lease.
 	var rest []resource
 	for _, r := range fresh {
-		if e := b.named(r, now); e != nil {
+		if e := b.named(r, now, !b.based[source(r.kind)]); e != nil {
 			e.bind(r)
+			b.judge(r, gated, now)
 		} else {
 			rest = append(rest, r)
 		}
 	}
-	// Compose projects already running gated containers: a later service of
-	// one (depends_on, a slow healthcheck) belongs to the same call.
+	var unbound []resource
+	for _, r := range rest {
+		if e := b.match(r, now, !b.based[source(r.kind)]); e != nil {
+			e.bind(r)
+			b.judge(r, gated, now)
+		} else {
+			unbound = append(unbound, r)
+		}
+	}
+	// Compose projects running containers whose call was checked: a later
+	// service (depends_on, a slow healthcheck) belongs to the same call.
 	gatedProject := map[string]bool{}
 	for _, r := range res {
-		if r.kind == "compose" && (b.prev[r.key] || b.boundAnywhere(r.key)) && b.ungated[r.key].Key == "" {
+		if v := b.verdicts[r.key]; r.kind == "compose" && v != nil && v.how == gated {
 			gatedProject[r.project] = true
 		}
 	}
-	for _, r := range rest {
-		// Without a baseline (a lease taken before the first reading), any
-		// resource may have been there already: only one attributed to the
-		// lease's own worktree is taken as its call's.
-		if e := b.match(r, now, b.prev == nil); e != nil {
-			e.bind(r)
-			continue
-		}
-		if b.prev == nil || dockerBack && r.kind != "vm" {
-			continue // a baseline: it may have been there before
-		}
-		if t, ok := b.seen[r.key]; ok && now.Sub(t) < b.timeout || r.kind == "compose" && gatedProject[r.project] {
-			continue
-		}
-		if _, ok := b.ungated[r.key]; !ok {
-			b.ungated[r.key] = protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}
+	for _, r := range unbound {
+		v := b.verdicts[r.key]
+		switch {
+		case v != nil && r.kind != "vm":
+			// A container back after a tick or two away keeps its verdict.
+			// A VM run again is a new run.
+		case !b.based[source(r.kind)] || dockerBack && r.kind != "vm":
+			b.judge(r, baseline, now) // it may have been there before
+		case r.kind == "compose" && gatedProject[r.project]:
+			b.judge(r, gated, now)
+		default:
+			b.judge(r, ungated, now)
 			b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
 				"name", r.name, "kind", r.kind, "worktree", r.worktree)
 		}
 	}
-	for k := range b.ungated {
-		if _, ok := present[k]; !ok && readable(s, kindOf(k)) {
-			delete(b.ungated, k)
-		}
+	for _, v := range b.verdicts {
+		v.present = v.present && !readable(s, kindOf(v.u.Key)) // a failed read keeps it
 	}
 	for _, r := range res {
-		b.seen[r.key] = now
+		v := b.verdicts[r.key]
+		if v == nil {
+			v = b.judge(r, baseline, now) // there before the first reading
+		}
+		v.last, v.present = now, true
+		v.u.Worktree = r.worktree // attribution can change, or come late
 	}
-	for k, t := range b.seen {
-		if now.Sub(t) >= b.timeout {
-			delete(b.seen, k)
+	for k, v := range b.verdicts {
+		if !v.present && now.Sub(v.last) >= b.timeout {
+			delete(b.verdicts, k)
 		}
 	}
 	next := map[string]bool{}
@@ -335,6 +359,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 	}
 	b.prev = next
+	b.markBased(s)
 	cp := *s // a copy: the daemon keeps writing to s after this
 	b.latest, b.observed = &cp, now
 
@@ -396,6 +421,36 @@ func (b *Book) expire(now time.Time) {
 	})
 }
 
+// baseline adds the resources of each source s has a fresh reading of,
+// and no baseline yet, to prev.
+func (b *Book) baseline(s *protocol.Snapshot) {
+	for _, r := range resources(s) {
+		if !b.based[source(r.kind)] {
+			b.prev[r.key] = true
+		}
+	}
+	b.markBased(s)
+}
+
+// markBased records which sources s has a fresh reading of.
+func (b *Book) markBased(s *protocol.Snapshot) {
+	if s.Docker != nil && readable(s, "container") {
+		b.based["container"] = true
+	}
+	if s.Tart != nil && readable(s, "vm") {
+		b.based["vm"] = true
+	}
+}
+
+// source is the source a resource kind comes from: vm (Tart) or
+// container (Docker, compose included).
+func source(kind string) string {
+	if kind == "vm" {
+		return "vm"
+	}
+	return "container"
+}
+
 // kindOf is the resource kind a key names, for readable.
 func kindOf(key string) string {
 	if strings.HasPrefix(key, "vm:") {
@@ -434,7 +489,8 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 				// A manual call's, made anywhere (also in a worktree's
 				// directory): last, after every worktree's own lease. One
 				// that knows its target takes only that (named).
-				if manual == nil && !ownOnly && e.target == "" && e.name == "" {
+				// One that does not, only an unattributed resource.
+				if manual == nil && !ownOnly && e.target == "" && e.name == "" && r.worktree == "" {
 					manual = e
 				}
 			case r.worktree != "" && e.Worktree == r.worktree:
@@ -453,14 +509,28 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	return nil
 }
 
+// judge records how r started.
+func (b *Book) judge(r resource, how int, now time.Time) *verdict {
+	v := &verdict{how: how, project: r.project, last: now, present: true,
+		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
+	b.verdicts[r.key] = v
+	return v
+}
+
 // named finds the open lease whose call names r, live ones first: it is
-// r's, whatever the worktrees say.
-func (b *Book) named(r resource, now time.Time) *entry {
+// r's, whatever the worktrees say. Without a baseline (ownOnly) only an
+// exact --name, or a lease of r's own worktree, names it.
+func (b *Book) named(r resource, now time.Time, ownOnly bool) *entry {
 	for _, live := range []bool{true, false} {
 		for _, e := range b.open {
-			if now.Before(e.Expires) == live && e.waitsFor() == r.kind && e.takes(r) && e.names(r) {
-				return e
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r) {
+				continue
 			}
+			exact := e.name != "" && e.name == r.name
+			if ownOnly && !exact && (r.worktree == "" || e.Worktree != r.worktree) {
+				continue
+			}
+			return e
 		}
 	}
 	return nil
@@ -481,7 +551,7 @@ func (e *entry) names(r resource) bool {
 	case r.kind == "vm":
 		return e.target != "" && e.target == r.name
 	case r.kind == "compose":
-		return false // takes already keeps a compose lease to its project
+		return e.project != "" && e.project == r.project // -p, or its first container's
 	case e.name != "":
 		return e.name == r.name
 	case e.target == "":
@@ -493,7 +563,7 @@ func (e *entry) names(r resource) bool {
 	if isStart(e.Command) {
 		// docker start takes a container's ID, or a unique prefix of it.
 		id := strings.TrimPrefix(r.key, "container:")
-		return len(e.target) >= 4 && strings.HasPrefix(id, e.target)
+		return strings.HasPrefix(id, e.target)
 	}
 	// An image is no name: only in the lease's own worktree, or where the
 	// worktree is unknown, does it say the container is the call's.
@@ -521,8 +591,9 @@ func (e *entry) namesOther(r resource) bool {
 // Docker reads a short one: docker.io/library/ and :latest are implied.
 func sameImage(a, b string) bool {
 	norm := func(s string) string {
-		s = strings.TrimPrefix(s, "docker.io/")
-		s = strings.TrimPrefix(s, "library/")
+		for _, p := range []string{"docker.io/", "index.docker.io/", "localhost/", "library/"} {
+			s = strings.TrimPrefix(s, p) // podman lists local images as localhost/
+		}
 		if i := strings.LastIndex(s, "/"); !strings.Contains(s[i+1:], ":") && !strings.Contains(s, "@") {
 			s += ":latest"
 		}
@@ -542,9 +613,11 @@ func processAlive(pid int) bool {
 func (b *Book) Ungated() []protocol.Ungated {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]protocol.Ungated, 0, len(b.ungated))
-	for _, u := range b.ungated {
-		out = append(out, u)
+	var out []protocol.Ungated
+	for _, v := range b.verdicts {
+		if v.how == ungated && v.present {
+			out = append(out, v.u)
+		}
 	}
 	slices.SortFunc(out, func(a, b protocol.Ungated) int {
 		if c := a.Since.Compare(b.Since); c != 0 {

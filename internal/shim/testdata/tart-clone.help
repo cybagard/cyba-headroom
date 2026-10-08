@@ -1,0 +1,33 @@
+OVERVIEW: Clone a VM
+
+Creates a local virtual machine by cloning either a remote or another local
+virtual machine.
+
+Due to copy-on-write magic in Apple File System, a cloned VM won't actually
+claim all the space right away.
+Only changes to a cloned disk will be written and claim new space. This also
+speeds up clones enormously.
+
+By default, Tart checks available capacity in Tart's home directory and tries
+to reclaim minimum possible storage for the cloned image
+to fit. This behaviour is called "automatic pruning" and can be disabled by
+setting TART_NO_AUTO_PRUNE environment variable.
+
+USAGE: tart clone <source-name> <new-name> [--insecure] [--concurrency <concurrency>] [--stacked] [--overwrite] [--prune-limit <n>]
+
+ARGUMENTS:
+  <source-name>           source VM name
+  <new-name>              new VM name
+
+OPTIONS:
+  --insecure              connect to the OCI registry via insecure HTTP protocol
+  --concurrency <concurrency>
+                          network concurrency to use when pulling a remote VM
+                          from the OCI-compatible registry (default: 4)
+  --stacked               create a stacked disk that uses the source image as
+                          an immutable base
+  --overwrite             overwrite an existing local VM
+  --prune-limit <n>       limit automatic pruning to n gigabytes (default: 100)
+  --version               Show the version.
+  -h, --help              Show help information.
+

@@ -149,14 +149,29 @@ func TestGateResolvesAStartsContainer(t *testing.T) {
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
 	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
-	started := gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db"}, s)
+	started := gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", DefaultEngine: true}, s)
 	ls := book.List()
 	if len(ls) != 1 || ls[0].ID != started.LeaseID || ls[0].Bytes != 4<<30 {
 		t.Fatalf("leases = %+v, want the start's, with the create's 4 GiB", ls)
 	}
 	// Docker cannot say: the start's lease stands alone.
-	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope", Target: "nope"}, s)
+	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope", Target: "nope", DefaultEngine: true}, s)
 	if len(book.List()) != 2 {
 		t.Fatalf("leases = %+v", book.List())
+	}
+}
+
+// Only a plain docker call on the default engine is looked up in Docker.
+func TestGateLooksUpOnlyDockerStarts(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
+	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
+	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "podman start db", Target: "db"}, s)
+	if len(book.List()) != 2 {
+		t.Fatalf("podman's start took over docker's create: %+v", book.List())
 	}
 }

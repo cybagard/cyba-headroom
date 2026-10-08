@@ -20,7 +20,7 @@ func TestComposeUpAfterStopBindsByItsProjectDirectory(t *testing.T) {
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(snap()) // docker compose stop
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDir: "/Users/dev/src/a"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/Users/dev/src/a"}}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // docker compose up -d: the same containers
 	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
@@ -81,7 +81,7 @@ func TestARunsReservationSurvivesAStart(t *testing.T) {
 func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b, c, log := book(t)
 	b.Observe(snap())
-	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDir: "/Users/dev/src/a"}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/Users/dev/src/a"}}
 	app := func(s *protocol.Snapshot) *protocol.Snapshot {
 		return addContainer(s, protocol.Container{ID: "A1", Name: "a-web-1", MemoryBytes: gib / 4,
 			Labels: map[string]string{"com.docker.compose.project": "a", protocol.ComposeWorkingDirLabel: "/Users/dev/src/a"}}, "w1")
@@ -98,6 +98,79 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	}
 	c.t = c.t.Add(3 * time.Minute)
 	b.Observe(app(snap()))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("logged: %s", log)
+	}
+}
+
+// A compose lease has one key: its project if it names one, else its
+// directory. Two projects from one directory are two leases.
+func TestComposeProjectsFromOneDirectoryStayApart(t *testing.T) {
+	for name, second := range map[string]policy.Request{
+		"-p a then -p b": {Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "b", ComposeDirs: []string{"/repo"}},
+		"-p a then none": {Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/repo"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, _, _ := book(t)
+			b.Observe(snap())
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "a", ComposeDirs: []string{"/repo"}}, snap(), cfg)
+			b.Check(second, snap(), cfg)
+			if r := reserved(b); r != 2*gib {
+				t.Fatalf("reserved %d GiB, want both stacks' 2", r>>30)
+			}
+		})
+	}
+}
+
+// docker restart (or start) of a running container starts nothing new: no
+// lease, so nothing is double-counted.
+func TestRestartingARunningContainerTakesNoLease(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "C", Name: "c", MemoryBytes: 2 * gib}, "w1")
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker restart c", CostBytes: gib, Target: "c", ContainerID: "C"}, s, cfg)
+	if !d.Allow || d.LeaseID != "" || len(b.List()) != 0 {
+		t.Fatalf("decision %+v, leases %+v", d, b.List())
+	}
+}
+
+// The baseline comes from the first reading only: later checks do not
+// rebuild it, even when a source (Tart) never reads.
+func TestALaterCheckIsNoBaseline(t *testing.T) {
+	b, _, _ := book(t)
+	noTart := snap()
+	noTart.Tart = nil
+	b.Observe(noTart)
+	// A VM shows up in a check's snapshot: it is not a baseline, so when
+	// Tart reads, it is new.
+	withVM := snap()
+	withVM.Tart.VMs = []protocol.TartVM{{Name: "v", MemoryBytes: gib}}
+	b.Check(req("w1", gib), withVM, cfg)
+	b.Observe(withVM)
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v: before Tart's first reading, a VM is a baseline", got)
+	}
+}
+
+// A plain compose up and a -p other up from one directory: both projects'
+// containers carry that directory. The named project's lease takes its
+// own, and the directory's lease the default project's.
+func TestANamedProjectBeatsADirectoryKey(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/repo"}}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "other"}, snap(), cfg)
+	ctr := func(s *protocol.Snapshot, id, project string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: project + "-web-1", MemoryBytes: gib / 4,
+			Labels: map[string]string{"com.docker.compose.project": project, protocol.ComposeWorkingDirLabel: "/repo"}}, "w1")
+	}
+	b.Observe(ctr(ctr(snap(), "o1", "other"), "r1", "repo")) // other's first
+	if l := b.List(); len(l) != 2 || l[0].Bytes != gib-gib/4 || l[1].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want each bound to its own project", l)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(ctr(ctr(snap(), "o1", "other"), "r1", "repo"))
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("logged: %s", log)
 	}

@@ -574,3 +574,31 @@ func TestComposeKey(t *testing.T) {
 		})
 	}
 }
+
+func TestComposeKeyFindsTheProjectAsComposeDoes(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wd := func() (string, error) { return sub, nil }
+	// From a subdirectory: the directory of the compose file above it.
+	if p, d := composeKey(shim.Call{}, func(string) string { return "" }, wd); p != "" || d != root {
+		t.Fatalf("composeKey = %q, %q; want the project at %q", p, d, root)
+	}
+	// The project's .env names it.
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("# x\nCOMPOSE_PROJECT_NAME=fromenv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := composeKey(shim.Call{}, func(string) string { return "" }, wd); p != "fromenv" {
+		t.Fatalf("project = %q, want fromenv from .env", p)
+	}
+	// An absolute -f needs no working directory.
+	gone := func() (string, error) { return "", os.ErrNotExist }
+	if _, d := composeKey(shim.Call{ComposeDir: "/srv/app"}, func(string) string { return "" }, gone); d != "/srv/app" {
+		t.Fatalf("dir = %q", d)
+	}
+}

@@ -108,12 +108,13 @@ type entry struct {
 	// resolved it. name: a run's --name, for a call the shim did not label.
 	// target: a start's container as given, when Docker could not resolve
 	// it, or a tart run's VM. composeDir: a compose call's project
-	// directory, when it names no project.
+	// directories, when it names no project: as given and with symlinks
+	// resolved, both cleaned, so matching a label needs no filesystem call.
 	labelled    bool
 	containerID string
 	name        string
 	target      string
-	composeDir  string
+	composeDirs []string
 }
 
 // How a resource started (#33).
@@ -181,7 +182,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if !d.Allow {
 		return d
 	}
-	if s != nil && len(b.based) < 2 {
+	if s != nil && b.latest == nil {
 		// Before the first Observe, the check's own reading is the
 		// baseline, of each source it has one of.
 		b.baseline(s)
@@ -196,30 +197,33 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		labelled: r.Labelled, containerID: r.ContainerID, name: r.Name, target: r.Target,
 	}
 	if r.Kind == "compose" {
-		// The project it names (-p, COMPOSE_PROJECT_NAME), else its
-		// directory, which Compose labels each container with.
-		e.project, e.target, e.composeDir = r.Target, "", r.ComposeDir
-	}
-	if e.Kind == "compose" {
-		// compose up again for a project an open lease already waits for
-		// or holds (compose stop, then up): this call's lease takes that one
-		// over, with its containers, and keeps the larger cost.
+		// One key: the project it names (-p, COMPOSE_PROJECT_NAME), else
+		// its directory, which Compose labels each container with.
+		e.target = ""
+		if r.Target != "" {
+			e.project = r.Target
+		} else {
+			e.composeDirs = r.ComposeDirs
+		}
+		// compose up again for the project an open lease already waits
+		// for or holds (compose stop, then up): this call's lease takes that
+		// one over, with its containers, and keeps the larger cost.
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			same := o.Kind == "compose" && (e.project != "" && e.project == o.project ||
-				e.composeDir != "" && o.composeDir != "" && sameDir(e.composeDir, o.composeDir))
-			if !same {
+			if o.Kind != "compose" || !e.sameKey(o) {
 				return false
 			}
 			e.cost, e.used = max(e.cost, o.cost), o.used
 			for k := range o.bound {
 				e.bound[k] = true
 			}
-			if e.project == "" {
-				e.project = o.project
-			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
+	}
+	if r.ContainerID != "" && s != nil && slices.ContainsFunc(resources(s), func(x resource) bool { return x.id == r.ContainerID }) {
+		// A start or restart of a container that runs: it starts nothing
+		// new, and the container already counts. No lease.
+		return d
 	}
 	if r.TakesOver != "" {
 		// A start of a container a run or create made that has not run
@@ -309,12 +313,9 @@ func (e *entry) waitsFor() string {
 	return "container"
 }
 
-// takes reports whether e can bind r: a compose lease takes every container
-// of the project its first container belonged to; the rest take one.
+// takes reports whether e can bind r: a container or VM lease takes one,
+// a macOS one a macOS VM (compose leases take their project's: see key).
 func (e *entry) takes(r resource) bool {
-	if e.Kind == "compose" {
-		return e.project == "" || e.project == r.project
-	}
 	if e.macOS && r.os != "darwin" && r.os != "" {
 		return false // a macOS lease's slot is freed by a macOS VM only ("": unknown, counted as one)
 	}
@@ -526,16 +527,18 @@ func (b *Book) boundAnywhere(key string) bool {
 }
 
 // keyed is the lease in es whose key r matches. The surest key wins: a
-// container's label names its lease outright, before a start's container ID,
-// before a name (docker start db || docker run --name db: the run's label
-// beats the start's name). Without a baseline (based false), only a label or
-// a container ID counts.
+// container's label names its lease outright, before a start's container ID
+// or a compose project's name, before a name or a compose directory
+// (docker start db || docker run --name db: the run's label beats the
+// start's name; compose -p other beats a plain compose up from the same
+// directory, whose containers all carry it). Without a baseline (based
+// false), only a label or a container ID counts.
 func keyed(es []*entry, r resource, based bool) *entry {
 	rank := func(e *entry) int {
 		switch {
 		case e.labelled:
 			return 0
-		case e.containerID != "":
+		case e.containerID != "", e.Kind == "compose" && len(e.composeDirs) == 0:
 			return 1
 		}
 		return 2
@@ -565,10 +568,13 @@ func (e *entry) key(r resource, based bool) bool {
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
 		switch {
+		case len(e.composeDirs) > 0:
+			// Every project from that directory carries it: once the lease
+			// holds one, it takes that project's only.
+			return based && r.dir != "" && slices.Contains(e.composeDirs, filepath.Clean(r.dir)) &&
+				(e.project == "" || e.project == r.project)
 		case e.project != "":
-			return based && e.project == r.project // -p, or locked by its first container
-		case e.composeDir != "":
-			return based && r.dir != "" && sameDir(e.composeDir, r.dir)
+			return based && e.project == r.project
 		}
 		return false
 	case e.Kind != "container" || len(e.bound) > 0:
@@ -594,14 +600,13 @@ func (b *Book) lapsedFor(r resource) bool {
 	return true
 }
 
-// sameDir reports whether two paths name one directory, symlinks resolved.
-func sameDir(a, b string) bool {
-	if filepath.Clean(a) == filepath.Clean(b) {
-		return true
+// sameKey reports whether compose leases e and o have the same key: the
+// same named project, or (neither naming one) the same directory.
+func (e *entry) sameKey(o *entry) bool {
+	if len(e.composeDirs) > 0 || len(o.composeDirs) > 0 {
+		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) })
 	}
-	ra, err1 := filepath.EvalSymlinks(a)
-	rb, err2 := filepath.EvalSymlinks(b)
-	return err1 == nil && err2 == nil && ra == rb
+	return e.project != "" && e.project == o.project
 }
 
 // judge records how r started.

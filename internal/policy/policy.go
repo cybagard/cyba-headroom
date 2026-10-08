@@ -90,9 +90,9 @@ type Request struct {
 	// TakesOver the lease of the run or create that made it (its label),
 	// which this call's lease replaces (#33).
 	ContainerID, TakesOver string
-	// ComposeDir is a compose call's project directory, its lease's key
-	// when it names no project (#33).
-	ComposeDir string
+	// ComposeDirs is a compose call's project directory, as given and with
+	// symlinks resolved: its lease's key when it names no project (#33).
+	ComposeDirs []string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

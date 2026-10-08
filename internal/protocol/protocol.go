@@ -71,6 +71,10 @@ type CheckRequest struct {
 	// ComposeDir is a compose call's project directory, absolute: the key
 	// of its lease when it names no project (Target).
 	ComposeDir string `json:"compose_dir,omitempty"`
+	// DefaultEngine is set for a docker call on the engine the daemon
+	// reads (no --context, -H, DOCKER_HOST or DOCKER_CONTEXT): only then
+	// does the daemon look a start's container up there.
+	DefaultEngine bool `json:"default_engine,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

@@ -105,8 +105,12 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
+	req.DefaultEngine = name == "docker" && c.Endpoint == "" && getenv("DOCKER_HOST") == "" && getenv("DOCKER_CONTEXT") == ""
 	if c.Kind == "compose" {
 		req.Target, req.ComposeDir = composeKey(c, getenv, h.getwd)
+		if req.Target != "" {
+			req.ComposeDir = "" // one key: the project, else the directory
+		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -207,29 +211,82 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 	return r
 }
 
-// composeKey is a compose call's project, as Compose names it (-p, then
-// COMPOSE_PROJECT_NAME), and its project directory, absolute: the key of
-// its lease when it names no project (#33). Compose labels each container
-// with both.
+// composeKey is a compose call's project and project directory as Compose
+// finds them (#33). The project: -p, else COMPOSE_PROJECT_NAME, else the
+// project's .env. The directory: --project-directory, else the first -f
+// file's, else COMPOSE_FILE's (from the environment, else the .env),
+// else the nearest directory up from the working one that holds a compose
+// file, else the working directory. Compose labels each container with
+// both; the lease's key is the project if one is named, else the
+// directory.
 func composeKey(c shim.Call, getenv func(string) string, getwd func() (string, error)) (project, dir string) {
 	project = c.Target
 	if project == "" {
 		project = getenv("COMPOSE_PROJECT_NAME")
 	}
 	dir = c.ComposeDir
-	if dir == "" {
-		if f, _, _ := strings.Cut(getenv("COMPOSE_FILE"), string(filepath.ListSeparator)); f != "" {
-			dir = filepath.Dir(f)
+	file := getenv("COMPOSE_FILE")
+	cwd, err := getwd()
+	if err != nil && !filepath.IsAbs(dir) {
+		return project, "" // no working directory to resolve against
+	}
+	if dir == "" && file == "" {
+		dir = findComposeDir(cwd)
+		env := dotEnv(filepath.Join(dir, ".env"))
+		if project == "" {
+			project = env["COMPOSE_PROJECT_NAME"]
+		}
+		file = env["COMPOSE_FILE"]
+		if file != "" && !filepath.IsAbs(file) {
+			file = filepath.Join(dir, file)
 		}
 	}
-	cwd, err := getwd()
-	if err != nil {
-		return project, ""
+	if dir == "" {
+		if f, _, _ := strings.Cut(file, string(filepath.ListSeparator)); f != "" {
+			dir = filepath.Dir(f)
+		}
 	}
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(cwd, dir)
 	}
 	return project, filepath.Clean(dir)
+}
+
+// composeFiles are the names Compose looks for, in each directory up from
+// the working one.
+var composeFiles = []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"}
+
+// findComposeDir is the nearest directory from dir up that holds a compose
+// file, or dir.
+func findComposeDir(dir string) string {
+	for d := dir; ; d = filepath.Dir(d) {
+		for _, f := range composeFiles {
+			if fi, err := os.Stat(filepath.Join(d, f)); err == nil && fi.Mode().IsRegular() {
+				return d
+			}
+		}
+		if filepath.Dir(d) == d {
+			return dir
+		}
+	}
+}
+
+// dotEnv reads the COMPOSE_ settings of a .env file: KEY=VALUE lines,
+// optionally quoted. A missing file is empty.
+func dotEnv(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || !strings.HasPrefix(k, "COMPOSE_") {
+			continue
+		}
+		out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	return out
 }
 
 // notGated warns, in one line, that a call runs without a check (R7).

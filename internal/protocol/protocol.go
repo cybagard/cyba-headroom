@@ -9,13 +9,15 @@ import "time"
 // Version is the protocol version every request and reply carries.
 const Version = 1
 
-// Ops understood by the daemon. lease arrives with #25.
+// Ops understood by the daemon.
 const (
 	OpPing   = "ping"
 	OpStatus = "status"
 	// OpCheck asks the policy (#24) whether a resource-creating call may go
 	// ahead.
 	OpCheck = "check"
+	// OpRelease ends a check's lease when its call did not start (#28).
+	OpRelease = "release"
 )
 
 // MaxLine bounds a single request or reply line.
@@ -27,6 +29,8 @@ type Request struct {
 	Op string `json:"op"`
 	// Check is the call to decide, for OpCheck.
 	Check *CheckRequest `json:"check,omitempty"`
+	// Release is the lease to end, for OpRelease.
+	Release string `json:"release,omitempty"`
 }
 
 // CheckRequest describes a resource-creating call (#24).
@@ -38,11 +42,29 @@ type CheckRequest struct {
 	Command string `json:"command"`
 	// CostBytes is the caller's estimate; 0 means the policy's default.
 	CostBytes uint64 `json:"cost_bytes,omitempty"`
+	// Cwd and Ancestors identify the caller when Worktree is empty (#28):
+	// its working directory, and its parent PIDs, nearest first.
+	Cwd       string `json:"cwd,omitempty"`
+	Ancestors []int  `json:"ancestors,omitempty"`
+	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
+	// may be known by either spelling.
+	RealCwd string `json:"real_cwd,omitempty"`
 }
+
+// How a check's worktree was found (Decision.IdentifiedBy).
+const (
+	IdentifiedByCaller  = "caller"  // named by the caller: HEADROOM_WORKTREE, ORCA_WORKTREE_ID or --worktree
+	IdentifiedByCwd     = "cwd"     // the working directory is in the worktree
+	IdentifiedByProcess = "process" // the caller descends from its terminal
+)
 
 // Decision is the policy's answer to a CheckRequest.
 type Decision struct {
 	Allow bool `json:"allow"`
+	// Worktree is the worktree the call was decided for, "" for a manual
+	// call, and IdentifiedBy how it was found.
+	Worktree     string `json:"worktree,omitempty"`
+	IdentifiedBy string `json:"identified_by,omitempty"`
 	// Retry is true when waiting may let the call through.
 	Retry   bool     `json:"retry,omitempty"`
 	Reasons []Reason `json:"reasons,omitempty"`

@@ -50,6 +50,9 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	if cfg.Policy.DaemonTimeout.Duration != 500*time.Millisecond {
 		t.Errorf("daemon timeout = %v, want 500ms (R7)", cfg.Policy.DaemonTimeout)
 	}
+	if cfg.Policy.WaitTimeout.Duration != 10*time.Minute {
+		t.Errorf("wait timeout = %v, want 10m (BUDGET_WAIT, #28)", cfg.Policy.WaitTimeout)
+	}
 	if cfg.Policy.MinHeadroomGB != 0 || cfg.Policy.PerWorktreeCapGB != 0 {
 		t.Error("thresholds must default to 0 (unset) until the baseline (#23)")
 	}
@@ -141,6 +144,7 @@ func TestLoadErrors(t *testing.T) {
 		{"zero container cost", "[policy]\ndefault_container_gb = 0\n", "policy.default_container_gb must be > 0"},
 		{"zero tart cost", "[policy]\ndefault_tart_gb = 0\n", "policy.default_tart_gb must be > 0"},
 		{"negative idle grace", "[policy]\nidle_grace = \"-1m\"\n", "policy.idle_grace must be >= 0"},
+		{"zero wait timeout", "[policy]\nwait_timeout = \"0s\"\n", "policy.wait_timeout must be > 0"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {

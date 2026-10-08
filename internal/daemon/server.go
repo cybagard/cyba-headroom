@@ -152,6 +152,17 @@ func (d *Daemon) answer(c net.Conn) protocol.Reply {
 		}
 		dec := d.check(req.Check, d.Snapshot())
 		return protocol.Reply{OK: true, Decision: &dec}
+	case protocol.OpRelease:
+		if d.release == nil {
+			return protocol.Reply{Error: "release: not supported by this daemon"}
+		}
+		if req.Release == "" {
+			return protocol.Reply{Error: "release: no lease given"}
+		}
+		if !d.release(req.Release) {
+			return protocol.Reply{Error: "release: no open lease " + req.Release}
+		}
+		return protocol.Reply{OK: true}
 	case protocol.OpPing:
 		return protocol.Reply{OK: true, PID: os.Getpid()}
 	case protocol.OpStatus:

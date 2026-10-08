@@ -49,7 +49,7 @@ func parseEngine(name string, args []string) Call {
 		case "--context", "-H", "--host", "-c", "--connection", "--url":
 			c.Endpoint = v
 		case "-v":
-			version = isTrue(v) // docker -v and podman -v print the version
+			version = IsTrue(v) // docker -v and podman -v print the version
 		}
 	})
 	if res == askedHelp || version || len(args) == 0 {
@@ -109,7 +109,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		case "-p", "--project-name":
 			project = v
 		case "--dry-run":
-			dryRun = isTrue(v)
+			dryRun = IsTrue(v)
 		}
 	})
 	if res == askedHelp || len(args) == 0 {
@@ -128,9 +128,9 @@ func parseCompose(endpoint string, words, args []string) Call {
 		}
 		switch f {
 		case "--dry-run":
-			dryRun = isTrue(v)
+			dryRun = IsTrue(v)
 		case "--no-up":
-			noUp = isTrue(v)
+			noUp = IsTrue(v)
 		}
 	}
 	if op == "run" {
@@ -175,8 +175,8 @@ func composeFlags(op string) flagSet {
 	return nil
 }
 
-// isTrue reads a boolean flag's value as the CLIs do (Go's ParseBool).
-func isTrue(v string) bool {
+// IsTrue reads a boolean value as the CLIs do (Go's ParseBool).
+func IsTrue(v string) bool {
 	b, err := strconv.ParseBool(v)
 	return err == nil && b
 }

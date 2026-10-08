@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -19,7 +17,7 @@ const exitDenied = 75
 // headroom check [--worktree ID] [--cost 2G] [--kind container] -- cmd...
 // It exits 0 on allow and 75 on deny.
 func runCheck(e Env) int {
-	req := protocol.CheckRequest{Kind: "container", Worktree: e.Getenv("HEADROOM_WORKTREE")}
+	req := protocol.CheckRequest{Kind: "container"}
 	a := e.Args[2:]
 	for len(a) > 0 && a[0] != "--" {
 		if len(a) < 2 {
@@ -49,33 +47,32 @@ func runCheck(e Env) int {
 		return checkUsage(e) // no -- or nothing after it
 	}
 	req.Command = strings.Join(a[1:], " ")
+	if req.Worktree == "" {
+		// Identify the caller as the shim does.
+		who := callerRequest(e.Getenv, e.withDefaults().ancestors)
+		req.Worktree, req.Cwd, req.RealCwd, req.Ancestors = who.Worktree, who.Cwd, who.RealCwd, who.Ancestors
+	}
 
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
-	rep, err := client.Do(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration,
-		protocol.Request{Op: protocol.OpCheck, Check: &req})
+	d, err := askDaemon(cfg, req)
 	switch {
-	case err != nil && rep.Error != "":
-		// The daemon answered but cannot check: most likely an older build
-		// still running after an upgrade.
-		fmt.Fprintf(e.Stderr, "headroom: the daemon cannot check calls (%s); restart it with this build: headroom install\n", rep.Error)
+	case errors.Is(err, errCannotCheck):
+		fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install\n", err)
 		return 1
 	case err != nil:
 		unreachable(e, cfg.Socket, err)
 		return 1
-	case rep.Decision == nil:
-		fmt.Fprintln(e.Stderr, "headroom: the daemon replied without a decision; restart it with this build: headroom install")
-		return 1
 	}
 	// A deny goes to stderr, where an agent looks for why a command failed.
-	if !rep.Decision.Allow {
-		fmt.Fprintln(e.Stderr, rep.Decision.Message)
+	if !d.Allow {
+		fmt.Fprintln(e.Stderr, d.Message)
 		return exitDenied
 	}
-	fmt.Fprintln(e.Stdout, rep.Decision.Message)
+	fmt.Fprintln(e.Stdout, d.Message)
 	return 0
 }
 

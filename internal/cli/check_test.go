@@ -49,6 +49,27 @@ func TestCheckWorktreeFromEnv(t *testing.T) {
 	}
 }
 
+// headroom check identifies its caller as the shim does (#28).
+func TestCheckIdentifiesLikeTheShim(t *testing.T) {
+	var seen *protocol.CheckRequest
+	env, _ := serveDaemonWith(t, func(d *daemon.Daemon) {
+		d.SetCheck(func(r *protocol.CheckRequest, _ *protocol.Snapshot) protocol.Decision {
+			seen = r
+			return protocol.Decision{Allow: true}
+		})
+	})
+	env["ORCA_WORKTREE_ID"] = "orca-id"
+	run(t, env, "headroom", "check", "--", "docker", "run", "x")
+	if seen == nil || seen.Worktree != "orca-id" {
+		t.Fatalf("request %+v", seen)
+	}
+	delete(env, "ORCA_WORKTREE_ID")
+	run(t, env, "headroom", "check", "--", "docker", "run", "x")
+	if seen.Worktree != "" || seen.Cwd == "" || len(seen.Ancestors) == 0 {
+		t.Fatalf("without the env, want cwd and ancestry: %+v", seen)
+	}
+}
+
 func TestCheckArgs(t *testing.T) {
 	env, _ := serveDaemon(t)
 	for _, args := range [][]string{

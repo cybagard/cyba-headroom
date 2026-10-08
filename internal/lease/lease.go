@@ -16,6 +16,8 @@
 package lease
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -36,6 +38,9 @@ type Book struct {
 	mu     sync.Mutex
 	open   []*entry // oldest first
 	nextID int
+	// run tells this book's lease IDs from an earlier daemon run's, so a
+	// release for one of those cannot end one of these.
+	run string
 	// latest is a copy of the snapshot Observe last settled the leases
 	// against, observed when. Checks decide on it, so leases and the
 	// resources that replaced them are always seen together.
@@ -66,7 +71,9 @@ func (e *entry) reserved() uint64 { return e.cost - min(e.used, e.cost) }
 
 // New returns an empty book whose leases last timeout.
 func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
-	return &Book{timeout: timeout, now: now, log: log}
+	var r [3]byte
+	_, _ = rand.Read(r[:])
+	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:])}
 }
 
 // stale is how much newer the daemon's snapshot must be than the one leases
@@ -110,7 +117,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	b.nextID++
 	e := &entry{
 		Lease: protocol.Lease{
-			ID: fmt.Sprintf("lease-%d", b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
+			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
 		cost: d.CostBytes, bound: map[string]bool{},
@@ -317,6 +324,20 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 		}
 	}
 	return nil
+}
+
+// Release ends the open lease id, whose call never started (its exec
+// failed); false if no such lease is open.
+func (b *Book) Release(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(b.open)
+	b.open = slices.DeleteFunc(b.open, func(e *entry) bool { return e.ID == id })
+	if len(b.open) == n {
+		return false
+	}
+	b.log.Debug("lease released: its call did not start", "lease", id)
+	return true
 }
 
 // List returns the open leases, oldest first, each with what it still

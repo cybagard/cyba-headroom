@@ -70,6 +70,9 @@ type Env struct {
 	ask        func(config.Config, protocol.CheckRequest) (*protocol.Decision, error) // askDaemon
 	release    func(config.Config, string) error                                      // releaseLease
 	ancestors  func() []int                                                           // shim.Ancestors
+	getwd      func() (string, error)                                                 // os.Getwd
+	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
+	loginShell func(shell string) (string, error)                                     // askLoginShell
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
@@ -132,7 +135,7 @@ func Run(e Env) int {
 	case "run":
 		return runRun(e)
 	case "doctor":
-		return notYet(e, "doctor", 32)
+		return runDoctor(e)
 	default:
 		fmt.Fprintf(e.Stderr, "headroom: unknown command %q\n\n", cmd)
 		usage(e.Stderr)
@@ -384,11 +387,6 @@ func (e Env) envOf() ([]string, func(string) string) {
 func setEnv(env []string, k, v string) []string {
 	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, k+"=") })
 	return append(env, k+"="+v)
-}
-
-func notYet(e Env, what string, issue int) int {
-	fmt.Fprintf(e.Stderr, "headroom: %s is not implemented yet (#%d)\n", what, issue)
-	return 1
 }
 
 func usage(w io.Writer) {

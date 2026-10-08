@@ -96,7 +96,7 @@ func (r *renderer) reserved(b *protocol.Budget) {
 			continue
 		}
 		if c.ReservedBytes > 0 {
-			parts = append(parts, clean(c.Name)+" "+num(c.ReservedBytes))
+			parts = append(parts, Clean(c.Name)+" "+num(c.ReservedBytes))
 		}
 	}
 	r.add("  reserved: %s", strings.Join(parts, " · "))
@@ -138,10 +138,10 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 		r.add(rowFormat, "unattributed", "", "", containers(u), vms(u), cpu(u, nil, false), "")
 		var items []string
 		for _, c := range u.Containers {
-			items = append(items, fmt.Sprintf("%s (%s)", clean(c.Name), clean(c.Reason)))
+			items = append(items, fmt.Sprintf("%s (%s)", Clean(c.Name), Clean(c.Reason)))
 		}
 		for _, vm := range u.TartVMs {
-			items = append(items, fmt.Sprintf("%s (%s)", clean(vm.Name), clean(vm.Reason)))
+			items = append(items, fmt.Sprintf("%s (%s)", Clean(vm.Name), Clean(vm.Reason)))
 		}
 		r.add("  %s", strings.Join(items, ", "))
 	}
@@ -174,27 +174,27 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 		if !st.Stale {
 			continue
 		}
-		msg := clean(st.Err)
+		msg := Clean(st.Err)
 		if n == "orca" && s.Attribution != nil && s.Attribution.OrcaStale {
 			msg = "worktree list may be out of date"
 		}
-		parts = append(parts, r.paint(yellow, clean(n)+" stale: "+msg))
+		parts = append(parts, r.paint(yellow, Clean(n)+" stale: "+msg))
 	}
 	r.add("%s", strings.Join(parts, " · "))
 }
 
 func name(w protocol.WorktreeUsage) string {
 	if w.Name != "" {
-		return clean(w.Name)
+		return Clean(w.Name)
 	}
-	return clean(filepath.Base(w.Path))
+	return Clean(filepath.Base(w.Path))
 }
 
-// clean makes text from outside headroom (names, errors) safe to print:
+// Clean makes text from outside headroom (names, errors) safe to print:
 // control characters, which could move the cursor, set the title or write
 // the clipboard, and Unicode bidi overrides become "?". After this, the only
 // escapes in a line are the view's own colours.
-func clean(s string) string {
+func Clean(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
 			return '?'
@@ -240,7 +240,7 @@ func agentSummary(ag []protocol.Agent) string {
 		return "–"
 	}
 	first := slices.MinFunc(ag, func(a, b protocol.Agent) int { return rank(a.State) - rank(b.State) })
-	s := clean(first.Type) + " " + clean(first.State)
+	s := Clean(first.Type) + " " + Clean(first.State)
 	if len(ag) > 1 {
 		s += fmt.Sprintf(" +%d", len(ag)-1)
 	}
@@ -296,7 +296,7 @@ func gbOrUnknown(b *uint64) string {
 
 func (r *renderer) trend(t protocol.Trend) string {
 	label := durationLabel(r.o.TrendWindow)
-	dir := clean(t.Direction)
+	dir := Clean(t.Direction)
 	if dir == "" {
 		dir = "?"
 	}
@@ -307,7 +307,7 @@ func (r *renderer) trend(t protocol.Trend) string {
 	if t.Worst == "critical" {
 		secs = t.CriticalSeconds
 	}
-	return fmt.Sprintf("(%s: %s, worst %s %.0fs)", label, dir, clean(t.Worst), secs)
+	return fmt.Sprintf("(%s: %s, worst %s %.0fs)", label, dir, Clean(t.Worst), secs)
 }
 
 // ANSI colours.
@@ -330,7 +330,7 @@ func (r *renderer) pressure(level string) string {
 	case "":
 		return "?"
 	}
-	return clean(level)
+	return Clean(level)
 }
 
 func (r *renderer) paint(color, s string) string {

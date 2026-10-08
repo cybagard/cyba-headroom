@@ -49,7 +49,8 @@ func runCheck(e Env) int {
 	req.Command = strings.Join(a[1:], " ")
 	if req.Worktree == "" {
 		// Identify the caller as the shim does.
-		who := callerRequest(e.Getenv, e.withDefaults().ancestors)
+		h := e.withDefaults()
+		who := callerRequest(e.Getenv, h.ancestors, h.getwd)
 		req.Worktree, req.Cwd, req.RealCwd, req.Ancestors = who.Worktree, who.Cwd, who.RealCwd, who.Ancestors
 	}
 

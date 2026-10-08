@@ -225,10 +225,41 @@ func TestKeptLoadedForeverHasNoExpiry(t *testing.T) {
 }
 
 func TestRemoteEndpointLeavesModelsUnknown(t *testing.T) {
-	got := collect(t, ollama.New(ollama.NotLocal{Host: "gpu-box:11434"}, serverTree(), is(true)))
+	got := collect(t, ollama.New(ollama.Unusable{Err: errors.New(`ollama host "gpu-box:11434" is not a loopback address`)}, serverTree(), is(true)))
 	if !got.Running || !strings.Contains(got.ModelsError, `"gpu-box:11434"`) || got.FootprintBytes == nil {
 		t.Fatalf("got %+v, want running, models unknown naming the host, footprint measured", got)
 	}
 }
 
 func is(b bool) func() bool { return func() bool { return b } }
+
+// flakyFootprints fails the first footprint run, as when a runner exits
+// between the process scan and the footprint run.
+type flakyFootprints struct {
+	fakeProcs
+	calls *int
+}
+
+func (f flakyFootprints) Footprints(ctx context.Context, pids ...int) (uint64, error) {
+	*f.calls++
+	if *f.calls == 1 {
+		return 0, errors.New("footprint: no such process")
+	}
+	return f.fakeProcs.Footprints(ctx, pids...)
+}
+
+func TestFootprintIsRetriedOnce(t *testing.T) {
+	calls := 0
+	got := collect(t, ollama.New(fakeAPI{t: t, file: "ps-empty.json", allowed: true}, flakyFootprints{serverTree(), &calls}, is(true)))
+	if got.FootprintBytes == nil || calls != 2 {
+		t.Fatalf("footprint = %v after %d runs, want measured on the second", got.FootprintBytes, calls)
+	}
+}
+
+func TestInstalledIsNotSearchedWhileRunning(t *testing.T) {
+	searched := false
+	src := ollama.New(fakeAPI{t: t, file: "ps-empty.json", allowed: true}, serverTree(), func() bool { searched = true; return false })
+	if got := collect(t, src); !got.Installed || searched {
+		t.Fatalf("installed=%v searched=%v, want installed without a search", got.Installed, searched)
+	}
+}

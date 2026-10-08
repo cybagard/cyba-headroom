@@ -4,7 +4,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -210,8 +209,10 @@ func runDaemon(e Env) int {
 		lmsCLI = lmstudio.Exec{Path: p}
 	}
 	// An endpoint that is not on this Mac is never contacted.
-	var ollamaAPI ollama.API = ollama.NotLocal{Host: cmp.Or(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST"))}
-	if base, ok := ollama.Endpoint(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST")); ok {
+	var ollamaAPI ollama.API
+	if base, err := ollama.Endpoint(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST")); err != nil {
+		ollamaAPI = ollama.Unusable{Err: err}
+	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
 	sources := []daemon.Source{

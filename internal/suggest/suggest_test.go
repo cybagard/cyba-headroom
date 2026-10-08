@@ -131,6 +131,20 @@ func TestSwapOutsAndStaleInputsAreLeftOut(t *testing.T) {
 	}
 }
 
+func TestStaleOllamaIsLeftOut(t *testing.T) {
+	ss := threeDays(func(s *samples.Sample, i int) {
+		if i%10 == 1 {
+			s.Stale = map[string]bool{"ollama": true}
+			un := int64(40 * gib)
+			s.Budget.UnaccountedBytes = &un
+		}
+	})
+	r := aggregate(ss)
+	if v := value(t, r, "host_baseline_gb"); v.GB != 5 || r.Stale == 0 {
+		t.Fatalf("baseline = %+v, stale %d", v, r.Stale)
+	}
+}
+
 func TestDockerOverhead(t *testing.T) {
 	ss := threeDays(func(s *samples.Sample, i int) {
 		s.Docker = &samples.Docker{VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: 4 * gib}

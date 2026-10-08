@@ -13,8 +13,8 @@ import (
 )
 
 func TestRealOllama(t *testing.T) {
-	base, ok := ollama.Endpoint("", os.Getenv("OLLAMA_HOST"))
-	if !ok {
+	base, err := ollama.Endpoint("", os.Getenv("OLLAMA_HOST"))
+	if err != nil {
 		t.Skip("OLLAMA_HOST is not on this Mac")
 	}
 	api := ollama.NewHTTP(base)
@@ -26,16 +26,26 @@ func TestRealOllama(t *testing.T) {
 		}
 		t.Skip("Ollama not running (and must not be started by this test)")
 	}
-	// The API is the oracle for the model list.
-	out, err := api.PS(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if !got.Installed || got.FootprintBytes == nil || *got.FootprintBytes == 0 {
+		t.Fatalf("got %+v, want installed with a footprint", got)
 	}
-	var ps struct{ Models []json.RawMessage }
-	if err := json.Unmarshal(out, &ps); err != nil {
-		t.Fatal(err)
-	}
-	if !got.Installed || len(got.Models) != len(ps.Models) || got.FootprintBytes == nil || *got.FootprintBytes == 0 {
-		t.Fatalf("got %+v; /api/ps lists %d models", got, len(ps.Models))
+	// The API is the oracle for the model list. A model can load or unload
+	// between the two reads, so retry a few times before failing.
+	for try := 0; ; try++ {
+		out, err := api.PS(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ps struct{ Models []json.RawMessage }
+		if err := json.Unmarshal(out, &ps); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Models) == len(ps.Models) {
+			return
+		}
+		if try == 2 {
+			t.Fatalf("collected %d models; /api/ps lists %d", len(got.Models), len(ps.Models))
+		}
+		got = collect(t, ollama.New(api, vmproc.Host{}, func() bool { return installed }))
 	}
 }

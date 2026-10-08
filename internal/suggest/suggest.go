@@ -135,7 +135,7 @@ func New(o Options) *Aggregator {
 
 // budgetSources are the inputs to the budget; a stale one makes a sample
 // unfit for budget maths.
-var budgetSources = []string{"host", "docker", "tart", "lmstudio"}
+var budgetSources = []string{"host", "docker", "tart", "lmstudio", "ollama"}
 
 // Add takes one sample.
 func (a *Aggregator) Add(s samples.Sample) {

@@ -29,6 +29,7 @@ func TestEndpoint(t *testing.T) {
 		{"", "[::1]:9000", "http://[::1]:9000", true},
 		{"", "http://127.0.0.1:11434/", "http://127.0.0.1:11434", true},
 		{"", "https://localhost", "https://localhost:443", true},
+		{"", "http://127.0.0.1", "http://127.0.0.1:80", true}, // as Ollama: an explicit scheme's own port
 		{"", "http://127.0.0.1:11434/ollama", "http://127.0.0.1:11434/ollama", true},
 		{"", "  127.0.0.1  ", "http://127.0.0.1:11434", true},
 		{"", `"127.0.0.1:1234"`, "http://127.0.0.1:1234", true}, // quoted, as Ollama accepts
@@ -45,9 +46,23 @@ func TestEndpoint(t *testing.T) {
 		{"", "127.0.0.1:99999", "http://127.0.0.1:11434", true},
 		{"", "127.0.0.1:0", "", false},
 	} {
-		got, ok := ollama.Endpoint(tc.configured, tc.env)
-		if got != tc.want || ok != tc.ok {
+		got, err := ollama.Endpoint(tc.configured, tc.env)
+		if ok := err == nil; got != tc.want || ok != tc.ok {
 			t.Errorf("Endpoint(%q, %q) = %q, %v; want %q, %v", tc.configured, tc.env, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestEndpointSaysWhy(t *testing.T) {
+	for host, why := range map[string]string{
+		"10.0.0.5":            "not a loopback address",
+		"gpu-box.local:11434": "not a loopback address",
+		"unix:///tmp/o.sock":  "scheme",
+		"127.0.0.1:0":         "port 0",
+		"http://u@127.0.0.1":  "user",
+	} {
+		if _, err := ollama.Endpoint(host, ""); err == nil || !strings.Contains(err.Error(), why) || !strings.Contains(err.Error(), host) {
+			t.Errorf("Endpoint(%q) err = %v, want the host and %q", host, err, why)
 		}
 	}
 }

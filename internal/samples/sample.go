@@ -106,8 +106,8 @@ type Model struct {
 type Ollama struct {
 	FootprintBytes *uint64       `json:"footprint_bytes,omitempty"`
 	Models         []OllamaModel `json:"models,omitempty"`
-	// ModelsUnknown means the model list could not be read (a remote
-	// endpoint): no models is not the same as none known.
+	// ModelsUnknown means the model list could not be read (the API failed
+	// or is not on this Mac): no models is not the same as none known.
 	ModelsUnknown bool `json:"models_unknown,omitempty"`
 }
 

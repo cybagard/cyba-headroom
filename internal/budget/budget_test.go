@@ -189,6 +189,10 @@ func TestOllamaReservesLoadedModels(t *testing.T) {
 			&protocol.Ollama{Installed: true, Running: true, Models: models(4 * gib), FootprintError: "boom"},
 			4*gib + gib/4, nil,
 		},
+		"models and footprint unknown": {
+			&protocol.Ollama{Installed: true, Running: true, ModelsError: "refused", FootprintError: "boom"},
+			gib / 4, nil,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -197,6 +201,19 @@ func TestOllamaReservesLoadedModels(t *testing.T) {
 				t.Fatalf("got reserved=%d used=%v, want %d %v", c.ReservedBytes, c.UsedBytes, tc.reserved, tc.used)
 			}
 		})
+	}
+}
+
+// With neither its models nor its footprint known, Ollama's cost is unknown:
+// headroom is an upper bound.
+func TestOllamaWithNothingKnownIsUnknown(t *testing.T) {
+	o := &protocol.Ollama{Installed: true, Running: true, ModelsError: "refused", FootprintError: "boom"}
+	if b := budget.Compute(&protocol.Snapshot{Ollama: o}, budget.Params{}); !slices.Contains(b.Unknown, "ollama") {
+		t.Fatalf("unknown = %v, want ollama", b.Unknown)
+	}
+	o.FootprintBytes, o.FootprintError = u64(gib), ""
+	if b := budget.Compute(&protocol.Snapshot{Ollama: o}, budget.Params{}); slices.Contains(b.Unknown, "ollama") {
+		t.Fatalf("unknown = %v, want ollama known by its footprint", b.Unknown)
 	}
 }
 

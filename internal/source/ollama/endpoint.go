@@ -52,8 +52,9 @@ const defaultPort = "11434"
 // host:port, :port, scheme://host:port/path). ok is false when it is not on
 // this Mac: a remote engine's models do not use this Mac's memory, so
 // headroom never contacts it. A server listening on every address
-// (0.0.0.0, ::) is asked over loopback.
-func Endpoint(configured, ollamaHost string) (base string, ok bool) {
+// (0.0.0.0, ::) is asked over loopback. The error says why a host is not
+// used.
+func Endpoint(configured, ollamaHost string) (string, error) {
 	raw := configured
 	if raw == "" {
 		raw = ollamaHost
@@ -62,21 +63,25 @@ func Endpoint(configured, ollamaHost string) (base string, ok bool) {
 	if raw == "" {
 		raw = "127.0.0.1"
 	}
-	scheme, hostport, found := strings.Cut(raw, "://")
-	if !found {
-		scheme, hostport = "http", raw
+	fail := func(why string) (string, error) {
+		return "", fmt.Errorf("ollama host %q %s; headroom does not ask it (set [ollama] host)", raw, why)
 	}
+	// As Ollama reads it: an explicit scheme brings its own default port.
+	scheme, hostport, found := strings.Cut(raw, "://")
 	port := defaultPort
-	switch scheme {
-	case "http":
-	case "https":
+	switch {
+	case !found:
+		scheme, hostport = "http", raw
+	case scheme == "http":
+		port = "80"
+	case scheme == "https":
 		port = "443"
 	default:
-		return "", false
+		return fail("has scheme " + scheme + ", not http or https")
 	}
 	hostport, path, _ := strings.Cut(hostport, "/")
 	if strings.Contains(hostport, "@") {
-		return "", false
+		return fail("has a user name")
 	}
 	host := hostport
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
@@ -88,23 +93,23 @@ func Endpoint(configured, ollamaHost string) (base string, ok bool) {
 	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
 		port = defaultPort
 	} else if n == 0 {
-		return "", false // a random port: nothing to ask
+		return fail("has port 0, a random port")
 	}
 	switch ip := net.ParseIP(host); {
 	case host == "":
 		host = "127.0.0.1"
 	case host == "localhost":
 	case ip == nil:
-		return "", false
+		return fail("is not a loopback address")
 	case ip.IsUnspecified() && ip.To4() != nil:
 		host = "127.0.0.1"
 	case ip.IsUnspecified():
 		host = "::1"
 	case !ip.IsLoopback():
-		return "", false
+		return fail("is not a loopback address")
 	}
 	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, port), Path: strings.TrimSuffix("/"+path, "/")}
-	return u.String(), true
+	return u.String(), nil
 }
 
 // maxPS caps the /api/ps response: a few models' entries are a few KB.

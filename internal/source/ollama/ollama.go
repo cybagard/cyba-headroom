@@ -10,6 +10,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,8 +38,8 @@ type Source struct {
 	installed func() bool
 }
 
-// New returns a source. installed is asked each tick, so an install while
-// the daemon runs shows up.
+// New returns a source. installed is asked on each tick with no server
+// running, so an install while the daemon runs shows up.
 func New(api API, procs Procs, installed func() bool) *Source {
 	return &Source{api: api, procs: procs, installed: installed}
 }
@@ -48,17 +49,28 @@ func (s *Source) Name() string { return "ollama" }
 
 // Collect implements daemon.Source.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
-	o := protocol.Ollama{Installed: s.installed(), Models: []protocol.OllamaModel{}}
+	o := protocol.Ollama{Models: []protocol.OllamaModel{}}
 	pids, err := s.servers()
 	if err != nil {
 		return nil, fmt.Errorf("ollama processes: %w", err)
 	}
 	if len(pids) == 0 {
+		o.Installed = s.installed()
 		return reading{o}, nil
 	}
 	o.Installed, o.Running = true, true
 
-	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
+	fp, err := s.procs.Footprints(ctx, pids...)
+	if err != nil {
+		// A runner that exits (keep-alive expired) between the scan and the
+		// footprint run fails the whole run: scan again and retry once.
+		if pids, err = s.servers(); err == nil && len(pids) > 0 {
+			fp, err = s.procs.Footprints(ctx, pids...)
+		} else if err == nil {
+			err = errors.New("ollama server exited")
+		}
+	}
+	if err != nil {
 		o.FootprintError = err.Error()
 	} else {
 		o.FootprintBytes = &fp
@@ -115,14 +127,12 @@ func (s *Source) servers() ([]int, error) {
 	return pids, nil
 }
 
-// NotLocal is the API of an Ollama host that is not on this Mac: its
-// models do not use this Mac's memory, so it is never asked.
-type NotLocal struct{ Host string }
+// Unusable is the API of an Ollama host headroom does not ask (see
+// Endpoint): every read fails with Err.
+type Unusable struct{ Err error }
 
 // PS implements API.
-func (n NotLocal) PS(context.Context) ([]byte, error) {
-	return nil, fmt.Errorf("ollama host %q is not a loopback address; headroom does not ask it (set [ollama] host)", n.Host)
-}
+func (u Unusable) PS(context.Context) ([]byte, error) { return nil, u.Err }
 
 // apiModel is the part of an /api/ps entry headroom reads.
 type apiModel struct {

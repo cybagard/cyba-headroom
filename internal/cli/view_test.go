@@ -33,6 +33,13 @@ func (hostSource) Collect(context.Context) (daemon.Reading, error) {
 // dir's socket, ticked once. It returns the env pointing at it.
 func serveDaemon(t *testing.T) (map[string]string, *daemon.Daemon) {
 	t.Helper()
+	return serveDaemonWith(t, nil)
+}
+
+// serveDaemonWith is serveDaemon with setup run on the daemon before it
+// serves, as runDaemon sets its hooks.
+func serveDaemonWith(t *testing.T, setup func(*daemon.Daemon)) (map[string]string, *daemon.Daemon) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +50,9 @@ func serveDaemon(t *testing.T) (map[string]string, *daemon.Daemon) {
 		t.Fatal(err)
 	}
 	d.Tick(context.Background())
+	if setup != nil {
+		setup(d)
+	}
 	ln, err := daemon.Listen(dir + "/d.sock")
 	if err != nil {
 		t.Fatal(err)

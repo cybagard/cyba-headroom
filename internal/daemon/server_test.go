@@ -31,11 +31,17 @@ func sockPath(t *testing.T) string {
 }
 
 // serve starts a daemon with no sources on a fresh socket and stops it at cleanup.
-func serve(t *testing.T, path string) *daemon.Daemon {
+func serve(t *testing.T, path string) *daemon.Daemon { return serveWith(t, path, nil) }
+
+// serveWith is serve with setup run before the daemon serves.
+func serveWith(t *testing.T, path string, setup func(*daemon.Daemon)) *daemon.Daemon {
 	t.Helper()
 	d, err := daemon.New(nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if setup != nil {
+		setup(d)
 	}
 	ln, err := daemon.Listen(path)
 	if err != nil {
@@ -278,11 +284,12 @@ func TestPingReportsThePID(t *testing.T) {
 
 func TestCheckRoundTrip(t *testing.T) {
 	path := sockPath(t)
-	d := serve(t, path)
 	var got *protocol.CheckRequest
-	d.SetCheck(func(r *protocol.CheckRequest, _ *protocol.Snapshot) protocol.Decision {
-		got = r
-		return protocol.Decision{Allow: false, Retry: true, Message: "no room", Reasons: []protocol.Reason{{Code: "headroom", Retry: true}}}
+	serveWith(t, path, func(d *daemon.Daemon) {
+		d.SetCheck(func(r *protocol.CheckRequest, _ *protocol.Snapshot) protocol.Decision {
+			got = r
+			return protocol.Decision{Allow: false, Retry: true, Message: "no room", Reasons: []protocol.Reason{{Code: "headroom", Retry: true}}}
+		})
 	})
 	rep, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck,
 		Check: &protocol.CheckRequest{Worktree: "w1", Kind: "container", Command: "docker run x", CostBytes: 1 << 30}})

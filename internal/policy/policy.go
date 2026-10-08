@@ -7,8 +7,10 @@ package policy
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
 )
 
 // Reason codes.
@@ -33,6 +35,13 @@ type Config struct {
 	// DefaultContainerBytes is the cost of a container or compose request
 	// whose caller gives none.
 	DefaultContainerBytes uint64
+	// DefaultTartBytes is the cost of a Tart VM whose caller gives none.
+	DefaultTartBytes uint64
+	// IdleGrace is how long an agent must have been out of the working
+	// state before its worktree counts as an idle holder.
+	IdleGrace time.Duration
+	// Now is the clock for IdleGrace.
+	Now func() time.Time
 }
 
 // Request describes one resource-creating call.
@@ -63,8 +72,11 @@ type (
 // Decide decides r against s.
 func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	d := Decision{CostBytes: r.CostBytes}
-	if d.CostBytes == 0 && r.Kind != "tart" {
+	if d.CostBytes == 0 {
 		d.CostBytes = c.DefaultContainerBytes
+		if r.Kind == "tart" {
+			d.CostBytes = c.DefaultTartBytes
+		}
 	}
 	if s.Budget != nil {
 		d.HeadroomBytes = s.Budget.HeadroomBytes
@@ -75,37 +87,38 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Message = "headroom: allowed (manual call)"
 		return d
 	}
-	if d.HeadroomBytes == nil {
-		d.Allow = true
-		d.Reasons = []Reason{{Code: Unknown, Text: "the budget is unknown (no host reading yet)"}}
-		d.Message = "headroom: allowed: the budget is unknown, so headroom cannot gate this call"
-		return d
-	}
 	use, held := worktreeUse(s, r.Worktree)
 	d.Holding = held
+	// The pressure guard and the idle-holder rule need no budget.
 	if reason, ok := pressure(s.Host, c); ok {
 		d.Reasons = append(d.Reasons, reason)
 	}
-	if len(held) > 0 && !working(s, r.Worktree) {
+	if len(held) > 0 && idle(s, r.Worktree, c) {
 		d.Reasons = append(d.Reasons, Reason{Code: IdleHolder,
 			Text: "this worktree holds containers or VMs while none of its agents is working; reuse or stop them first"})
 	}
-	if c.PerWorktreeCapBytes > 0 && use+d.CostBytes > c.PerWorktreeCapBytes {
-		d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap,
-			Text: fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", gb(int64(use+d.CostBytes)), gb(int64(c.PerWorktreeCapBytes)))})
-	}
-	left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(d.CostBytes)
-	if left < int64(c.MinHeadroomBytes) {
-		text := fmt.Sprintf("only %s GB headroom", gb(*d.HeadroomBytes))
-		if r.LeasedBytes > 0 {
-			text += fmt.Sprintf(" (%s GB of it promised to calls still starting)", gb(int64(r.LeasedBytes)))
+	if d.HeadroomBytes != nil {
+		if c.PerWorktreeCapBytes > 0 && use+d.CostBytes > c.PerWorktreeCapBytes {
+			d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap,
+				Text: fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(use+d.CostBytes), units.GB(c.PerWorktreeCapBytes))})
 		}
-		if c.MinHeadroomBytes > 0 {
-			text += fmt.Sprintf(", and %s GB must stay free", gb(int64(c.MinHeadroomBytes)))
+		left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(d.CostBytes)
+		if left < int64(c.MinHeadroomBytes) {
+			text := fmt.Sprintf("only %s GB headroom", units.SignedGB(*d.HeadroomBytes))
+			if r.LeasedBytes > 0 {
+				text += fmt.Sprintf(" (%s GB of it promised to calls still starting)", units.GB(r.LeasedBytes))
+			}
+			if c.MinHeadroomBytes > 0 {
+				text += fmt.Sprintf(", and %s GB must stay free", units.GB(c.MinHeadroomBytes))
+			}
+			d.Reasons = append(d.Reasons, Reason{Code: Headroom, Retry: true, Text: text})
 		}
-		d.Reasons = append(d.Reasons, Reason{Code: Headroom, Retry: true, Text: text})
 	}
 	d.Allow = len(d.Reasons) == 0
+	if d.Allow && d.HeadroomBytes == nil {
+		// Fail open (R7): with no budget, headroom cannot gate the call.
+		d.Reasons = []Reason{{Code: Unknown, Text: "the budget is unknown (no host reading yet), so headroom cannot gate this call"}}
+	}
 	d.Retry = !d.Allow
 	for _, reason := range d.Reasons {
 		d.Retry = d.Retry && reason.Retry
@@ -160,31 +173,38 @@ func worktreeUse(s *protocol.Snapshot, id string) (uint64, []Held) {
 	return 0, nil
 }
 
-// working reports whether any of the worktree's agents is working.
-func working(s *protocol.Snapshot, id string) bool {
+// idle reports whether the worktree's agents have all been out of the
+// working state for longer than the grace period. Orca's state lags: the
+// agent making a call may only just have been marked done or waiting while
+// its tool shell still runs. Unknown agents are never called idle.
+func idle(s *protocol.Snapshot, id string, c Config) bool {
 	if s.Orca == nil {
-		return true // agents unknown: do not accuse anyone of idling
+		return false
 	}
 	for _, w := range s.Orca.Worktrees {
-		if w.ID == id {
-			for _, a := range w.Agents {
-				if a.State == "working" {
-					return true
-				}
-			}
-			return false
+		if w.ID != id {
+			continue
 		}
+		for _, a := range w.Agents {
+			if a.State == "working" || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
+				return false
+			}
+		}
+		return true
 	}
-	return true
+	return false
 }
 
 // message explains d for an agent.
 func message(r Request, s *protocol.Snapshot, d Decision) string {
 	var b strings.Builder
 	if d.Allow {
-		fmt.Fprintf(&b, "headroom: allowed `%s` (≈ %s GB)", r.Command, gb(int64(d.CostBytes)))
+		fmt.Fprintf(&b, "headroom: allowed `%s` (≈ %s GB)", r.Command, units.GB(d.CostBytes))
+		if len(d.Reasons) > 0 {
+			fmt.Fprintf(&b, ": %s", d.Reasons[0].Text)
+		}
 	} else {
-		fmt.Fprintf(&b, "headroom: not starting `%s` (≈ %s GB)", r.Command, gb(int64(d.CostBytes)))
+		fmt.Fprintf(&b, "headroom: not starting `%s` (≈ %s GB)", r.Command, units.GB(d.CostBytes))
 		if name := worktreeName(s, r.Worktree); name != "" {
 			fmt.Fprintf(&b, " for worktree %q", name)
 		}
@@ -193,12 +213,15 @@ func message(r Request, s *protocol.Snapshot, d Decision) string {
 	if !d.Allow && len(d.Holding) > 0 {
 		var items []string
 		for _, h := range d.Holding {
-			items = append(items, fmt.Sprintf("%s (%s GB)", h.Name, gb(int64(h.Bytes))))
+			items = append(items, fmt.Sprintf("%s (%s GB)", h.Name, units.GB(h.Bytes)))
 		}
 		fmt.Fprintf(&b, ". Your worktree holds: %s", strings.Join(items, ", "))
 	}
 	if s.Budget != nil && len(s.Budget.Unknown) > 0 {
 		fmt.Fprintf(&b, " (headroom may be lower than shown: no reading yet from %s)", strings.Join(s.Budget.Unknown, ", "))
+	}
+	if stale := staleSources(s); len(stale) > 0 {
+		fmt.Fprintf(&b, " (decided on stale readings from %s: their latest read failed)", strings.Join(stale, ", "))
 	}
 	return b.String()
 }
@@ -215,4 +238,13 @@ func worktreeName(s *protocol.Snapshot, id string) string {
 	return ""
 }
 
-func gb(b int64) string { return fmt.Sprintf("%.1f", float64(b)/(1<<30)) }
+// staleSources lists the policy's inputs whose latest read failed.
+func staleSources(s *protocol.Snapshot) []string {
+	var out []string
+	for _, n := range []string{"host", "docker", "tart", "lmstudio", "orca"} {
+		if s.Sources[n].Stale {
+			out = append(out, n)
+		}
+	}
+	return out
+}

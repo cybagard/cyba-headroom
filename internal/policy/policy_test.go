@@ -3,6 +3,7 @@ package policy_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -21,7 +22,7 @@ func snap() *protocol.Snapshot {
 		Budget: &protocol.Budget{TotalBytes: 64 * gib, ReservedBytes: 44 * gib, HeadroomBytes: i64(int64(20 * gib))},
 		Orca: &protocol.Orca{Installed: true, Running: true, Worktrees: []protocol.Worktree{
 			{ID: "busy", Name: "Fix login", Agents: []protocol.Agent{{Type: "claude", State: "working"}}},
-			{ID: "idle", Name: "Release prep", Agents: []protocol.Agent{{Type: "claude", State: "done"}}},
+			{ID: "idle", Name: "Release prep", Agents: []protocol.Agent{{Type: "claude", State: "done", StateSince: now.Add(-time.Hour)}}},
 		}},
 		Attribution: &protocol.Attribution{Worktrees: []protocol.WorktreeUsage{
 			{ID: "busy", Name: "Fix login", Usage: protocol.Usage{
@@ -36,7 +37,10 @@ func snap() *protocol.Snapshot {
 	}
 }
 
-var cfg = policy.Config{PressureGuard: "critical", GuardRising: true, DefaultContainerBytes: gib}
+var cfg = policy.Config{PressureGuard: "critical", GuardRising: true, DefaultContainerBytes: gib, DefaultTartBytes: 4 * gib,
+	IdleGrace: 2 * time.Minute, Now: func() time.Time { return now }}
+
+var now = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 
 func req(wt string, cost uint64) policy.Request {
 	return policy.Request{Worktree: wt, Kind: "container", Command: "docker run postgres:17", CostBytes: cost}
@@ -213,5 +217,43 @@ func TestEveryFailingRuleIsReported(t *testing.T) {
 	}
 	if !strings.Contains(d.Message, "memory pressure is critical") {
 		t.Fatalf("the first reason must lead: %q", d.Message)
+	}
+}
+
+func TestPressureGuardWorksWithoutABudget(t *testing.T) {
+	s := snap()
+	s.Host.Pressure = "critical"
+	s.Budget.HeadroomBytes = nil
+	if d := policy.Decide(req("busy", gib), s, cfg); d.Allow || d.Reasons[0].Code != policy.Pressure {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestIdleHolderWaitsOutOrcasLag(t *testing.T) {
+	// Done for 30 s: the turn just ended and its tool shell may still be
+	// running. Not an idle holder yet.
+	s := snap()
+	s.Orca.Worktrees[1].Agents[0].StateSince = now.Add(-30 * time.Second)
+	if d := policy.Decide(req("idle", gib), s, cfg); !d.Allow {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestTartWithoutCostUsesTheDefault(t *testing.T) {
+	r := policy.Request{Worktree: "busy", Kind: "tart", Command: "tart run vm"}
+	s := snap()
+	s.Budget.HeadroomBytes = i64(int64(gib))
+	d := policy.Decide(r, s, cfg)
+	if d.CostBytes != 4*gib || d.Allow {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestStaleReadingsAreNamed(t *testing.T) {
+	s := snap()
+	s.Sources = map[string]protocol.SourceStatus{"host": {Stale: true}}
+	d := policy.Decide(req("busy", gib), s, cfg)
+	if !strings.Contains(d.Message, "stale") || !strings.Contains(d.Message, "host") {
+		t.Fatalf("message = %q", d.Message)
 	}
 }

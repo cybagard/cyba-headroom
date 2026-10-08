@@ -147,11 +147,10 @@ func (d *Daemon) answer(c net.Conn) protocol.Reply {
 	}
 	switch req.Op {
 	case protocol.OpCheck:
-		check := d.check.Load()
-		if check == nil || req.Check == nil {
+		if d.check == nil || req.Check == nil {
 			return protocol.Reply{Error: "check: not supported by this daemon"}
 		}
-		dec := (*check)(req.Check, d.Snapshot())
+		dec := d.check(req.Check, d.Snapshot())
 		return protocol.Reply{OK: true, Decision: &dec}
 	case protocol.OpPing:
 		return protocol.Reply{OK: true, PID: os.Getpid()}

@@ -139,6 +139,8 @@ func TestLoadErrors(t *testing.T) {
 		{"NaN headroom", "[policy]\nmin_headroom_gb = nan\n", "policy.min_headroom_gb must be >= 0"},
 		{"bad pressure guard", "[policy]\npressure_guard = \"red\"\n", "policy.pressure_guard must be off, warn or critical"},
 		{"zero container cost", "[policy]\ndefault_container_gb = 0\n", "policy.default_container_gb must be > 0"},
+		{"zero tart cost", "[policy]\ndefault_tart_gb = 0\n", "policy.default_tart_gb must be > 0"},
+		{"negative idle grace", "[policy]\nidle_grace = \"-1m\"\n", "policy.idle_grace must be >= 0"},
 		{"malformed toml", "socket = \n", "config:"},
 	}
 	for _, tt := range tests {
@@ -215,12 +217,14 @@ func TestSamplesSettings(t *testing.T) {
 
 func TestPolicyConfig(t *testing.T) {
 	d := Defaults("/x").Policy
-	if d.PressureGuard != "critical" || !d.PressureGuardRising || d.DefaultContainerGB != 1 {
+	if d.PressureGuard != "critical" || !d.PressureGuardRising || d.DefaultContainerGB != 1 || d.DefaultTartGB != 4 ||
+		d.IdleGrace.Duration != 2*time.Minute {
 		t.Fatalf("defaults = %+v", d)
 	}
-	p := Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5}.Config()
+	p := Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5,
+		DefaultTartGB: 8, IdleGrace: Duration{time.Minute}}.Config()
 	if p.MinHeadroomBytes != 6<<30 || p.PerWorktreeCapBytes != 12<<30 || p.PressureGuard != "warn" ||
-		p.GuardRising || p.DefaultContainerBytes != 1<<29 {
+		p.GuardRising || p.DefaultContainerBytes != 1<<29 || p.DefaultTartBytes != 8<<30 || p.IdleGrace != time.Minute || p.Now == nil {
 		t.Fatalf("policy config = %+v", p)
 	}
 	dir := shortTempDir(t)

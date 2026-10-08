@@ -57,14 +57,25 @@ func runCheck(e Env) int {
 	}
 	rep, err := client.Do(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration,
 		protocol.Request{Op: protocol.OpCheck, Check: &req})
-	if err != nil {
+	switch {
+	case err != nil && rep.Error != "":
+		// The daemon answered but cannot check: most likely an older build
+		// still running after an upgrade.
+		fmt.Fprintf(e.Stderr, "headroom: the daemon cannot check calls (%s); restart it with this build: headroom install\n", rep.Error)
+		return 1
+	case err != nil:
 		unreachable(e, cfg.Socket, err)
 		return 1
+	case rep.Decision == nil:
+		fmt.Fprintln(e.Stderr, "headroom: the daemon replied without a decision; restart it with this build: headroom install")
+		return 1
 	}
-	fmt.Fprintln(e.Stdout, rep.Decision.Message)
+	// A deny goes to stderr, where an agent looks for why a command failed.
 	if !rep.Decision.Allow {
+		fmt.Fprintln(e.Stderr, rep.Decision.Message)
 		return exitDenied
 	}
+	fmt.Fprintln(e.Stdout, rep.Decision.Message)
 	return 0
 }
 
@@ -73,18 +84,24 @@ func checkUsage(e Env) int {
 	return 2
 }
 
-// parseBytes reads a size: 512M, 2G, 1.5G, or a plain number of GB.
+// parseBytes reads a size: 512M, 2G, 1.5GB, 6gib, or a plain number of
+// GB. M and G mean MiB and GiB, as everywhere in headroom.
 func parseBytes(s string) (uint64, error) {
 	unit := float64(1 << 30)
-	switch {
-	case strings.HasSuffix(s, "M"):
-		s, unit = strings.TrimSuffix(s, "M"), 1<<20
-	case strings.HasSuffix(s, "G"):
-		s = strings.TrimSuffix(s, "G")
+	lower := strings.ToLower(s)
+	for _, u := range []struct {
+		suffix string
+		bytes  float64
+	}{{"mib", 1 << 20}, {"mb", 1 << 20}, {"m", 1 << 20}, {"gib", 1 << 30}, {"gb", 1 << 30}, {"g", 1 << 30}} {
+		if n, ok := strings.CutSuffix(lower, u.suffix); ok {
+			lower, unit = n, u.bytes
+			break
+		}
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil || !(v > 0) || v > 1024*float64(1<<30)/unit {
-		return 0, errors.New("want e.g. 512M or 2G")
+	v, err := strconv.ParseFloat(lower, 64)
+	b := v * unit
+	if err != nil || !(b >= 1<<20) || b > 1024*float64(1<<30) {
+		return 0, errors.New("want e.g. 512M or 2G, between 1M and 1024G")
 	}
-	return uint64(v * unit), nil
+	return uint64(b), nil
 }

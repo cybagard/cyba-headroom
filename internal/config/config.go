@@ -105,6 +105,12 @@ type Policy struct {
 	// DefaultContainerGB is the cost of a container request that gives none,
 	// until learned estimates (#36).
 	DefaultContainerGB float64 `toml:"default_container_gb"`
+	// DefaultTartGB is the cost of a Tart VM request that gives none.
+	DefaultTartGB float64 `toml:"default_tart_gb"`
+	// IdleGrace is how long all of a worktree's agents must have been out of
+	// the working state before it counts as an idle holder; Orca's state
+	// lags the agent's tool shells.
+	IdleGrace Duration `toml:"idle_grace"`
 }
 
 // Config converts the settings to the policy engine's.
@@ -115,6 +121,9 @@ func (p Policy) Config() policy.Config {
 		PressureGuard:         p.PressureGuard,
 		GuardRising:           p.PressureGuardRising,
 		DefaultContainerBytes: GiB(p.DefaultContainerGB),
+		DefaultTartBytes:      GiB(p.DefaultTartGB),
+		IdleGrace:             p.IdleGrace.Duration,
+		Now:                   time.Now,
 	}
 }
 
@@ -183,6 +192,8 @@ func Defaults(dir string) Config {
 			PressureGuard:       "critical",
 			PressureGuardRising: true,
 			DefaultContainerGB:  1,
+			DefaultTartGB:       4, // tart's default VM memory
+			IdleGrace:           Duration{2 * time.Minute},
 		},
 		// Overheads measured in spike #9 and #16; #23 refines them.
 		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, MaxMacOSVMs: 2},
@@ -296,6 +307,12 @@ func (c Config) Validate() error {
 	}
 	if g := c.Policy.DefaultContainerGB; !(g > 0) || g > maxBudgetGB {
 		errs = append(errs, fmt.Errorf("policy.default_container_gb must be > 0 and <= %d", maxBudgetGB))
+	}
+	if g := c.Policy.DefaultTartGB; !(g > 0) || g > maxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.default_tart_gb must be > 0 and <= %d", maxBudgetGB))
+	}
+	if c.Policy.IdleGrace.Duration < 0 {
+		errs = append(errs, errors.New("policy.idle_grace must be >= 0"))
 	}
 	if c.Policy.LeaseTimeout.Duration <= 0 {
 		errs = append(errs, errors.New("policy.lease_timeout must be > 0"))

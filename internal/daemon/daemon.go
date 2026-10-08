@@ -48,7 +48,7 @@ type Daemon struct {
 	now     func() time.Time
 	derive  func(*protocol.Snapshot)
 	publish func(*protocol.Snapshot)
-	check   atomic.Pointer[CheckFunc]
+	check   CheckFunc
 
 	tickMu sync.Mutex
 	seq    uint64
@@ -87,9 +87,9 @@ func (d *Daemon) OnPublish(f func(*protocol.Snapshot)) { d.publish = f }
 // CheckFunc decides a CheckRequest against a snapshot.
 type CheckFunc func(*protocol.CheckRequest, *protocol.Snapshot) protocol.Decision
 
-// SetCheck sets f to answer OpCheck from the latest snapshot (#24). It may
-// be called while serving.
-func (d *Daemon) SetCheck(f CheckFunc) { d.check.Store(&f) }
+// SetCheck sets f to answer OpCheck from the latest snapshot (#24). Call it
+// before Serve, like the other hooks.
+func (d *Daemon) SetCheck(f CheckFunc) { d.check = f }
 
 // Snapshot returns the latest published snapshot. Callers must not modify it.
 func (d *Daemon) Snapshot() *protocol.Snapshot { return d.snap.Load() }

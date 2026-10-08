@@ -444,3 +444,68 @@ func TestALockedProjectIsNotTheDirectorysDefault(t *testing.T) {
 		t.Fatalf("leases = %+v, want custom's and app's", l)
 	}
 }
+
+// A compose takeover keeps the project the old lease held.
+func TestATakeoverKeepsTheHeldProject(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	ctr := func(s *protocol.Snapshot, id, project string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4,
+			Labels: map[string]string{"com.docker.compose.project": project, protocol.ComposeWorkingDirLabel: "/w/app"}}, "w1")
+	}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/w/app"}}
+	b.Check(up, snap(), cfg)
+	b.Observe(ctr(snap(), "a1", "app"))
+	b.Check(up, snap(), cfg)                                // takes it over, and holds app
+	b.Observe(ctr(ctr(snap(), "a1", "app"), "o1", "other")) // another project from /w/app, past the shim
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:o1" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// Two compose files in one directory naming other projects (name: p1 and
+// the directory's default) are two leases, not one.
+func TestADirectoryLeaseHoldingAnotherProjectIsNotTakenOver(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDirs: []string{"/w/app"}}
+	b.Check(up, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "p", Name: "p1-web-1", MemoryBytes: gib / 4,
+		Labels: map[string]string{"com.docker.compose.project": "p1", protocol.ComposeWorkingDirLabel: "/w/app"}}, "w1"))
+	b.Check(up, snap(), cfg)
+	if l := b.List(); len(l) != 2 {
+		t.Fatalf("leases = %+v, want p1's and the new call's", l)
+	}
+}
+
+// The held-container shortcut is the holding worktree's own: another
+// worktree's start of it is decided, against its own cap.
+func TestAnotherWorktreesHeldContainerIsDecided(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 4*gib), snap(), cfg)
+	s := withRun(snap(), "x", "w1", gib, run.LeaseID)
+	b.Observe(s)
+	c := cfg
+	c.PerWorktreeCapBytes = gib / 2
+	d := b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker start x", CostBytes: gib, Target: "x", ContainerID: "x"}, s, c)
+	if d.Allow {
+		t.Fatalf("w2 skipped its cap: %+v", d)
+	}
+}
+
+// docker start held other: the lease is for the others, not keyed by the
+// held one, and ends quietly.
+func TestAMultiTargetStartOfAHeldContainerEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 2*gib), snap(), cfg)
+	s := withRun(snap(), "held", "w1", gib/8, run.LeaseID)
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start held", CostBytes: gib, Target: "held", ContainerID: "held", MultiTarget: true}, s, cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("logged: %s", log)
+	}
+}

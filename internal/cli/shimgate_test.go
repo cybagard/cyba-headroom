@@ -708,3 +708,14 @@ func TestDockerEndpointHonoursConfigDir(t *testing.T) {
 		t.Fatalf("ConfigDir = %q", c.ConfigDir)
 	}
 }
+
+// An unreadable config is not the default engine: the context is unknown.
+func TestAnUnreadableDockerConfigIsNoEngine(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil { // a directory: unreadable as a file
+		t.Fatal(err)
+	}
+	if got := dockerEndpointIn(func(string) string { return "" }, dir); got != "" {
+		t.Fatalf("endpoint = %q, want unknown", got)
+	}
+}

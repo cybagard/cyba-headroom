@@ -178,10 +178,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
-	if r.ContainerID != "" && !r.MultiTarget && b.boundAnywhere("container:"+r.ContainerID) {
-		// docker stop && docker start of the container an open lease
-		// holds: that lease still covers it. Allowed, and no new lease. Not
-		// for docker start a b: the others are no lease's.
+	if h := b.holder("container:" + r.ContainerID); r.ContainerID != "" && !r.MultiTarget && h != nil && h.Worktree == r.Worktree {
+		// docker stop && docker start of the container an open lease of
+		// this worktree holds: that lease still covers it. Allowed, and no
+		// new lease. Not for docker start a b (the others are no lease's),
+		// nor for another worktree's container (its own cap applies).
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	for _, e := range b.open {
@@ -233,14 +234,17 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			for k := range o.bound {
 				e.bound[k] = true
 			}
+			if e.project == "" {
+				e.project = o.project // the project its containers are
+			}
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
 	}
-	if r.Running {
-		// docker start a b with a running: the lease is for the others, so
-		// it is not keyed by a (its memory already counts), by ID or name;
-		// it holds its cost to the timeout.
+	if r.Running || r.ContainerID != "" && b.boundAnywhere("container:"+r.ContainerID) {
+		// docker start a b with a running, or held by an open lease: the
+		// lease is for the others, so it is not keyed by a (its memory
+		// already counts), by ID or name; it holds its cost to the timeout.
 		e.containerID, e.target = "", ""
 	}
 	if r.TakesOver != "" && !r.Running {
@@ -579,6 +583,16 @@ func kindOf(key string) string {
 	return "container"
 }
 
+// holder is the open lease that holds key, or nil.
+func (b *Book) holder(key string) *entry {
+	for _, e := range b.open {
+		if e.bound[key] {
+			return e
+		}
+	}
+	return nil
+}
+
 func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
@@ -669,7 +683,10 @@ func (b *Book) lapsedFor(r resource) bool {
 func (e *entry) sameKey(o *entry) bool {
 	switch {
 	case len(e.composeDirs) > 0 && len(o.composeDirs) > 0:
-		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) })
+		// The same directory, and the same project from it: two files
+		// there may name two projects.
+		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) }) &&
+			e.dirProject() == o.dirProject()
 	case len(e.composeDirs) > 0:
 		return o.project != "" && o.project == e.dirProject()
 	case len(o.composeDirs) > 0:

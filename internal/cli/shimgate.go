@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/signal"
@@ -350,8 +351,12 @@ func dockerEndpointIn(getenv func(string) string, configDir string) string {
 		var cfg struct {
 			CurrentContext string `json:"currentContext"`
 		}
-		if b, err := os.ReadFile(filepath.Join(dir, "config.json")); err == nil && json.Unmarshal(b, &cfg) != nil {
-			return ""
+		b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// No config: the default context.
+		case err != nil || json.Unmarshal(b, &cfg) != nil:
+			return "" // unreadable: the context is unknown
 		}
 		name = cfg.CurrentContext
 	}

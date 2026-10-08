@@ -666,3 +666,73 @@ func TestARestartingServiceDoesNotBindARunsLease(t *testing.T) {
 		t.Fatalf("reserved %d, want the run's whole 1 GiB", r)
 	}
 }
+
+// docker start a b c: every stopped target is the lease's, each at the
+// default cost, so none of them is ungated and all are reserved.
+func TestAStartOfSeveralContainersKeysEach(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	r := policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		Others: []policy.Start{{ID: "B"}, {ID: "C"}}}
+	d := b.Check(r, snap(), cfg)
+	if d.LeaseID == "" || reserved(b) != 3*gib {
+		t.Fatalf("decision %+v, reserved %d GiB, want 3", d, reserved(b)>>30)
+	}
+	s := snap()
+	for _, id := range []string{"A", "B", "C"} {
+		s = addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4}, "w1")
+	}
+	b.Observe(s)
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// docker start a b with a running: only b is reserved; with both running
+// or held, nothing starts and no lease is taken.
+func TestAStartOfSeveralSkipsThoseThatRun(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	r := policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A", Running: true,
+		Others: []policy.Start{{ID: "B"}}}
+	b.Check(r, snap(), cfg)
+	if reserved(b) != gib {
+		t.Fatalf("reserved %d, want b's 1 GiB", reserved(b))
+	}
+	b2, _, _ := book(t)
+	b2.Observe(snap())
+	r.Others = []policy.Start{{ID: "B", Running: true}}
+	if d := b2.Check(r, snap(), cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("all running: %+v", d)
+	}
+}
+
+// A target created through the shim: the start takes its create's lease
+// over, as for one target.
+func TestAStartOfSeveralTakesTheirCreatesOver(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	cr := labelled("w1", "pg")
+	cr.Command, cr.CostBytes = "docker create pg", 4*gib
+	created := b.Check(cr, snap(), cfg)
+	r := policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		Others: []policy.Start{{ID: "B", TakesOver: created.LeaseID}}}
+	b.Check(r, snap(), cfg)
+	if l := b.List(); len(l) != 1 || l[0].Bytes != 5*gib {
+		t.Fatalf("leases = %+v, want one: a's 1 GiB and the create's 4", l)
+	}
+}
+
+// docker start a b: a exits before b is seen; the lease waits for b.
+func TestAStartOfSeveralWaitsForEach(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		Others: []policy.Start{{ID: "B"}}}, snap(), cfg)
+	b.Observe(addContainer(snap(), protocol.Container{ID: "A", Name: "a", MemoryBytes: gib / 4}, "w1"))
+	b.Observe(snap())
+	b.Observe(addContainer(snap(), protocol.Container{ID: "B", Name: "b", MemoryBytes: gib / 4}, "w1"))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}

@@ -26,6 +26,8 @@ type Call struct {
 	// MultiTarget is set for a start or restart of several containers:
 	// Target is only the first.
 	MultiTarget bool
+	// Targets are all the containers a start or restart names.
+	Targets []string
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
@@ -136,6 +138,9 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
 		c.MultiTarget = (c.Op == "start" || c.Op == "restart") && len(pos) > 1
+		if c.MultiTarget {
+			c.Targets = pos
+		}
 	}
 	return c.named(append(words, c.Op)), at
 }

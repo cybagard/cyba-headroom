@@ -237,3 +237,31 @@ func TestStartingARunningContainerIsNeverDenied(t *testing.T) {
 		t.Fatalf("decision %+v", d)
 	}
 }
+
+type mapInspector map[string]struct {
+	id      string
+	running bool
+}
+
+func (m mapInspector) Inspect(_ context.Context, ref string) (string, map[string]string, bool, error) {
+	c, ok := m[ref]
+	if !ok {
+		return "", nil, false, errors.New("no such container")
+	}
+	return c.id, nil, c.running, nil
+}
+
+// The gate looks every target of a start up.
+func TestGateLooksUpEveryTarget(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	insp := mapInspector{"a": {"A", true}, "b": {"B", false}, "c": {"C", false}}
+	d := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start a",
+		Target: "a", Targets: []string{"a", "b", "c"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
+	if d.LeaseID == "" || len(book.List()) != 1 || book.List()[0].Bytes != 2*pol.DefaultContainerBytes {
+		t.Fatalf("decision %+v, leases %+v: want b and c reserved", d, book.List())
+	}
+}

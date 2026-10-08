@@ -478,7 +478,16 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 			ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
 			if cid, labels, running, err := docker.Inspect(ctx, r.Target); err == nil {
 				req.ContainerID, req.TakesOver, req.Running = cid, labels[protocol.LeaseLabel], running
-				req.MultiTarget = r.MultiTarget
+				req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
+				for _, t := range r.Targets[min(1, len(r.Targets)):] {
+					// docker start a b c: each is the lease's. One Docker
+					// cannot resolve leaves the lease unsure of its others.
+					if cid, labels, running, err := docker.Inspect(ctx, t); err == nil {
+						req.Others = append(req.Others, policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running})
+					} else {
+						req.MultiTarget = true
+					}
+				}
 			}
 			cancel()
 		}

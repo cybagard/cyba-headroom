@@ -26,6 +26,7 @@
 package lease
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -103,8 +104,8 @@ type entry struct {
 	// VM appears, the run failed.
 	pid int
 	// The lease's key (#33). labelled: its container carries the lease's ID
-	// (protocol.LeaseLabel). containerID: a start's container, as Docker
-	// resolved it. name: a run's --name, for a call the shim did not label.
+	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
+	// resolved them. name: a run's --name, for a call the shim did not label.
 	// target: a start's container as given, when Docker could not resolve
 	// it, or a tart run's VM. A compose lease's key is its project.
 	labelled bool
@@ -115,7 +116,7 @@ type entry struct {
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
 	took, tookLapsed []*entry
-	containerID      string
+	containerIDs     []string
 	name             string
 	target           string
 }
@@ -164,10 +165,14 @@ const stale = 2 * time.Second
 // the book's lock: concurrent checks run one after another, and the second
 // sees the first's lease.
 func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Config) protocol.Decision {
-	if r.ContainerID != "" && r.Running && !r.MultiTarget {
-		// A start or restart of a container Docker says runs: it starts
-		// nothing new, and the container already counts. Allowed, whatever
-		// the pressure, and no lease.
+	starts := r.Others
+	if r.ContainerID != "" {
+		starts = append([]policy.Start{{ID: r.ContainerID, TakesOver: r.TakesOver, Running: r.Running}}, r.Others...)
+	}
+	if len(starts) > 0 && !r.MultiTarget && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
+		// A start or restart of containers Docker says run: it starts
+		// nothing new, and they already count. Allowed, whatever the
+		// pressure, and no lease.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
 	b.mu.Lock()
@@ -178,11 +183,15 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
-	if r.ContainerID != "" && !r.MultiTarget && b.boundAnywhere("container:"+r.ContainerID) {
-		// docker stop && docker start of the container an open lease holds:
-		// that lease still covers it, and its worktree is charged for it.
-		// Allowed, and no new lease. Not for docker start a b: the others
-		// are no lease's.
+	// The containers this start starts: not those that run, nor those an
+	// open lease holds (docker stop && docker start): that lease still
+	// covers them, and its worktree is charged for them.
+	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
+		return t.Running || b.boundAnywhere("container:"+t.ID)
+	})
+	if r.ContainerID != "" && len(starts) == 0 && !r.MultiTarget {
+		// Allowed, and no new lease. Not when others went unresolved:
+		// they are no lease's.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	for _, e := range b.open {
@@ -193,6 +202,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if e.macOS && len(e.bound) == 0 {
 			r.PendingMacOS++ // once bound, its VM counts as running
 		}
+	}
+	if len(starts) > 1 {
+		// docker start a b c: each costs what one would.
+		r.CostBytes = uint64(len(starts)) * cmp.Or(r.CostBytes, c.DefaultContainerBytes)
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -211,7 +224,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			Created: now, Expires: now.Add(b.timeout),
 		},
 		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
-		labelled: r.Labelled, containerID: r.ContainerID, name: r.Name, target: r.Target,
+		labelled: r.Labelled, name: r.Name, target: r.Target,
+	}
+	for _, t := range starts {
+		e.containerIDs = append(e.containerIDs, t.ID)
 	}
 	if r.Kind == "compose" {
 		// Its key: the project, -p or as docker compose config names it.
@@ -245,22 +261,26 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			e.cost, e.used = max(e.cost, reserved)+used, used
 		}
 	}
-	if r.Running || r.ContainerID != "" && b.boundAnywhere("container:"+r.ContainerID) {
+	if r.ContainerID != "" && !slices.ContainsFunc(starts, func(t policy.Start) bool { return t.ID == r.ContainerID }) {
 		// docker start a b with a running, or held by an open lease: the
-		// lease is for the others, so it is not keyed by a (its memory
-		// already counts), by ID or name; it holds its cost to the timeout.
-		e.containerID, e.target = "", ""
+		// lease is for the others, so it is not keyed by a's name.
+		e.target = ""
 	}
-	if r.TakesOver != "" && !r.Running {
+	per := d.CostBytes / uint64(max(1, len(starts)))
+	for _, t := range starts {
+		if t.TakesOver == "" {
+			continue
+		}
 		// A start of a container a run or create made that has not run
-		// yet: that lease ends here, and this one keeps the larger cost.
+		// yet: that lease ends here, and this one keeps the larger cost
+		// for that container.
 		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
 			*list = slices.DeleteFunc(*list, func(o *entry) bool {
-				if o.ID != r.TakesOver || !o.labelled || len(o.bound) > 0 || r.Worktree == "" && o.Worktree != "" {
+				if o.ID != t.TakesOver || !o.labelled || len(o.bound) > 0 || r.Worktree == "" && o.Worktree != "" {
 					return false
 				}
 				if list == &b.open {
-					e.cost = max(e.cost, o.cost)
+					e.cost += max(per, o.cost) - per
 					e.took = append(e.took, o)
 				} else {
 					e.tookLapsed = append(e.tookLapsed, o)
@@ -400,15 +420,14 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 	}
 	for _, e := range b.open {
-		if e.containerID == "" || len(e.bound) > 0 {
-			continue
-		}
-		// A container whose label names an open lease is that lease's: the
-		// label outranks an ID.
-		if r, ok := byID[e.containerID]; ok && !bound[r.key] && keyed(b.open, r, true) == e {
-			e.bind(r)
-			b.judge(r, gated, now)
-			bound[r.key] = true
+		for _, id := range e.containerIDs {
+			// A container whose label names an open lease is that lease's:
+			// the label outranks an ID.
+			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, r, true) == e {
+				e.bind(r)
+				b.judge(r, gated, now)
+				bound[r.key] = true
+			}
 		}
 	}
 	var fresh []resource // new this tick, and bound to no lease yet
@@ -532,9 +551,10 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			return true
 		case len(e.bound) > 0 && e.used >= e.cost:
 			return true // its resources use the cost
-		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff && e.hasOneoff):
+		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= len(e.containerIDs):
 			// Its container or VM is gone. A compose project's first
-			// container may be a one-shot; the services come after it.
+			// container may be a one-shot; the services come after it, as
+			// may a start's other containers.
 			return true
 		}
 		return false
@@ -622,7 +642,7 @@ func keyed(es []*entry, r resource, based bool) *entry {
 		switch {
 		case e.labelled:
 			return 0
-		case e.containerID != "", e.Kind == "compose" && (!e.oneoff || r.oneoff):
+		case len(e.containerIDs) > 0, e.Kind == "compose" && (!e.oneoff || r.oneoff):
 			return 1
 		}
 		return 2 // a name; or a compose run's lease for a service, after any up's
@@ -673,10 +693,10 @@ func (e *entry) key(r resource, based bool) bool {
 		// A service: an up's, or a compose run's dependency, which starts
 		// before its one-off container.
 		return !e.oneoff || !e.hasOneoff
+	case e.Kind == "container" && len(e.containerIDs) > 0:
+		return slices.Contains(e.containerIDs, r.id) && !e.bound[r.key] // docker start a b c: each once
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
-	case e.containerID != "":
-		return r.id == e.containerID
 	case e.name != "":
 		return based && e.name == r.name // a run checked with headroom check --name
 	case e.target != "":
@@ -687,7 +707,7 @@ func (e *entry) key(r resource, based bool) bool {
 
 // hasKey reports whether e has anything a resource could match.
 func (e *entry) hasKey() bool {
-	return e.labelled || e.containerID != "" || e.name != "" || e.target != "" || e.project != "" || e.pid > 0
+	return e.labelled || len(e.containerIDs) > 0 || e.name != "" || e.target != "" || e.project != "" || e.pid > 0
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and

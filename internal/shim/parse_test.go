@@ -37,7 +37,7 @@ func TestParse(t *testing.T) {
 		{"docker run -m= alpine true", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -m=1g alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", MemoryBytes: g}},
 		{"docker run --help=false alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
-		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db", MultiTarget: true}},
+		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db", MultiTarget: true, Targets: []string{"db", "other"}}},
 		{"docker compose --env-file ops/.env up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeEnvFiles: []string{"ops/.env"}}},
 		{"docker compose --env-file base.env --env-file local.env up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeEnvFiles: []string{"base.env", "local.env"}}},
 		{"podman run --pod p1 --creds u:pw alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine"}},

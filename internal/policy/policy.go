@@ -93,8 +93,11 @@ type Request struct {
 	// which this call's lease replaces (#33).
 	ContainerID, TakesOver string
 	// Running is Docker's word that a start's container already runs, and
-	// MultiTarget that the start names others too.
+	// MultiTarget that the start names others Docker did not resolve.
 	Running, MultiTarget bool
+	// Others are the other containers a start names, as Docker resolved
+	// them (docker start a b c).
+	Others []Start
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -110,6 +113,14 @@ type (
 	// Decision is the policy's answer.
 	Decision = protocol.Decision
 )
+
+// Start is one container a start names, as Docker resolved it: its ID,
+// the lease of the run or create that made it (its label), and whether it
+// already runs.
+type Start struct {
+	ID, TakesOver string
+	Running       bool
+}
 
 // Decide decides r against s.
 func Decide(r Request, s *protocol.Snapshot, c Config) Decision {

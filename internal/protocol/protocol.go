@@ -74,6 +74,8 @@ type CheckRequest struct {
 	Engine string `json:"engine,omitempty"`
 	// MultiTarget is set for a start or restart of several containers.
 	MultiTarget bool `json:"multi_target,omitempty"`
+	// Targets are all the containers a start or restart names, as given.
+	Targets []string `json:"targets,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

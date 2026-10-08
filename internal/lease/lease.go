@@ -70,9 +70,16 @@ type Book struct {
 	// or Docker itself restarted.
 	verdicts map[string]*verdict
 	// dockerDown is set while a fresh reading shows the Docker engine not
-	// running: its first reading after that is a baseline, since the
-	// engine restarts containers with a restart policy itself.
+	// running; dockerUp is when it was next seen running. Containers that
+	// appear in the dockerSettle after that are a baseline: the engine
+	// restarts those with a restart policy itself, a tick or two after its
+	// API answers.
 	dockerDown bool
+	dockerUp   time.Time
+	// lapsed are leases that expired before their resource appeared (a
+	// slow image pull), kept for another timeout: a resource they name is
+	// their call's, so not ungated, though they no longer reserve.
+	lapsed []*entry
 }
 
 type entry struct {
@@ -121,6 +128,15 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}}
 }
 
+// dockerSettle is how long after the Docker engine comes back its
+// restart-policy containers count as a baseline.
+const dockerSettle = 30 * time.Second
+
+// catchAll is how long a manual lease that does not know what it starts
+// may bind any unattributed container: briefly, so it cannot hide an
+// ungated one for its whole timeout.
+const catchAll = 15 * time.Second
+
 // stale is how much newer the daemon's snapshot must be than the one leases
 // were settled on before checks use it instead: derive (which settles them)
 // has stopped running.
@@ -155,7 +171,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if !d.Allow {
 		return d
 	}
-	if s != nil {
+	if s != nil && len(b.based) < 2 {
 		// Before the first Observe, the check's own reading is the
 		// baseline, of each source it has one of.
 		b.baseline(s)
@@ -256,11 +272,7 @@ func (e *entry) takes(r resource) bool {
 // readable reports whether s holds a fresh reading of the source behind
 // resources of kind: absence from a failed read means nothing.
 func readable(s *protocol.Snapshot, kind string) bool {
-	src := "docker"
-	if kind == "vm" {
-		src = "tart"
-	}
-	return !s.Sources[src].Stale
+	return !s.Sources[map[string]string{"container": "docker", "vm": "tart"}[source(kind)]].Stale
 }
 
 // Observe binds new resources in s to leases, ends leases whose resources
@@ -272,12 +284,14 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	now := b.now()
 	res := resources(s)
 	// The Docker engine back after a fresh reading showed it down restarts
-	// containers itself: this reading is their baseline, not ungated.
-	dockerBack := false
+	// containers itself: those appearing soon after are a baseline.
 	if d := s.Docker; d != nil && readable(s, "container") {
-		dockerBack = b.dockerDown && d.Running
+		if b.dockerDown && d.Running {
+			b.dockerUp = now
+		}
 		b.dockerDown = !d.Running
 	}
+	dockerSettling := !b.dockerUp.IsZero() && now.Sub(b.dockerUp) < dockerSettle
 	present := map[string]uint64{}
 	var fresh []resource // new this tick, and bound to no lease yet
 	for _, r := range res {
@@ -286,28 +300,23 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			fresh = append(fresh, r)
 		}
 	}
-	// Without a baseline (a lease taken before the first reading), any
-	// resource may have been there already: only one attributed to the
-	// lease's own worktree is taken as its call's.
 	// Resources a call names bind first, so another one appearing in the
-	// same tick cannot take their lease.
-	var rest []resource
-	for _, r := range fresh {
-		if e := b.named(r, now, !b.based[source(r.kind)]); e != nil {
-			e.bind(r)
-			b.judge(r, gated, now)
-		} else {
-			rest = append(rest, r)
+	// same tick cannot take their lease; then the rest, by kind and
+	// worktree. Without a baseline (a lease taken before the first
+	// reading), any resource may have been there already: only one of the
+	// lease's own worktree is taken as its call's.
+	unbound := fresh
+	for _, find := range []func(resource, time.Time, bool) *entry{b.named, b.match} {
+		var left []resource
+		for _, r := range unbound {
+			if e := find(r, now, !b.based[source(r.kind)]); e != nil {
+				e.bind(r)
+				b.judge(r, gated, now)
+			} else {
+				left = append(left, r)
+			}
 		}
-	}
-	var unbound []resource
-	for _, r := range rest {
-		if e := b.match(r, now, !b.based[source(r.kind)]); e != nil {
-			e.bind(r)
-			b.judge(r, gated, now)
-		} else {
-			unbound = append(unbound, r)
-		}
+		unbound = left
 	}
 	// Compose projects running containers whose call was checked: a later
 	// service (depends_on, a slow healthcheck) belongs to the same call.
@@ -323,9 +332,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		case v != nil && r.kind != "vm":
 			// A container back after a tick or two away keeps its verdict.
 			// A VM run again is a new run.
-		case !b.based[source(r.kind)] || dockerBack && r.kind != "vm":
+		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
 			b.judge(r, baseline, now) // it may have been there before
-		case r.kind == "compose" && gatedProject[r.project]:
+		case r.kind == "compose" && gatedProject[r.project] || b.lapsedFor(r):
 			b.judge(r, gated, now)
 		default:
 			b.judge(r, ungated, now)
@@ -349,6 +358,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			delete(b.verdicts, k)
 		}
 	}
+	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return !now.Before(e.Expires.Add(b.timeout)) })
 	next := map[string]bool{}
 	for _, r := range res {
 		next[r.key] = true
@@ -416,6 +426,7 @@ func (b *Book) expire(now time.Time) {
 		default:
 			b.log.Warn("lease expired: its container or VM never appeared", "lease", e.ID, "worktree", e.Worktree,
 				"command", e.Command, "bytes", e.cost, "age", now.Sub(e.Created).Round(time.Second))
+			b.lapsed = append(b.lapsed, e)
 		}
 		return true
 	})
@@ -425,7 +436,7 @@ func (b *Book) expire(now time.Time) {
 // and no baseline yet, to prev.
 func (b *Book) baseline(s *protocol.Snapshot) {
 	for _, r := range resources(s) {
-		if !b.based[source(r.kind)] {
+		if !b.based[source(r.kind)] && readable(s, r.kind) {
 			b.prev[r.key] = true
 		}
 	}
@@ -490,7 +501,7 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 				// directory): last, after every worktree's own lease. One
 				// that knows its target takes only that (named).
 				// One that does not, only an unattributed resource.
-				if manual == nil && !ownOnly && e.target == "" && e.name == "" && r.worktree == "" {
+				if manual == nil && !ownOnly && e.target == "" && e.name == "" && r.worktree == "" && now.Sub(e.Created) < catchAll {
 					manual = e
 				}
 			case r.worktree != "" && e.Worktree == r.worktree:
@@ -509,6 +520,22 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	return nil
 }
 
+// lapsedFor reports whether a lapsed lease is r's, and spends it: one its
+// call names, or else one of r's own worktree.
+func (b *Book) lapsedFor(r resource) bool {
+	i := slices.IndexFunc(b.lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r) })
+	if i < 0 {
+		i = slices.IndexFunc(b.lapsed, func(e *entry) bool {
+			return e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
+		})
+	}
+	if i < 0 {
+		return false
+	}
+	b.lapsed = slices.Delete(b.lapsed, i, i+1)
+	return true
+}
+
 // judge records how r started.
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, last: now, present: true,
@@ -522,15 +549,22 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 // exact --name, or a lease of r's own worktree, names it.
 func (b *Book) named(r resource, now time.Time, ownOnly bool) *entry {
 	for _, live := range []bool{true, false} {
+		var other *entry
 		for _, e := range b.open {
 			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r) {
 				continue
 			}
+			own := r.worktree != "" && e.Worktree == r.worktree
 			exact := e.name != "" && e.name == r.name
-			if ownOnly && !exact && (r.worktree == "" || e.Worktree != r.worktree) {
-				continue
+			switch {
+			case own || exact:
+				return e // r's own worktree's lease before another's
+			case !ownOnly && other == nil:
+				other = e
 			}
-			return e
+		}
+		if other != nil {
+			return other
 		}
 	}
 	return nil
@@ -599,7 +633,13 @@ func sameImage(a, b string) bool {
 		}
 		return s
 	}
-	return a != "" && b != "" && norm(a) == norm(b)
+	if a == "" || b == "" {
+		return false
+	}
+	// The same repository and tag under another registry (podman's
+	// unqualified search: myimg runs as quay.io/org/myimg).
+	base := func(s string) string { return s[strings.LastIndex(s, "/")+1:] }
+	return norm(a) == norm(b) || base(norm(a)) == base(norm(b))
 }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.

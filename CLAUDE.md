@@ -40,7 +40,18 @@ The default for every issue. Each step ends when its condition holds.
 5. **Verify.**
    - `make test` and `make lint` are green.
    - `make test-host` is green. Run `make test-tart` as well when the change touches macOS-only code.
-   - Smoke-test `bin/headroom` on the host when the CLI or daemon behaviour changed.
-6. **Review.** Run three rounds, each one `/code-review` on the branch and then `/security-review`. After each round, fix every finding that holds up, re-run `make test lint`, and commit before the next round. If a finding holds up but has no obvious fix, investigate it with `mattpocock-skills:diagnosing-bugs` before deciding. For a finding that belongs in another issue or is out of scope, open a follow-up issue and link it from the PR. Done when the third round's fixes are in, or each remaining finding is fixed, explained in the PR, or tracked in an issue.
-7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and what each review found and how it was resolved. Done when CI is green.
+   - Smoke-test `bin/headroom` on the host when the CLI or daemon behaviour changed. Use the real tools (Docker, Tart, Ollama) and the concurrent or racing cases the change is about, such as several containers in one tick. Do this before review: it finds what a reading of the diff misses.
+6. **Review.** Run rounds of `/code-review` on the whole branch (`origin/main...HEAD`), and in each round a `/security-review` as well.
+   - **Brief the reviewers.** Give each review the issue, the approved plan, the threat model (what is trusted, who the attacker is), and the findings already declined, with the reason for each, so they are not raised again.
+   - **Verify before fixing.** Confirm each finding with a failing test, or by reading the code it names. A finding can be wrong: it may describe intended behaviour, or a bug in a test. Fix the ones that hold up, re-run `make test lint` and `make test-host`, and smoke-test again if the fix changes behaviour. Commit before the next round.
+   - **Hard findings.** If a finding holds up but has no obvious fix, investigate it with `mattpocock-skills:diagnosing-bugs` before deciding. If several findings come from one design, change the design rather than adding a special case for each.
+   - **Out of scope.** For a finding that belongs in another issue, open a follow-up issue and link it from the PR.
+   - **Done when:**
+     - at least three rounds have run, and
+     - the last round found no confirmed correctness or security finding, and
+     - the last commit is the one that round reviewed: no fix or feature has gone in unreviewed.
+
+     Stop at five rounds and say in the PR what is still open.
+   - **Late scope.** New behaviour added after the review started (a follow-up asked for in review, a redesign) restarts the count: it gets its own three rounds, covering the whole branch.
+7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and, per round, what each review found and how it was resolved, including findings declined and why. Name the commit the last round reviewed. Done when CI is green.
 8. **Learn.** Record whatever the issue taught you that later issues need: a spike note, a new acceptance criterion on a later issue, or a line in this file.

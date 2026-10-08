@@ -97,6 +97,9 @@ type Policy struct {
 	PerWorktreeCapGB float64  `toml:"per_worktree_cap_gb"`
 	LeaseTimeout     Duration `toml:"lease_timeout"`
 	DaemonTimeout    Duration `toml:"daemon_timeout"`
+	// WaitTimeout is how long a shim call with BUDGET_WAIT=1 waits for room
+	// before it gives up (#28).
+	WaitTimeout Duration `toml:"wait_timeout"`
 	// PressureGuard denies requests at this memory pressure level, whatever
 	// headroom says: off, warn or critical (#24).
 	PressureGuard string `toml:"pressure_guard"`
@@ -188,6 +191,7 @@ func Defaults(dir string) Config {
 		Policy: Policy{
 			LeaseTimeout:  Duration{2 * time.Minute},
 			DaemonTimeout: Duration{500 * time.Millisecond},
+			WaitTimeout:   Duration{10 * time.Minute},
 			// Calibrated from the baseline run (#63).
 			PressureGuard:       "critical",
 			PressureGuardRising: true,
@@ -319,6 +323,9 @@ func (c Config) Validate() error {
 	}
 	if c.Policy.DaemonTimeout.Duration <= 0 {
 		errs = append(errs, errors.New("policy.daemon_timeout must be > 0"))
+	}
+	if c.Policy.WaitTimeout.Duration <= 0 {
+		errs = append(errs, errors.New("policy.wait_timeout must be > 0"))
 	}
 	for _, v := range []struct {
 		key string

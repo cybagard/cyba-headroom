@@ -65,11 +65,15 @@ type Env struct {
 	Environ func() []string
 
 	// Test hooks; zero values mean the real behaviour.
-	exec       func(path string, argv, env []string) error // syscall.Exec
-	fallbacks  map[string][]string                         // shim.Fallbacks
-	watchEvery time.Duration                               // poll interval (1s)
-	suspend    chan os.Signal                              // delivers Ctrl-Z (SIGTSTP)
-	stopSelf   func()                                      // stops the process (SIGSTOP)
+	exec       func(path string, argv, env []string) error                            // syscall.Exec
+	ask        func(config.Config, protocol.CheckRequest) (*protocol.Decision, error) // askDaemon
+	ancestors  func() []int                                                           // shim.Ancestors
+	now        func() time.Time                                                       // time.Now
+	sleep      func(time.Duration) bool                                               // sleepUnlessInterrupted
+	fallbacks  map[string][]string                                                    // shim.Fallbacks
+	watchEvery time.Duration                                                          // poll interval (1s)
+	suspend    chan os.Signal                                                         // delivers Ctrl-Z (SIGTSTP)
+	stopSelf   func()                                                                 // stops the process (SIGSTOP)
 }
 
 // signalContext is e.Context (or Background) that also ends on sigs.
@@ -312,9 +316,10 @@ func runShim(e Env, name string) int {
 		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
 		return 127 // as the shell says for a missing command
 	}
+	c := shim.Parse(name, e.Args[1:])
 	if getenv("HEADROOM_SHIM_DEBUG") != "" {
 		gate := "pass"
-		if c := shim.Parse(name, e.Args[1:]); c.Kind != "" {
+		if c.Kind != "" {
 			gate = "gate: " + c.Command
 			if c.MemoryBytes > 0 {
 				gate += ", " + units.Size(c.MemoryBytes)
@@ -322,9 +327,14 @@ func runShim(e Env, name string) int {
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
-	// Replace, not add: Go's and libc's getenv read the first of duplicates.
-	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, shimSelvesVar+"=") })
-	env = append(env, shimSelvesVar+"="+strings.Join(selves, string(filepath.ListSeparator)))
+	marker, code, proceed := gate(e, c, getenv)
+	if !proceed {
+		return code
+	}
+	if marker != "" {
+		env = setEnv(env, shimCheckedVar, marker)
+	}
+	env = setEnv(env, shimSelvesVar, strings.Join(selves, string(filepath.ListSeparator)))
 	// argv[0] is the bare name, as the shell passes a command found on PATH:
 	// the shim's own path would point the real binary back at the shim dir.
 	argv := append([]string{name}, e.Args[1:]...)
@@ -342,6 +352,13 @@ func runShim(e Env, name string) int {
 		return 126 // found but not runnable
 	}
 	return 0
+}
+
+// setEnv sets k=v in env, replacing rather than adding: Go's and libc's
+// getenv read the first of duplicates.
+func setEnv(env []string, k, v string) []string {
+	env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, k+"=") })
+	return append(env, k+"="+v)
 }
 
 func notYet(e Env, what string, issue int) int {
@@ -395,8 +412,16 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 		book.Observe(s)
 		s.Leases = book.List()
 	})
-	pol := cfg.Policy.Config()
-	d.SetCheck(func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
-		return book.Check(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
-	})
+	d.SetCheck(gateCheck(book, cfg.Policy.Config()))
+}
+
+// gateCheck answers a check: it finds the calling worktree (#28), then
+// decides with the lease book.
+func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
+	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
+		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, Ancestors: r.Ancestors})
+		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
+		d.Worktree, d.IdentifiedBy = id, by
+		return d
+	}
 }

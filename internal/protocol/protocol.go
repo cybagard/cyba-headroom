@@ -38,11 +38,26 @@ type CheckRequest struct {
 	Command string `json:"command"`
 	// CostBytes is the caller's estimate; 0 means the policy's default.
 	CostBytes uint64 `json:"cost_bytes,omitempty"`
+	// Cwd and Ancestors identify the caller when Worktree is empty (#28):
+	// its working directory, and its parent PIDs, nearest first.
+	Cwd       string `json:"cwd,omitempty"`
+	Ancestors []int  `json:"ancestors,omitempty"`
 }
+
+// How a check's worktree was found (Decision.IdentifiedBy).
+const (
+	IdentifiedByEnv     = "env"     // HEADROOM_WORKTREE or ORCA_WORKTREE_ID
+	IdentifiedByCwd     = "cwd"     // the working directory is in the worktree
+	IdentifiedByProcess = "process" // the caller descends from its terminal
+)
 
 // Decision is the policy's answer to a CheckRequest.
 type Decision struct {
 	Allow bool `json:"allow"`
+	// Worktree is the worktree the call was decided for, "" for a manual
+	// call, and IdentifiedBy how it was found.
+	Worktree     string `json:"worktree,omitempty"`
+	IdentifiedBy string `json:"identified_by,omitempty"`
 	// Retry is true when waiting may let the call through.
 	Retry   bool     `json:"retry,omitempty"`
 	Reasons []Reason `json:"reasons,omitempty"`

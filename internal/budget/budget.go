@@ -15,6 +15,8 @@ type Params struct {
 	// LMStudioIdleBytes is LM Studio's footprint with no model loaded
 	// (~620 MiB in #16).
 	LMStudioIdleBytes uint64
+	// OllamaIdleBytes is the Ollama server's footprint with no model loaded.
+	OllamaIdleBytes uint64
 }
 
 // Compute returns the budget for s. A source with no reading yet is listed
@@ -56,6 +58,12 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		b.Unknown = append(b.Unknown, "lmstudio")
 		footprintsKnown = false
 	}
+	if s.Ollama != nil {
+		add(ollama(s.Ollama, p))
+	} else {
+		b.Unknown = append(b.Unknown, "ollama")
+		footprintsKnown = false
+	}
 
 	base := protocol.BudgetComponent{Name: "host_baseline", ReservedBytes: p.HostBaselineBytes}
 	// Footprints count compressed pages at full size, host used at their
@@ -70,7 +78,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
 
-	for _, name := range []string{"host", "docker", "tart", "lmstudio"} {
+	for _, name := range []string{"host", "docker", "tart", "lmstudio", "ollama"} {
 		if s.Sources[name].Stale {
 			b.Stale = append(b.Stale, name)
 		}
@@ -137,18 +145,35 @@ func docker(d *protocol.Docker, p Params) protocol.BudgetComponent {
 // (R2): their file sizes, or its whole footprint when context and runtime add
 // more, or while a model loads before lms ps lists it.
 func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
-	c := protocol.BudgetComponent{Name: "lmstudio"}
-	if !l.Running {
+	var sizes uint64
+	for _, m := range l.Models {
+		sizes += m.SizeBytes
+	}
+	return modelServer("lmstudio", l.Running, l.FootprintBytes, p.LMStudioIdleBytes, sizes)
+}
+
+// ollama reserves the Ollama server plus its loaded models, as lmstudio
+// does, and its whole footprint while the model list is unknown.
+func ollama(o *protocol.Ollama, p Params) protocol.BudgetComponent {
+	var sizes uint64
+	for _, m := range o.Models {
+		sizes += m.SizeBytes
+	}
+	return modelServer("ollama", o.Running, o.FootprintBytes, p.OllamaIdleBytes, sizes)
+}
+
+// modelServer reserves a model server's idle size plus its loaded models'
+// sizes, or its footprint when that is more. Stopped, it costs nothing.
+func modelServer(name string, running bool, footprint *uint64, idle, sizes uint64) protocol.BudgetComponent {
+	c := protocol.BudgetComponent{Name: name}
+	if !running {
 		c.UsedBytes = new(uint64)
 		return c
 	}
-	c.UsedBytes = l.FootprintBytes
-	c.ReservedBytes = p.LMStudioIdleBytes
-	for _, m := range l.Models {
-		c.ReservedBytes += m.SizeBytes
-	}
-	if fp := l.FootprintBytes; fp != nil {
-		c.ReservedBytes = max(c.ReservedBytes, *fp)
+	c.UsedBytes = footprint
+	c.ReservedBytes = idle + sizes
+	if footprint != nil {
+		c.ReservedBytes = max(c.ReservedBytes, *footprint)
 	}
 	return c
 }

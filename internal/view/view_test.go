@@ -2,6 +2,7 @@ package view_test
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,12 @@ func TestReservedLine(t *testing.T) {
 	s.Budget.Components[0].ReservedBytes = 0
 	l = render(t, s, view.Options{})[1]
 	has(t, l, "reserved: tart 8.0 · lmstudio 13.0 · baseline 10.0 (in use ?)")
+}
+
+func TestReservedLineNamesOllama(t *testing.T) {
+	s := busy()
+	s.Budget.Components = slices.Insert(s.Budget.Components, 3, protocol.BudgetComponent{Name: "ollama", ReservedBytes: 2 * gib})
+	has(t, render(t, s, view.Options{})[1], "lmstudio 13.0 · ollama 2.0 · baseline 10.0")
 }
 
 func TestWorktreeRows(t *testing.T) {

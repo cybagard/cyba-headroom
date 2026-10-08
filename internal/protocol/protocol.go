@@ -141,6 +141,7 @@ type Snapshot struct {
 	Tart     *Tart     `json:"tart,omitempty"`
 	Orca     *Orca     `json:"orca,omitempty"`
 	LMStudio *LMStudio `json:"lmstudio,omitempty"`
+	Ollama   *Ollama   `json:"ollama,omitempty"`
 
 	// Budget is derived from the sections above once per tick (R2).
 	Budget *Budget `json:"budget,omitempty"`
@@ -236,7 +237,7 @@ type Budget struct {
 	// (#23). Absent when host used, compressed or a component's footprint is
 	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
-	// Components are docker, tart, lmstudio and host_baseline, in that order.
+	// Components are docker, tart, lmstudio, ollama and host_baseline, in that order.
 	Components []BudgetComponent `json:"components"`
 	// Unknown names sources with no reading yet. They count as 0, so headroom
 	// is then an upper bound.
@@ -284,6 +285,37 @@ type LoadedModel struct {
 	// TTL is the idle time after which LM Studio unloads the model; absent
 	// when it stays loaded until unloaded by hand.
 	TTL *time.Duration `json:"ttl_ns,omitempty"`
+}
+
+// Ollama is Ollama's loaded models and what they cost (R1).
+type Ollama struct {
+	// Installed is true when the ollama binary or Ollama.app was found.
+	Installed bool `json:"installed"`
+	// Running is false when no Ollama server is running. headroom never
+	// starts it, and asks its API only once it runs.
+	Running bool          `json:"running"`
+	Models  []OllamaModel `json:"models"`
+	// ModelsError says why the model list is unknown while the server runs.
+	ModelsError string `json:"models_error,omitempty"`
+	// FootprintBytes is what the Ollama server and its runners (one per
+	// loaded model) cost the host (phys_footprint). Absent when it could not
+	// be read.
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	FootprintError string  `json:"footprint_error,omitempty"`
+}
+
+// OllamaModel is one model loaded in Ollama, as /api/ps reports it.
+type OllamaModel struct {
+	Name string `json:"name"`
+	// SizeBytes is the model's size in memory, weights and context; it stays
+	// reserved while loaded, even when idle (R2).
+	SizeBytes uint64 `json:"size_bytes"`
+	// VRAMBytes is the part of SizeBytes on the GPU.
+	VRAMBytes     uint64 `json:"vram_bytes"`
+	ContextLength int    `json:"context_length"`
+	// ExpiresAt is when Ollama unloads the model if it stays idle; absent
+	// when it stays loaded until unloaded by hand (keep_alive < 0).
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // Orca is the state of Orca's worktrees and agents (R1).

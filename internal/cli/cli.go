@@ -35,6 +35,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/source/host"
 	"github.com/cybagard/cyba-headroom/internal/source/lmstudio"
+	"github.com/cybagard/cyba-headroom/internal/source/ollama"
 	"github.com/cybagard/cyba-headroom/internal/source/orca"
 	"github.com/cybagard/cyba-headroom/internal/source/tart"
 	"github.com/cybagard/cyba-headroom/internal/units"
@@ -207,12 +208,20 @@ func runDaemon(e Env) int {
 	if p := lmstudio.Locate(cfg.LMStudio.Path, e.Getenv); p != "" {
 		lmsCLI = lmstudio.Exec{Path: p}
 	}
+	// An endpoint that is not on this Mac is never contacted.
+	var ollamaAPI ollama.API
+	if base, err := ollama.Endpoint(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST")); err != nil {
+		ollamaAPI = ollama.Unusable{Err: err}
+	} else {
+		ollamaAPI = ollama.NewHTTP(base)
+	}
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		docker.New(cfg.Docker.Socket, vms),
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 		orca.New(orcaCLI),
 		lmstudio.New(lmsCLI, vmproc.Host{}, e.Getenv("HOME")),
+		ollama.New(ollamaAPI, vmproc.Host{}, func() bool { return ollama.Installed(cfg.Ollama.Path, e.Getenv, ollama.Locations) }),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

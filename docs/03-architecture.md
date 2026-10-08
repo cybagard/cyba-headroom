@@ -10,6 +10,7 @@ flowchart LR
     D[Docker / Podman API]
     T[Tart CLI]
     L[LM Studio API]
+    M[Ollama API]
     O[Orca CLI + status hooks]
     H[Host memory pressure]
   end
@@ -22,7 +23,7 @@ flowchart LR
     A[Agent hooks<br/>P1, early warning]
     V[Advise<br/>P1, orca terminal send]
   end
-  D & T & L & O & H --> X
+  D & T & L & M & O & H --> X
   X --> W & S & A & V
 ```
 

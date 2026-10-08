@@ -32,6 +32,8 @@ type Sample struct {
 	Containers []Container `json:"containers,omitempty"`
 	TartVMs    []TartVM    `json:"tart_vms,omitempty"`
 	LMStudio   *LMStudio   `json:"lmstudio,omitempty"`
+	// Ollama is absent when it was not running. Added to schema v1 later.
+	Ollama *Ollama `json:"ollama,omitempty"`
 
 	OrcaAppBytes *uint64    `json:"orca_app_bytes,omitempty"`
 	Worktrees    []Worktree `json:"worktrees,omitempty"`
@@ -100,6 +102,22 @@ type Model struct {
 	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
 }
 
+// Ollama is the Ollama server's footprint and loaded models.
+type Ollama struct {
+	FootprintBytes *uint64       `json:"footprint_bytes,omitempty"`
+	Models         []OllamaModel `json:"models,omitempty"`
+	// ModelsUnknown means the model list could not be read (the API failed
+	// or is not on this Mac): no models is not the same as none known.
+	ModelsUnknown bool `json:"models_unknown,omitempty"`
+}
+
+// OllamaModel is one loaded Ollama model.
+type OllamaModel struct {
+	Name      string     `json:"name"`
+	SizeBytes uint64     `json:"size_bytes"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
 // Worktree is one Orca worktree, its agents' processes and their states.
 type Worktree struct {
 	ID          string  `json:"id"`
@@ -155,6 +173,12 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 				Key: m.Key, SizeBytes: m.SizeBytes, Status: m.Status,
 				TTL: clone(m.TTL), LastUsedAt: clone(m.LastUsedAt),
 			})
+		}
+	}
+	if o := s.Ollama; o != nil && o.Running {
+		out.Ollama = &Ollama{FootprintBytes: clone(o.FootprintBytes), ModelsUnknown: o.ModelsError != ""}
+		for _, m := range o.Models {
+			out.Ollama.Models = append(out.Ollama.Models, OllamaModel{Name: m.Name, SizeBytes: m.SizeBytes, ExpiresAt: clone(m.ExpiresAt)})
 		}
 	}
 	if o := s.Orca; o != nil && o.Running {

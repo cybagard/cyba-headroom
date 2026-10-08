@@ -41,11 +41,11 @@ Exit criterion: agents recover from denies without human help in most cases. Blo
 - [x] #24 **R8: policy engine (min headroom, per-worktree cap, idle-holder rule)**
 - [x] #25 **R10: leases**
 - [x] #26 **R5: shim core — real-binary resolution and passthrough**
-- [ ] #27 **R5: command parser for docker/podman/tart**
-- [ ] #28 **R5: identity resolution and deny/wait UX**
-- [ ] #29 **R6: macOS VM slot gate**
-- [ ] #30 **R7: fail-open**
-- [ ] #31 **R9: Orca launch environment integration**
+- [x] #27 **R5: command parser for docker/podman/tart**
+- [x] #28 **R5: identity resolution and deny/wait UX**
+- [x] #29 **R6: macOS VM slot gate**
+- [x] #30 **R7: fail-open**
+- [x] #31 **R9: Orca launch environment integration**
 - [ ] #32 **R9: `headroom doctor`**
 - [ ] #33 **R4: ungated detection using leases**
 - [ ] #34 **Gate rollout: enable, measure deny recovery rate**

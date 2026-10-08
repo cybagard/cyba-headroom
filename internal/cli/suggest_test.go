@@ -45,7 +45,12 @@ func writeSamples(t *testing.T, dir string, daysAgo []int, hours float64) {
 
 func suggestEnv(t *testing.T) (string, map[string]string) {
 	t.Helper()
-	dir := t.TempDir()
+	// Short: the config's default socket path must fit macOS's sun_path.
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir, map[string]string{"HEADROOM_CONFIG_DIR": dir}
 }
 

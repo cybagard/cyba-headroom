@@ -773,7 +773,7 @@ func TestComposeProjectListsProfilesAndReplicas(t *testing.T) {
 	}
 	// --scale, or named services (their profiles on), are not what
 	// Compose lists: the up reserves its estimate.
-	for _, c := range []shim.Call{{Op: "up", ComposeScaled: true}, {Op: "up", ComposeNamed: true}} {
+	for _, c := range []shim.Call{{Op: "up", ComposeMayAdd: true}, {Op: "up", ComposeNamed: true}} {
 		if _, services := composeProject("/d", c, ask); services != nil {
 			t.Fatalf("%+v: services = %q, want none", c, services)
 		}

@@ -276,9 +276,9 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 		return c.Target, nil
 	}
 	name := cmp.Or(c.Target, cfg.Name)
-	if c.ComposeScaled || c.ComposeNamed {
-		// --scale, or services named (which turns their profiles on):
-		// not what Compose lists.
+	if c.ComposeMayAdd || c.ComposeNamed {
+		// --scale or a recreate, or services named (which turns their
+		// profiles on): not what Compose lists.
 		return name, nil
 	}
 	// An up's services, a name per replica: those already running start

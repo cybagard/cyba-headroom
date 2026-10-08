@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -742,7 +743,7 @@ func TestAStartOfSeveralWaitsForEach(t *testing.T) {
 // appeared"; the estimate stays reserved for what the up may add.
 func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
 	b, c, log := book(t)
-	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
 	b.Observe(snap())
 	b.Check(up, snap(), cfg)
 	s := withComposeContainer(snap(), "web", "w1", gib/2)
@@ -870,7 +871,7 @@ func TestComposeUpReservesOnlyForServicesNotRunning(t *testing.T) {
 		b, _, _ := book(t)
 		s := stack(tc.running...)
 		b.Observe(s)
-		d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app",
+		d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true,
 			Services: []string{"web", "db"}}, s, cfg)
 		if !d.Allow || reserved(b) > tc.want || reserved(b)+1 < tc.want {
 			t.Errorf("%v running: decision %+v, reserved %d MiB, want %d", tc.running, d, reserved(b)>>20, tc.want>>20)
@@ -884,7 +885,7 @@ func TestComposeUpCountsReplicas(t *testing.T) {
 	s := addContainer(snap(), protocol.Container{ID: "w-1", Name: "w-1",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "web"}}, "w1")
 	b.Observe(s)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 3 * gib, Target: "app",
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 3 * gib, Target: "app", OnEngine: true,
 		Services: []string{"web", "web", "web"}}, s, cfg)
 	if reserved(b) != 3*gib {
 		t.Fatalf("reserved %d MiB, want the estimate: two replicas start", reserved(b)>>20)
@@ -900,7 +901,7 @@ func TestAnIdleUpEndsQuietly(t *testing.T) {
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
 	b.Observe(s) // db: the run's dependency
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}}, s, cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}, OnEngine: true}, s, cfg)
 	if reserved(b) > gib {
 		t.Fatalf("reserved %d MiB: the up starts nothing", reserved(b)>>20)
 	}
@@ -921,14 +922,51 @@ func TestAStartOfAMissingAndARunningTakesNoLease(t *testing.T) {
 	}
 }
 
-// An up that starts nothing is allowed whatever the pressure.
-func TestAnIdleUpIsAllowedUnderPressure(t *testing.T) {
+// An up that starts nothing still meets the pressure guard: its reading may
+// be seconds old (compose stop, then up).
+func TestAnIdleUpMeetsThePressureGuard(t *testing.T) {
 	b, _, _ := book(t)
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
 		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
 	s.Host.Pressure = "critical"
 	b.Observe(s)
-	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}}, s, cfg); !d.Allow {
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}, OnEngine: true}, s, cfg); d.Allow {
 		t.Fatalf("decision %+v", d)
+	}
+}
+
+// An up to another engine, or after Docker said its stack exited, or on an
+// old reading, starts what it may: it keeps its estimate.
+func TestAnUpIsIdleOnlyOnTheDaemonsEngineAndAFreshReading(t *testing.T) {
+	stack := func() *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+			Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", Services: []string{"db"}}
+	for name, prep := range map[string]func(*lease.Book, *clock) (policy.Request, *protocol.Snapshot){
+		"another engine": func(*lease.Book, *clock) (policy.Request, *protocol.Snapshot) { return up, stack() },
+		"stopped since": func(b *lease.Book, _ *clock) (policy.Request, *protocol.Snapshot) {
+			b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+			r := up
+			r.OnEngine = true
+			return r, stack()
+		},
+		"old reading": func(b *lease.Book, c *clock) (policy.Request, *protocol.Snapshot) {
+			s := stack()
+			s.CollectedAt = c.t
+			b.Observe(s)
+			c.t = c.t.Add(time.Minute)
+			r := up
+			r.OnEngine = true
+			return r, s
+		},
+	} {
+		b, c, _ := book(t)
+		b.Observe(stack())
+		r, s := prep(b, c)
+		b.Check(r, s, cfg)
+		if reserved(b) != 2*gib {
+			t.Errorf("%s: reserved %d MiB, want the estimate", name, reserved(b)>>20)
+		}
 	}
 }

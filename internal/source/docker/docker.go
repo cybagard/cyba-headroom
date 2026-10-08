@@ -237,7 +237,7 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/containers/") {
 		// Docker's own answer, not any proxy's 404.
 		var e struct{ Message string }
-		if json.NewDecoder(resp.Body).Decode(&e) == nil && strings.HasPrefix(e.Message, "No such container") {
+		if json.NewDecoder(resp.Body).Decode(&e) == nil && strings.Contains(strings.ToLower(e.Message), "no such container") {
 			return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
 		}
 	}
@@ -269,7 +269,7 @@ var containerRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 // labels and whether it runs, as Docker resolves the target of a docker
 // start (#33).
 func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
-	ref = strings.TrimSpace(ref) // as the docker CLI does
+	ref = strings.TrimSpace(ref) // as the docker CLI does: docker start " x" says "No such container: x"
 	if !containerRef.MatchString(ref) {
 		// Unknown, not missing: Docker may read it otherwise, and a start
 		// of it costs.

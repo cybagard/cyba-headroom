@@ -356,17 +356,9 @@ func TestGateChargesAPaddedTarget(t *testing.T) {
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
-	insp := padInspector{}
+	insp := mapInspector{"b": {"B", false}}
 	if d := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start",
 		Target: " b", Engine: "unix:///s.sock"}, s); d.LeaseID == "" {
 		t.Fatalf("decision %+v: want a lease", d)
 	}
-}
-
-// padInspector answers as the Docker source does for a padded name it
-// could not trim: not a reference, which is not ErrNoSuchContainer.
-type padInspector struct{}
-
-func (padInspector) Inspect(context.Context, string) (string, map[string]string, bool, error) {
-	return "", nil, false, errors.New("docker: not a container reference")
 }

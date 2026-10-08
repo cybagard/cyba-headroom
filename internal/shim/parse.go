@@ -32,9 +32,11 @@ type Call struct {
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
 	// ComposeProfiles are a compose call's --profiles, which decide its
-	// services; ComposeScaled is set for an up or create with --scale.
+	// services; ComposeMayAdd is set for an up or create that may start
+	// more than Compose's config lists (--scale), or replace running
+	// containers (--force-recreate, --build, -V).
 	ComposeProfiles []string
-	ComposeScaled   bool
+	ComposeMayAdd   bool
 	// ComposeNamed is set for an up that names services.
 	ComposeNamed bool
 	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
@@ -211,6 +213,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 			profiles = append(profiles, v)
 		case "--scale":
 			scaled = true
+		case "--force-recreate", "--always-recreate-deps", "--build", "--renew-anon-volumes", "-V":
+			scaled = scaled || IsTrue(v) // replaces running containers
 		case "--file":
 			files = append(files, v)
 		case "-f":
@@ -235,7 +239,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeScaled: scaled, ComposeNamed: named, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeMayAdd: scaled, ComposeNamed: named, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

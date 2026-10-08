@@ -450,9 +450,16 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 	if len(targets) == 0 {
 		targets = []string{r.Target}
 	}
-	// docker start db db: one container. The first stays first.
+	req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
+	// The docker CLI trims each (docker start " db" starts db), and
+	// docker start db db is one container. The first stays first.
+	targets = slices.Clone(targets)
+	for i := range targets {
+		targets[i] = strings.TrimSpace(targets[i])
+	}
+	req.Target = targets[0]
 	seen := map[string]bool{}
-	targets = slices.DeleteFunc(slices.Clone(targets), func(t string) bool {
+	targets = slices.DeleteFunc(targets, func(t string) bool {
 		dup := seen[t]
 		seen[t] = true
 		return dup
@@ -482,11 +489,9 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 	switch {
 	case got[0].ok:
 		req.ContainerID, req.TakesOver, req.Running = got[0].ID, got[0].TakesOver, got[0].Running
-		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
 	case got[0].missing:
 		req.Target = "" // no such container: Docker starts it not, and no name of it comes
 		req.FirstMissing = true
-		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
 	}
 	for _, f := range got[1:] {
 		switch {
@@ -573,7 +578,7 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
-			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Services: r.Services}
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Services: r.Services, OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
 		}

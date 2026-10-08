@@ -108,6 +108,9 @@ type Request struct {
 	// Services are a compose up's project's services: those its worktree
 	// already runs start nothing new.
 	Services []string
+	// OnEngine is set when the call goes to the Docker engine the daemon
+	// reads: only then does what that engine runs tell what it starts.
+	OnEngine bool
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

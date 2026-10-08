@@ -166,6 +166,10 @@ const dockerSettle = 30 * time.Second
 // has stopped running.
 const stale = 2 * time.Second
 
+// idleFresh is how old a reading may be for a compose up to count as
+// starting nothing because its stack runs.
+const idleFresh = 15 * time.Second
+
 // Check decides r, counting what open leases still reserve, and leases the
 // cost of a gated allow. It decides on the snapshot the leases were last
 // settled against; current is the daemon's latest, used before the first
@@ -239,15 +243,16 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// The project's running services in the caller's worktree: a compose
 	// up's lease holds them (below).
 	var stack []resource
-	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && r.Worktree != "" && s != nil {
+	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && r.Worktree != "" && r.OnEngine && s != nil {
 		for _, x := range resources(s) {
-			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree {
+			// Not one Docker's events said exited since (compose stop).
+			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree && !b.seen[x.key].gone {
 				stack = append(stack, x)
 			}
 		}
 	}
 	idle := false
-	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 {
+	if r.Op == "up" && len(r.Services) > 0 && len(stack) > 0 && (s.CollectedAt.IsZero() || now.Sub(s.CollectedAt) <= idleFresh) {
 		// compose up -d of a stack whose every service runs, each replica
 		// (listed once per replica): it starts nothing new. Anything less
 		// and it holds its whole estimate: which service it starts, and
@@ -262,14 +267,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			running[sv]--
 		}
 	}
-	var d protocol.Decision
 	if idle {
-		// It starts nothing: allowed whatever the pressure, as a start of
-		// a running container. Its lease binds the stack.
-		d = protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its stack runs)", Summary(r.Command))}
-	} else {
-		d = policy.Decide(r, s, c)
+		// Decided at a byte (0 means the default): the reading may be
+		// seconds old, so the pressure guard still holds.
+		r.CostBytes = 1
 	}
+	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
 	if !d.Allow {
 		return d

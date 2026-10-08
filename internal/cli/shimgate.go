@@ -108,8 +108,8 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	if name == "docker" && c.Endpoint == "" {
-		req.Engine = dockerEndpoint(getenv)
+	if name == "docker" && c.Endpoint == "" && (c.ConfigDir == "" || filepath.IsAbs(c.ConfigDir)) {
+		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget = c.MultiTarget
 	if c.Kind == "compose" {
@@ -330,11 +330,17 @@ func dotEnv(path string) map[string]string {
 // else the context's (DOCKER_CONTEXT, else the config's currentContext, as
 // docker context use sets it), else Docker's default socket. "" when the
 // context cannot be read.
-func dockerEndpoint(getenv func(string) string) string {
+func dockerEndpoint(getenv func(string) string) string { return dockerEndpointIn(getenv, "") }
+
+// dockerEndpointIn is dockerEndpoint for docker --config configDir.
+func dockerEndpointIn(getenv func(string) string, configDir string) string {
 	if h := getenv("DOCKER_HOST"); h != "" {
 		return h
 	}
-	dir := getenv("DOCKER_CONFIG")
+	dir := configDir
+	if dir == "" {
+		dir = getenv("DOCKER_CONFIG")
+	}
 	if dir == "" {
 		dir = filepath.Join(getenv("HOME"), ".docker")
 	}

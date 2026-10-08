@@ -46,7 +46,7 @@ func TestGateLeasesAcrossChecks(t *testing.T) {
 // The daemon resolves who is calling before deciding (#28).
 func TestGateIdentifiesTheCaller(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	check := gateCheck(book, config.Defaults("/x").PolicyConfig(), nil)
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},
@@ -86,7 +86,7 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 func TestGateCountsMacOSSlots(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
 	cfg := config.Defaults("/x")
-	check := gateCheck(book, cfg.PolicyConfig(), nil)
+	check := gateCheckOn(book, cfg.PolicyConfig(), nil, "")
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},
@@ -103,7 +103,7 @@ func TestGateCountsMacOSSlots(t *testing.T) {
 // is not decided on (#30).
 func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
-	check := gateCheck(book, config.Defaults("/x").PolicyConfig(), nil)
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
 	headroom := int64(0) // would deny
 	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}, CollectedAt: time.Now().Add(-5 * time.Minute)}
 	book.Observe(s)
@@ -147,7 +147,7 @@ func TestGateResolvesAStartsContainer(t *testing.T) {
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
-	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
+	created := gateCheckOn(book, pol, nil, "")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
 	started := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s)
 	ls := book.List()
@@ -168,9 +168,9 @@ func TestGateLooksUpOnlyDockerStarts(t *testing.T) {
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
-	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
+	created := gateCheckOn(book, pol, nil, "")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
-	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "podman start db", Target: "db"}, s)
+	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "podman start db", Target: "db"}, s)
 	if len(book.List()) != 2 {
 		t.Fatalf("podman's start took over docker's create: %+v", book.List())
 	}

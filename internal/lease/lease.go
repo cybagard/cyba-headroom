@@ -172,6 +172,11 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if r.ContainerID != "" && b.boundAnywhere("container:"+r.ContainerID) {
+		// docker stop && docker start of a container an open lease holds:
+		// that lease still covers it. Allowed, and no new lease.
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
+	}
 	s := b.latest
 	if s == nil || (current != nil && current.CollectedAt.After(b.observed.Add(stale))) {
 		s = current
@@ -223,7 +228,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				return false // a manual call reserves nothing: it takes no worktree's lease
 			}
 			e.took = append(e.took, o)
-			e.cost, e.used = max(e.cost, o.cost), o.used
+			e.cost, e.used = max(e.cost, o.cost), e.used+o.used
 			for k := range o.bound {
 				e.bound[k] = true
 			}
@@ -237,7 +242,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// it holds its cost to the timeout.
 		e.containerID, e.target = "", ""
 	}
-	if r.TakesOver != "" {
+	if r.TakesOver != "" && !r.Running {
 		// A start of a container a run or create made that has not run
 		// yet: that lease ends here, and this one keeps the larger cost.
 		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
@@ -371,17 +376,28 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// A start keyed by its container's ID binds it whenever it is there,
 	// new or not: docker stop && docker start within a tick never leaves
 	// the snapshot. The key is exact, so nothing is guessed.
+	bound := map[string]bool{}
+	for _, e := range b.open {
+		for k := range e.bound {
+			bound[k] = true
+		}
+	}
+	byID := map[string]resource{}
+	for _, r := range res {
+		if r.id != "" {
+			byID[r.id] = r
+		}
+	}
 	for _, e := range b.open {
 		if e.containerID == "" || len(e.bound) > 0 {
 			continue
 		}
 		// A container whose label names an open lease is that lease's: the
 		// label outranks an ID.
-		if i := slices.IndexFunc(res, func(r resource) bool {
-			return r.id == e.containerID && !b.boundAnywhere(r.key) && keyed(b.open, r, true) == e
-		}); i >= 0 {
-			e.bind(res[i])
-			b.judge(res[i], gated, now)
+		if r, ok := byID[e.containerID]; ok && !bound[r.key] && keyed(b.open, r, true) == e {
+			e.bind(r)
+			b.judge(r, gated, now)
+			bound[r.key] = true
 		}
 	}
 	var fresh []resource // new this tick, and bound to no lease yet
@@ -647,12 +663,32 @@ func (b *Book) lapsedFor(r resource) bool {
 }
 
 // sameKey reports whether compose leases e and o have the same key: the
-// same named project, or (neither naming one) the same directory.
+// same named project, the same directory, or a named project and the
+// directory Compose names that project after by default.
 func (e *entry) sameKey(o *entry) bool {
-	if len(e.composeDirs) > 0 || len(o.composeDirs) > 0 {
+	switch {
+	case len(e.composeDirs) > 0 && len(o.composeDirs) > 0:
 		return slices.ContainsFunc(e.composeDirs, func(d string) bool { return slices.Contains(o.composeDirs, d) })
+	case len(e.composeDirs) > 0:
+		return o.project != "" && o.project == defaultProject(e.composeDirs[0])
+	case len(o.composeDirs) > 0:
+		return e.project != "" && e.project == defaultProject(o.composeDirs[0])
 	}
 	return e.project != "" && e.project == o.project
+}
+
+// defaultProject is the project name Compose gives a directory: its base
+// name, lower case, keeping only letters, digits, - and _.
+func defaultProject(dir string) string {
+	return strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+			return c
+		case c >= 'A' && c <= 'Z':
+			return c + 'a' - 'A'
+		}
+		return -1
+	}, filepath.Base(dir))
 }
 
 // judge records how r started.

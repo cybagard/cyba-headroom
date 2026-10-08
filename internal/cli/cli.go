@@ -461,13 +461,8 @@ type Inspector interface {
 // the shim's daemon timeout.
 const inspectTimeout = 200 * time.Millisecond
 
-// gateCheck answers a check: it finds the calling worktree (#28), then
-// decides with the lease book.
-func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.CheckFunc {
-	return gateCheckOn(book, pol, docker, "")
-}
-
-// gateCheckOn is gateCheck for a daemon that reads the Docker engine at
+// gateCheckOn answers a check: it finds the calling worktree (#28), then
+// decides with the lease book. The daemon reads the Docker engine at
 // socket: only a start on that engine is looked up there.
 func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket string) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {

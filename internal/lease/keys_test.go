@@ -324,3 +324,60 @@ func TestAnUnkeyedLeaseEndsQuietly(t *testing.T) {
 		t.Fatalf("leases %+v, log %s", b.List(), log)
 	}
 }
+
+// docker run db, then docker stop db && docker start db while the run's
+// lease is open: that lease still covers db, so the start takes none.
+func TestAStartOfAContainerAnOpenLeaseHoldsTakesNoLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 4*gib), snap(), cfg)
+	s := withRun(snap(), "db", "w1", gib, run.LeaseID)
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: 4 * gib, Target: "db", ContainerID: "db"}, s, cfg)
+	if !d.Allow || d.LeaseID != "" || reserved(b) != 3*gib {
+		t.Fatalf("decision %+v, reserved %d GiB, want no new lease and the run's 3", d, reserved(b)>>30)
+	}
+}
+
+// docker run -d --name a, then docker start a b before a tick: a runs, so
+// the start takes nothing over and a binds its run's lease.
+func TestARunningTargetIsTakenNothingFrom(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", gib), snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", CostBytes: gib, Target: "a", ContainerID: "A",
+		Running: true, MultiTarget: true, TakesOver: run.LeaseID}, snap(), cfg)
+	b.Observe(withRun(snap(), "A", "w1", gib/2, run.LeaseID))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// compose -p app up, then a plain compose up of the same stack (project
+// app by default, from /repo/app): one lease, not two.
+func TestAProjectAndADirectoryOfOneStackShareAKey(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, ComposeDirs: []string{"/repo/app"}}, snap(), cfg)
+	if l := b.List(); len(l) != 1 {
+		t.Fatalf("leases = %+v, want the second to take the first over", l)
+	}
+}
+
+// Taking over several leases adds up what their containers use.
+func TestATakeoverAddsUpUse(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	ctr := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib,
+			Labels: map[string]string{"com.docker.compose.project": "p" + id, protocol.ComposeWorkingDirLabel: "/r"}}, "w1")
+	}
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "px"}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "py"}, snap(), cfg)
+	b.Observe(ctr(ctr(snap(), "x"), "y"))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "px"}, snap(), cfg)
+	if r := reserved(b); r != 3*gib+3*gib {
+		t.Fatalf("reserved %d GiB, want px's 3 and py's 3", r>>30)
+	}
+}

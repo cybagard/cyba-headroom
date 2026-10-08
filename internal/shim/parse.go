@@ -22,6 +22,8 @@ type Call struct {
 	// Target is the image, container, compose project (-p) or VM; "" if
 	// unknown. It is the raw argument: use Command for anything shown.
 	Target string
+	// ConfigDir is docker's --config: where it reads its context from.
+	ConfigDir string
 	// MultiTarget is set for a start or restart of several containers:
 	// Target is only the first.
 	MultiTarget bool
@@ -67,6 +69,8 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		switch f {
 		case "--context", "-H", "--host", "-c", "--connection", "--url":
 			c.Endpoint = v
+		case "--config":
+			c.ConfigDir = v
 		case "-v":
 			version = IsTrue(v) // docker -v and podman -v print the version
 		}

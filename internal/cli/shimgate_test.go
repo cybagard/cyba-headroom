@@ -679,3 +679,32 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 		t.Fatalf("DOCKER_HOST: %q", got)
 	}
 }
+
+// docker --config DIR reads its context from DIR.
+func TestDockerEndpointHonoursConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	sum := sha256.Sum256([]byte("colima"))
+	meta := filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]))
+	if err := os.MkdirAll(meta, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"unix:///c.sock"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"currentContext":"colima"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	get := func(k string) string {
+		if k == "HOME" {
+			return "/Users/dev"
+		}
+		return ""
+	}
+	if got := dockerEndpointIn(get, dir); got != "unix:///c.sock" {
+		t.Fatalf("endpoint = %q", got)
+	}
+	c := shim.Parse("docker", []string{"--config", dir, "start", "x"})
+	if c.ConfigDir != dir {
+		t.Fatalf("ConfigDir = %q", c.ConfigDir)
+	}
+}

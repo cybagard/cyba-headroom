@@ -58,6 +58,11 @@ type CheckRequest struct {
 	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
 	// may be known by either spelling.
 	RealCwd string `json:"real_cwd,omitempty"`
+	// Target and Name are what the call starts: the image, container,
+	// compose project or VM, and a run's --name. The lease uses them to
+	// bind its own container (#33); they are never shown or logged.
+	Target string `json:"target,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
 // How a check's worktree was found (Decision.IdentifiedBy).
@@ -100,6 +105,19 @@ type Lease struct {
 	Bytes    uint64    `json:"bytes"`
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires"`
+}
+
+// Ungated is a container or VM that appeared without a check through the
+// shim, so no lease was taken for it (R4, #33): started through the socket
+// or an SDK, by a login shell that put the real binary first, by an agent
+// not launched through headroom run, or while the daemon was down.
+type Ungated struct {
+	Key  string `json:"key"` // container:<id> or vm:<name>
+	Name string `json:"name"`
+	Kind string `json:"kind"` // container, compose or vm
+	// Worktree is the worktree it is attributed to; "" when none.
+	Worktree string    `json:"worktree,omitempty"`
+	Since    time.Time `json:"since"`
 }
 
 // Reason is one policy rule's verdict.
@@ -150,6 +168,9 @@ type Snapshot struct {
 	Attribution *Attribution `json:"attribution,omitempty"`
 	// Leases are the open reservations, oldest first (#25).
 	Leases []Lease `json:"leases,omitempty"`
+	// Ungated are containers and VMs that appeared without a check (R4,
+	// #33), oldest first.
+	Ungated []Ungated `json:"ungated,omitempty"`
 }
 
 // Attribution is what each worktree runs (R3).

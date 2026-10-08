@@ -34,7 +34,7 @@ headroom status --json        # the full snapshot
 headroom uninstall
 ```
 
-The view leads with headroom and memory pressure. Below that is one row per worktree, showing its agents, containers, Tart VMs, CPU and the agents' own memory, then anything that matches no worktree. `⚑` marks a worktree that holds containers or VMs while none of its agents is working. `?` means unknown, never 0. `≤` before headroom means some source has not reported yet. Colour is used only on a terminal, and never when `NO_COLOR` is set.
+The view leads with headroom and memory pressure. Below that is one row per worktree, showing its agents, containers, Tart VMs, CPU and the agents' own memory, then anything that matches no worktree. `⚑` marks a worktree that holds containers or VMs while none of its agents is working. `⚠` marks one holding a container or VM that started without going through headroom (ungated): through the Docker socket or an SDK such as Testcontainers, a script's login shell, an agent not launched through `headroom run`, or while the daemon was down. The footer names them, and the daemon log says so once per container or VM. Those that were running before the daemon started, or that Docker restarts itself, are not flagged. `?` means unknown, never 0. `≤` before headroom means some source has not reported yet. Colour is used only on a terminal, and never when `NO_COLOR` is set.
 
 Config lives in `~/.config/headroom/config.toml` (override with `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`). Unknown keys are an error. Thresholds and the host baseline default to 0 (unset) until the observe baseline (#23); the Docker, LM Studio and Ollama overheads default to the spike measurements. GB means GiB.
 

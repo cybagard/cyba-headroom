@@ -21,6 +21,10 @@ type Call struct {
 	// Target is the image, container, compose project (-p) or VM; "" if
 	// unknown. It is the raw argument: use Command for anything shown.
 	Target string
+	// Name is the container name given with --name, for run and create;
+	// "" if none. With Target it lets the daemon tell the call's container
+	// from others that appear at the same time (#33).
+	Name string
 	// MemoryBytes is the memory limit given with -m/--memory; 0 if none.
 	MemoryBytes uint64
 	// Endpoint is the engine chosen with --context, -H/--host,
@@ -77,10 +81,13 @@ func parseEngine(name string, args []string) Call {
 	default:
 		return Call{}
 	}
-	var mem string
+	var mem, cname string
 	seen := func(f, v string) {
-		if f == "-m" || f == "--memory" {
+		switch f {
+		case "-m", "--memory":
 			mem = v
+		case "--name":
+			cname = v
 		}
 	}
 	var pos []string
@@ -95,6 +102,9 @@ func parseEngine(name string, args []string) Call {
 		return Call{}
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
+	if c.Op == "run" || c.Op == "create" {
+		c.Name = cname
+	}
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
 	}

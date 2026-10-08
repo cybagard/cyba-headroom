@@ -445,7 +445,7 @@ func TestDoctorLoginShell(t *testing.T) {
 	}{
 		"path_helper puts docker first": {func(r *doctorRig) {
 			r.login = "docker=/usr/local/bin/docker\npodman=\ntart=" + filepath.Join(r.shims, "tart") + "\n"
-		}, "!", []string{"docker → /usr/local/bin/docker", "ungated", "#33"}},
+		}, "!", []string{"docker → /usr/local/bin/docker", "run ungated", "headroom shows them as ungated"}},
 		"shell fails": {func(r *doctorRig) {
 			r.login, r.loginErr = "", errors.New("signal: killed")
 		}, "!", []string{"could not run", "killed"}},

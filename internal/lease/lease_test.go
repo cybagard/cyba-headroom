@@ -67,11 +67,12 @@ func TestAnAllowLeasesItsCost(t *testing.T) {
 	}
 }
 
-func TestManualCallsAreNotLeased(t *testing.T) {
+func TestManualCallsReserveNothing(t *testing.T) {
 	// A manual call is outside admission control: it must not hold back
-	// memory from gated calls. Its container counts once it appears.
+	// memory from gated calls. Its container counts once it appears. Its
+	// lease only marks the call as checked (#33).
 	b, _, _ := book(t)
-	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeaseID != "" {
+	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeasedBytes != 0 {
 		t.Fatalf("manual = %+v", d)
 	}
 	if d := b.Check(req("w1", 4*gib), snap(), cfg); !d.Allow {

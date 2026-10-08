@@ -19,7 +19,8 @@ func TestParse(t *testing.T) {
 		// Containers.
 		{"docker run --rm alpine true", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -it --rm -m 2g postgres:17 psql", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", MemoryBytes: 2 * g}},
-		{"docker run --memory=512m -e A=b -v /a:/b --name db postgres:17", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", MemoryBytes: 512 << 20}},
+		{"docker run --memory=512m -e A=b -v /a:/b --name db postgres:17", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", Name: "db", MemoryBytes: 512 << 20}},
+		{"docker create --name=web nginx", Call{Kind: "container", Op: "create", Command: "docker create nginx", Target: "nginx", Name: "web"}},
 		{"docker run -dm1.5G -p 80:80 nginx", Call{Kind: "container", Op: "run", Command: "docker run nginx", Target: "nginx", MemoryBytes: 3 * g / 2}},
 		{"docker run -h myhost alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -m 1g -m 3g alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", MemoryBytes: 3 * g}},

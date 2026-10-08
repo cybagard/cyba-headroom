@@ -322,7 +322,7 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error), 
 		return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` finds none of docker, podman, tart", sh)}
 	}
 	if len(ungated) > 0 {
-		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated (#33)", sh, strings.Join(ungated, ", "))}
+		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated, and headroom shows them as ungated", sh, strings.Join(ungated, ", "))}
 	}
 	return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` keeps the shims first", sh)}
 }

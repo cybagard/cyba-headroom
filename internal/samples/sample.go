@@ -35,6 +35,10 @@ type Sample struct {
 	// Ollama is absent when it was not running. Added to schema v1 later.
 	Ollama *Ollama `json:"ollama,omitempty"`
 
+	// Ungated are the containers and VMs that appeared without a check
+	// (#33), for the gate rollout (#34). Added to schema v1 later.
+	Ungated []Ungated `json:"ungated,omitempty"`
+
 	OrcaAppBytes *uint64    `json:"orca_app_bytes,omitempty"`
 	Worktrees    []Worktree `json:"worktrees,omitempty"`
 }
@@ -118,6 +122,13 @@ type OllamaModel struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+// Ungated is a container or VM that appeared without a check.
+type Ungated struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Worktree string `json:"worktree,omitempty"`
+}
+
 // Worktree is one Orca worktree, its agents' processes and their states.
 type Worktree struct {
 	ID          string  `json:"id"`
@@ -180,6 +191,9 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 		for _, m := range o.Models {
 			out.Ollama.Models = append(out.Ollama.Models, OllamaModel{Name: m.Name, SizeBytes: m.SizeBytes, ExpiresAt: clone(m.ExpiresAt)})
 		}
+	}
+	for _, u := range s.Ungated {
+		out.Ungated = append(out.Ungated, Ungated{Name: u.Name, Kind: u.Kind, Worktree: u.Worktree})
 	}
 	if o := s.Orca; o != nil && o.Running {
 		app := o.AppMemoryBytes

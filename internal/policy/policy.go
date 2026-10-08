@@ -81,6 +81,9 @@ type Request struct {
 	// PID is the calling process for a tart run, which becomes tart: the
 	// lease ends if it exits before its VM appears (#29).
 	PID int
+	// Target and Name identify what the call starts (the image, container,
+	// compose project or VM, and a --name), for its lease to bind (#33).
+	Target, Name string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

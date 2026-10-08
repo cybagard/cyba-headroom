@@ -11,8 +11,12 @@
 // cost, when they are gone, or at its timeout; one that never saw its
 // resource is logged as expired.
 //
-// Manual calls (no worktree) are outside admission control and get no
-// lease; their containers count in the budget once they appear.
+// Manual calls (no worktree) are outside admission control: their lease
+// reserves nothing and only marks the call as checked. Their containers
+// count in the budget once they appear.
+//
+// A new resource that binds no lease was started without a check: it is
+// ungated (R4, #33).
 package lease
 
 import (
@@ -56,6 +60,12 @@ type Book struct {
 	// previous set, so a resource missing from it does not come back new.
 	// nil until the first Observe: no baseline yet.
 	prev map[string]bool
+	// ungated are new resources that bound no lease, by key (#33).
+	ungated map[string]protocol.Ungated
+	// dockerDown is set while a fresh reading shows the Docker engine not
+	// running: its first reading after that is a baseline, since the
+	// engine restarts containers with a restart policy itself.
+	dockerDown bool
 }
 
 type entry struct {
@@ -72,6 +82,9 @@ type entry struct {
 	// pid is the tart run process, for a tart lease: if it exits before its
 	// VM appears, the run failed.
 	pid int
+	// target and name are what the call starts (shim.Call), so the lease
+	// binds its own resource when several appear at once (#33).
+	target, name string
 }
 
 // reserved is what the lease still holds back: its cost less what its
@@ -82,7 +95,8 @@ func (e *entry) reserved() uint64 { return e.cost - min(e.used, e.cost) }
 func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
-	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive}
+	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
+		ungated: map[string]protocol.Ungated{}}
 }
 
 // stale is how much newer the daemon's snapshot must be than the one leases
@@ -116,8 +130,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
-	if !d.Allow || r.Worktree == "" {
-		return d // manual calls are not gated, and hold nothing back
+	if !d.Allow {
+		return d
 	}
 	if b.prev == nil && s != nil && (s.Docker != nil || s.Tart != nil) {
 		// Before the first Observe, the check's own reading is the baseline.
@@ -133,6 +147,15 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			Created: now, Expires: now.Add(b.timeout),
 		},
 		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
+		target: r.Target, name: r.Name,
+	}
+	if r.Kind == "compose" {
+		e.project = r.Target // -p, when given: the lease waits for that project
+	}
+	if r.Worktree == "" {
+		// Manual calls are not gated and hold nothing back: the lease
+		// only marks the call as checked, so its container is not ungated.
+		e.cost, e.macOS = 0, false
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
@@ -142,6 +165,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 // resource is a container or VM in a snapshot.
 type resource struct {
 	key      string // "container:<id>" or "vm:<name>"
+	name     string
+	image    string // a container's image
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
 	worktree string // "" when unattributed
@@ -168,7 +193,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
 			k := "container:" + c.ID
-			r := resource{key: k, kind: "container", worktree: owner[k], bytes: c.MemoryBytes}
+			r := resource{key: k, name: c.Name, image: c.Image, kind: "container", worktree: owner[k], bytes: c.MemoryBytes}
 			if p := c.Labels[protocol.ComposeProjectLabel]; p != "" {
 				r.kind, r.project = "compose", p
 			}
@@ -178,7 +203,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
 		}
 	}
 	return out
@@ -226,20 +251,55 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	defer b.mu.Unlock()
 	now := b.now()
 	res := resources(s)
+	// The Docker engine back after a fresh reading showed it down restarts
+	// containers itself: this reading is their baseline, not ungated.
+	dockerBack := false
+	if d := s.Docker; d != nil && readable(s, "container") {
+		dockerBack = b.dockerDown && d.Running
+		b.dockerDown = !d.Running
+	}
 	present := map[string]uint64{}
+	var fresh []resource // new this tick, and bound to no lease yet
 	for _, r := range res {
 		present[r.key] = r.bytes
-		if b.prev[r.key] || b.boundAnywhere(r.key) {
-			continue
+		if u, ok := b.ungated[r.key]; ok && r.worktree != "" {
+			u.Worktree = r.worktree // attribution can come a tick late
+			b.ungated[r.key] = u
 		}
+		if !b.prev[r.key] && !b.boundAnywhere(r.key) {
+			fresh = append(fresh, r)
+		}
+	}
+	// Resources a call names bind first, so another one appearing in the
+	// same tick cannot take their lease.
+	var rest []resource
+	for _, r := range fresh {
+		if e := b.named(r, now); e != nil {
+			e.bind(r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	for _, r := range rest {
 		// Without a baseline (a lease taken before the first reading), any
 		// resource may have been there already: only one attributed to the
 		// lease's own worktree is taken as its call's.
 		if e := b.match(r, now, b.prev == nil); e != nil {
-			e.bound[r.key] = true
-			if e.Kind == "compose" && e.project == "" {
-				e.project = r.project
-			}
+			e.bind(r)
+			continue
+		}
+		if b.prev == nil || dockerBack && r.kind != "vm" {
+			continue // a baseline: it may have been there before
+		}
+		if _, ok := b.ungated[r.key]; !ok {
+			b.ungated[r.key] = protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}
+			b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
+				"name", r.name, "kind", r.kind, "worktree", r.worktree)
+		}
+	}
+	for k := range b.ungated {
+		if _, ok := present[k]; !ok && readable(s, kindOf(k)) {
+			delete(b.ungated, k)
 		}
 	}
 	next := map[string]bool{}
@@ -301,6 +361,10 @@ func (b *Book) expire(now time.Time) {
 			return false
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
+		case e.Worktree == "":
+			// A manual call's: it reserved nothing, and many start nothing
+			// that lives long enough to be seen (docker run --rm).
+			b.log.Debug("manual lease ended at its timeout", "lease", e.ID, "command", e.Command)
 		default:
 			b.log.Warn("lease expired: its container or VM never appeared", "lease", e.ID, "worktree", e.Worktree,
 				"command", e.Command, "bytes", e.cost, "age", now.Sub(e.Created).Round(time.Second))
@@ -337,29 +401,114 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 		}
 	}
 	for _, live := range []bool{true, false} {
-		var other *entry
+		var other, manual *entry
 		for _, e := range b.open {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) {
+			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.namesOther(r) {
 				continue
 			}
-			if r.worktree != "" && e.Worktree == r.worktree {
+			switch {
+			case e.Worktree == "":
+				// A manual call's, made anywhere (also in a worktree's
+				// directory): last, after every worktree's own lease.
+				if manual == nil && !ownOnly {
+					manual = e
+				}
+			case r.worktree != "" && e.Worktree == r.worktree:
 				return e
-			}
-			if r.worktree == "" && other == nil && !ownOnly {
+			case r.worktree == "" && other == nil && !ownOnly:
 				other = e
 			}
 		}
 		if other != nil {
 			return other
 		}
+		if manual != nil {
+			return manual
+		}
 	}
 	return nil
+}
+
+// named finds the open lease whose call names r, live ones first: it is
+// r's, whatever the worktrees say.
+func (b *Book) named(r resource, now time.Time) *entry {
+	for _, live := range []bool{true, false} {
+		for _, e := range b.open {
+			if now.Before(e.Expires) == live && e.waitsFor() == r.kind && e.takes(r) && e.names(r) {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+// bind makes r one of e's resources.
+func (e *entry) bind(r resource) {
+	e.bound[r.key] = true
+	if e.Kind == "compose" && e.project == "" {
+		e.project = r.project
+	}
+}
+
+// names reports whether e's call names r: its --name, its container
+// (start), its image, or its VM.
+func (e *entry) names(r resource) bool {
+	switch {
+	case r.kind == "vm":
+		return e.target != "" && e.target == r.name
+	case r.kind == "compose":
+		return false // takes already keeps a compose lease to its project
+	case e.name != "":
+		return e.name == r.name
+	case e.target == "":
+		return false
+	}
+	id := strings.TrimPrefix(r.key, "container:")
+	return e.target == r.name || len(e.target) >= 4 && strings.HasPrefix(id, e.target) || sameImage(e.target, r.image)
+}
+
+// namesOther reports whether e's call names a different container: a
+// --name is exact. An image is not (mirrors, digests), so it only orders.
+func (e *entry) namesOther(r resource) bool {
+	return r.kind == "container" && e.name != "" && e.name != r.name
+}
+
+// sameImage reports whether two image references name the same image, as
+// Docker reads a short one: docker.io/library/ and :latest are implied.
+func sameImage(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.TrimPrefix(s, "docker.io/")
+		s = strings.TrimPrefix(s, "library/")
+		if i := strings.LastIndex(s, "/"); !strings.Contains(s[i+1:], ":") && !strings.Contains(s, "@") {
+			s += ":latest"
+		}
+		return s
+	}
+	return a != "" && b != "" && norm(a) == norm(b)
 }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// Ungated returns the containers and VMs that appeared without a check
+// and still run, oldest first.
+func (b *Book) Ungated() []protocol.Ungated {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]protocol.Ungated, 0, len(b.ungated))
+	for _, u := range b.ungated {
+		out = append(out, u)
+	}
+	slices.SortFunc(out, func(a, b protocol.Ungated) int {
+		if c := a.Since.Compare(b.Since); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Key, b.Key)
+	})
+	return out
 }
 
 // Release ends the open lease id, whose call never started (its exec

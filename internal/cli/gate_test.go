@@ -69,8 +69,15 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 		t.Fatalf("by resolved cwd: %+v", d)
 	}
 	d = check(&protocol.CheckRequest{Kind: "container", Command: "docker run c", Cwd: "/Users/dev"}, s)
-	if !d.Allow || d.Worktree != "" || d.LeaseID != "" {
+	// A manual call's lease reserves nothing; it marks the call as checked,
+	// so its container is not flagged ungated (#33).
+	if !d.Allow || d.Worktree != "" || d.LeaseID == "" {
 		t.Fatalf("manual: %+v", d)
+	}
+	for _, l := range book.List() {
+		if l.ID == d.LeaseID && l.Bytes != 0 {
+			t.Fatalf("manual lease reserves %d", l.Bytes)
+		}
 	}
 }
 
@@ -102,5 +109,18 @@ func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {
 	d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Command: "docker run a"}, s)
 	if !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot {
 		t.Fatalf("%+v", d)
+	}
+}
+
+// A container that appears without a check is in the snapshot as ungated.
+func TestDeriveListsUngated(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	tick := derive(book, config.Defaults("/x").Budget.Params())
+	s := &protocol.Snapshot{Docker: &protocol.Docker{Running: true}}
+	tick(s)
+	s = &protocol.Snapshot{Docker: &protocol.Docker{Running: true, Containers: []protocol.Container{{ID: "c1", Name: "testcontainers-ryuk"}}}}
+	tick(s)
+	if len(s.Ungated) != 1 || s.Ungated[0].Name != "testcontainers-ryuk" {
+		t.Fatalf("ungated = %+v", s.Ungated)
 	}
 }

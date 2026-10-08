@@ -421,18 +421,25 @@ func usage(w io.Writer) {
 // or expires leases against that snapshot, and lists the open ones in it.
 // Checks decide against the latest snapshot and the open leases.
 func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
-	params := cfg.Budget.Params()
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
-	d.SetDerive(func(s *protocol.Snapshot) {
+	d.SetDerive(derive(book, cfg.Budget.Params()))
+	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
+	d.SetRelease(book.Release)
+}
+
+// derive fills in what each tick computes from the sources: the budget,
+// attribution, and, once leases are settled, the open leases and the
+// containers and VMs that appeared without a check (#33).
+func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
+	return func(s *protocol.Snapshot) {
 		b := budget.Compute(s, params)
 		s.Budget = &b
 		at := attribution.Attribute(s)
 		s.Attribution = &at
 		book.Observe(s)
 		s.Leases = book.List()
-	})
-	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
-	d.SetRelease(book.Release)
+		s.Ungated = book.Ungated()
+	}
 }
 
 // gateCheck answers a check: it finds the calling worktree (#28), then
@@ -440,7 +447,8 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID}, s, pol)
+		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
+			Target: r.Target, Name: r.Name}, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

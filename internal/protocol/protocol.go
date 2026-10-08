@@ -49,6 +49,9 @@ type CheckRequest struct {
 	// MacOS is set for a tart run of a macOS VM, which takes one of the
 	// macOS VM slots (R6, #29).
 	MacOS bool `json:"macos,omitempty"`
+	// PID is the calling process, for tart run: it becomes tart, so its exit
+	// before its VM appears means the run failed (#29).
+	PID int `json:"pid,omitempty"`
 	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
 	// may be known by either spelling.
 	RealCwd string `json:"real_cwd,omitempty"`

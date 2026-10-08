@@ -20,6 +20,15 @@ func TestTartVM(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	oci := filepath.Join(home, "cache", "OCIs", "ghcr.io", "cirruslabs", "macos-sequoia-base")
+	for _, ref := range []string{"latest", "sha256:abc"} {
+		if err := os.MkdirAll(filepath.Join(oci, ref), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(oci, ref, "config.json"), []byte(`{"os":"darwin","memorySize":8589934592}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	getenv := func(k string) string { return map[string]string{"TART_HOME": home}[k] }
 	for _, c := range []struct {
 		name  string
@@ -31,7 +40,11 @@ func TestTartVM(t *testing.T) {
 		{"linux-ci", false, 4 << 30, true},
 		{"broken", false, 0, false},
 		{"missing", false, 0, false},
-		{"ghcr.io/cirruslabs/macos-sequoia-base:latest", false, 0, false}, // an OCI reference
+		{"ghcr.io/cirruslabs/macos-sequoia-base:latest", true, 8 << 30, true}, // a cached OCI image
+		{"ghcr.io/cirruslabs/macos-sequoia-base", true, 8 << 30, true},        // :latest
+		{"ghcr.io/cirruslabs/macos-sequoia-base@sha256:abc", true, 8 << 30, true},
+		{"ghcr.io/cirruslabs/not-cached:latest", false, 0, false},
+		{"ghcr.io/../../vms/mac-ci:latest", false, 0, false},
 		{"../vms/mac-ci", false, 0, false},
 		{"..", false, 0, false},
 		{"", false, 0, false},

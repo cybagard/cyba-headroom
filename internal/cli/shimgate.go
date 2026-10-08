@@ -65,11 +65,11 @@ func (e Env) withDefaults() Env {
 }
 
 // gate asks the daemon whether call c may start (R5, #28). Calls that start
-// nothing (tart clone makes a VM but runs nothing: disk, not memory), calls
-// already checked and calls to a remote engine are not asked about; nor, failing open (R7), is anything when the config or the daemon
+// nothing, calls already checked and calls to a remote engine are not asked
+// about; nor, failing open (R7), is anything when the config or the daemon
 // cannot answer.
 func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
-	if c.Kind == "" || c.Op == "clone" || getenv(shimCheckedVar) == shim.Self() ||
+	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() ||
 		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
 		return gated{proceed: true}
 	}
@@ -85,7 +85,12 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
 		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {
 			req.MacOS, req.CostBytes = macOS, mem
+		} else if getenv("HEADROOM_SHIM_DEBUG") != "" {
+			fmt.Fprintf(e.Stderr, "headroom: no config for the VM in `%s` under TART_HOME: not counted as a macOS VM\n", c.Command)
 		}
+		// This process becomes tart run: when it exits before its VM
+		// appears, the daemon ends the lease (#29).
+		req.PID = os.Getpid()
 	}
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
@@ -243,14 +248,20 @@ func reraise(sig os.Signal) {
 
 // denyHint tells an agent what to do about a deny.
 func denyHint(d *protocol.Decision) string {
-	slots := len(d.Reasons) > 0 && d.Reasons[0].Code == policy.VMSlots
-	switch {
-	case d.Retry && slots:
-		return "headroom: retry later, or run it with BUDGET_WAIT=1 to wait for a slot"
-	case d.Retry:
+	if d.Retry {
+		if len(d.Reasons) > 0 && d.Reasons[0].Code == policy.VMSlots {
+			return "headroom: retry later, or run it with BUDGET_WAIT=1 to wait for a slot"
+		}
 		return "headroom: retry later, or run it with BUDGET_WAIT=1 to wait for room"
-	case slots:
-		return "headroom: waiting will not help: set budget.max_macos_vms in headroom's config to allow macOS VMs"
+	}
+	// Speak to the first reason waiting cannot fix.
+	for _, r := range d.Reasons {
+		if !r.Retry {
+			if r.Code == policy.VMSlots {
+				return "headroom: waiting will not help: set budget.max_macos_vms in headroom's config to allow macOS VMs"
+			}
+			break
+		}
 	}
 	return "headroom: waiting will not help: reuse or stop what this worktree holds, or ask for less memory"
 }

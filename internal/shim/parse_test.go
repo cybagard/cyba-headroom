@@ -101,12 +101,12 @@ func TestParse(t *testing.T) {
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
 		{"tart run --no-graphics --dir src:/tmp/src ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
-		{"tart clone ghcr.io/cirruslabs/macos-sequoia-base:latest ci-vm", Call{Kind: "tart", Op: "clone", Command: "tart clone ci-vm", Target: "ci-vm"}},
-		{"tart clone --concurrency 8 base ci-vm", Call{Kind: "tart", Op: "clone", Command: "tart clone ci-vm", Target: "ci-vm"}},
-		{"tart clone base --concurrency 4 ci-vm --insecure", Call{Kind: "tart", Op: "clone", Command: "tart clone ci-vm", Target: "ci-vm"}},
+
 		{"tart run ci-vm --no-graphics --dir a:/b", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
-		{"tart clone base -- ci-vm", Call{Kind: "tart", Op: "clone", Command: "tart clone ci-vm", Target: "ci-vm"}},
+
 		{"tart run --future x ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run"}},
+		// clone makes a VM but runs nothing: disk, not memory (#29).
+		{"tart clone base ci-vm", Call{}},
 		// Pass through.
 		{"docker ps", Call{}},
 		{"docker", Call{}},
@@ -175,7 +175,6 @@ func TestFlagTablesMatchTheCLIs(t *testing.T) {
 		{composeScale, []string{"docker-compose-scale"}},
 		{composeWatch, []string{"docker-compose-watch"}},
 		{tartRun, []string{"tart-run"}},
-		{tartClone, []string{"tart-clone"}},
 	} {
 		want := flagSet{}
 		for _, h := range c.help {

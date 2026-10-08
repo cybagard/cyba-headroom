@@ -7,6 +7,7 @@ package policy
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,9 @@ type Request struct {
 	MacOS bool
 	// PendingMacOS counts macOS VMs allowed but not yet running (#29).
 	PendingMacOS int
+	// PID is the calling process for a tart run, which becomes tart: the
+	// lease ends if it exits before its VM appears (#29).
+	PID int
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -198,25 +202,28 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string)
 		}
 	}
 	type holder struct {
-		text string
-		rank int           // 0 idle, 1 manual, 2 in use
-		idle time.Duration // for idle ones
-		name string
+		text  string
+		rank  int           // 0 idle, 1 manual, 2 in use
+		idle  time.Duration // for idle ones
+		name  string
+		offer bool // safe to suggest stopping: idle past the grace, plain name
 	}
 	var hs []holder
 	for _, vm := range s.Tart.VMs {
 		if vm.OS != "darwin" {
 			continue
 		}
+		shown := vmName(vm.Name)
 		w, ok := owner[vm.Name]
 		if !ok {
-			hs = append(hs, holder{text: vm.Name + " (manual)", rank: 1, name: vm.Name})
+			hs = append(hs, holder{text: shown + " (manual)", rank: 1, name: vm.Name})
 			continue
 		}
 		state, since, working := agentState(s, w.ID, c)
-		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", vm.Name, w.Name, state)}
+		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, w.Name, state)}
 		if !working {
 			h.rank, h.idle = 0, since
+			h.offer = since > 0 && since >= c.IdleGrace && shown == vm.Name
 		}
 		hs = append(hs, h)
 	}
@@ -228,11 +235,24 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, idle string)
 	})
 	for _, h := range hs {
 		holders = append(holders, h.text)
-		if h.rank == 0 && idle == "" {
+		if h.offer && idle == "" {
 			idle = h.name
 		}
 	}
 	return holders, idle
+}
+
+// vmName shows a VM name: as is if plain (letters, digits, . _ -), else
+// quoted, so a name with spaces, control or shell characters is neither
+// misread nor offered as a command.
+func vmName(n string) string {
+	for _, r := range n {
+		plain := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-'
+		if !plain {
+			return strconv.Quote(n)
+		}
+	}
+	return n
 }
 
 // agentState describes a worktree's agents for a slot holder: whether one

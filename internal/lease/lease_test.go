@@ -550,3 +550,45 @@ func TestTheLastMacOSSlotGoesToOneRequest(t *testing.T) {
 		t.Fatalf("the bound lease still counts as starting: %+v", d)
 	}
 }
+
+// A Linux VM appearing does not settle a macOS lease, whose slot would be
+// freed for a VM that never took one.
+func TestAMacOSLeaseWaitsForAMacOSVM(t *testing.T) {
+	b, _, _ := book(t)
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true}
+	c := cfg
+	c.MaxMacOSVMs = 1
+	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}
+	if d := b.Check(mac, s, c); !d.Allow {
+		t.Fatalf("first: %+v", d)
+	}
+	s.Tart.VMs = []protocol.TartVM{{Name: "lx", OS: "linux"}}
+	b.Observe(s)
+	if d := b.Check(mac, s, c); d.Allow {
+		t.Fatalf("the linux VM freed the macOS slot: %+v", d)
+	}
+}
+
+// A tart run whose process is gone without its VM showing up (it failed
+// after the exec) frees its slot at once, not at the lease timeout.
+func TestATartLeaseEndsWithItsProcess(t *testing.T) {
+	b, _, log := book(t)
+	alive := map[int]bool{4242: true}
+	b.SetAlive(func(pid int) bool { return alive[pid] })
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true}
+	run := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run lx", CostBytes: gib, PID: 4242}
+	if d := b.Check(run, s, cfg); !d.Allow {
+		t.Fatalf("check: %+v", d)
+	}
+	b.Observe(s)
+	if len(b.List()) != 1 {
+		t.Fatal("the lease ended while its process runs")
+	}
+	alive[4242] = false
+	b.Observe(s)
+	if len(b.List()) != 0 || !strings.Contains(log.String(), "exited before") {
+		t.Fatalf("leases %+v, log %s", b.List(), log)
+	}
+}

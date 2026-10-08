@@ -103,3 +103,25 @@ func TestIdleTimeIsRounded(t *testing.T) {
 		t.Fatalf("message %q", msg)
 	}
 }
+
+// A holder is only called unused once its agents have idled past the grace
+// period, and only a plain name is offered as a command.
+func TestStopIsOnlySuggestedForAKnownIdleHolder(t *testing.T) {
+	s := slotSnap()
+	s.Orca.Worktrees[1].Agents[0].StateSince = now.Add(-30 * time.Second)
+	if msg := policy.Decide(tartReq("busy", true), s, slotCfg).Reasons[0].Text; strings.Contains(msg, "tart stop") {
+		t.Fatalf("just finished, yet offered for stopping: %q", msg)
+	}
+	s = slotSnap()
+	s.Orca.Worktrees[1].Agents[0].StateSince = time.Time{}
+	if msg := policy.Decide(tartReq("busy", true), s, slotCfg).Reasons[0].Text; strings.Contains(msg, "tart stop") {
+		t.Fatalf("idle time unknown, yet offered for stopping: %q", msg)
+	}
+	s = slotSnap()
+	s.Tart.VMs[1].Name = "x; rm -rf ~"
+	s.Attribution.Worktrees[1].TartVMs[0].Name = "x; rm -rf ~"
+	msg := policy.Decide(tartReq("busy", true), s, slotCfg).Reasons[0].Text
+	if strings.Contains(msg, "tart stop") || !strings.Contains(msg, `"x; rm -rf ~"`) {
+		t.Fatalf("an odd VM name must be quoted and not offered as a command: %q", msg)
+	}
+}

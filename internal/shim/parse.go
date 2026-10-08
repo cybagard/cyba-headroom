@@ -182,33 +182,22 @@ func IsTrue(v string) bool {
 }
 
 func parseTart(args []string) Call {
-	if len(args) == 0 {
+	// tart run starts a VM. clone makes one but runs nothing: it costs
+	// disk, not memory or a slot, so it passes like the rest (#29).
+	if len(args) == 0 || args[0] != "run" {
 		return Call{}
 	}
-	c := Call{Kind: "tart", Op: args[0]}
-	var flags flagSet
-	n := 0 // which positional names the VM this call makes
-	switch c.Op {
-	case "run":
-		flags = tartRun
-	case "clone":
-		flags, n = tartClone, 1 // clone <source> <new-name>
-	default:
-		return Call{}
-	}
+	c := Call{Kind: "tart", Op: "run"}
 	// swift-argument-parser takes options before, between and after the
 	// positionals.
-	pos, res, guessed := scanAll(args[1:], flags, nil)
+	pos, res, guessed := scanAll(args[1:], tartRun, nil)
 	if res == askedHelp {
 		return Call{}
 	}
-	if guessed {
-		pos = nil // a positional may be an unknown option's value
+	if !guessed && len(pos) > 0 {
+		c.Target = pos[0] // past a guess, it may be an option's value
 	}
-	if len(pos) > n {
-		c.Target = pos[n]
-	}
-	return c.named([]string{"tart", c.Op})
+	return c.named([]string{"tart", "run"})
 }
 
 // named sets Command to words and, if it is safe to show, the target. A
@@ -495,5 +484,4 @@ var (
 		"--capture-system-keys --help --nested --net-host --net-softnet --no-audio --no-clipboard --no-graphics "+
 			"--no-keyboard --no-pointer --no-trackpad --no-usb-accessories --recovery --serial --suspendable --version "+
 			"--vnc --vnc-experimental -h")
-	tartClone = flags("--concurrency --prune-limit", "--help --insecure --overwrite --stacked --version -h")
 )

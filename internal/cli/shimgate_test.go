@@ -402,9 +402,13 @@ func TestShimGateTartVMs(t *testing.T) {
 	if len(r.asked) != 1 || !r.asked[0].MacOS || r.asked[0].CostBytes != 16<<30 || r.asked[0].Kind != "tart" {
 		t.Fatalf("asked %+v", r.asked)
 	}
-	r.run("tart", "run", "not-here")
-	if len(r.asked) != 2 || r.asked[1].MacOS || r.asked[1].CostBytes != 0 {
-		t.Fatalf("unknown VM asked %+v", r.asked[1])
+	r.env = append(r.env, "HEADROOM_SHIM_DEBUG=1")
+	_, stderr := r.run("tart", "run", "not-here")
+	if len(r.asked) != 2 || r.asked[1].MacOS || r.asked[1].CostBytes != 0 || !strings.Contains(stderr, "no config for the VM in `tart run not-here`") {
+		t.Fatalf("unknown VM asked %+v, stderr %q", r.asked[1], stderr)
+	}
+	if r.asked[0].PID != os.Getpid() {
+		t.Fatalf("a tart run must name its process, which becomes tart's: %+v", r.asked[0])
 	}
 	if code, _ := r.run("tart", "clone", "mac-ci", "mac-ci-2"); code != 0 || len(r.asked) != 2 || r.execed == "" {
 		t.Fatalf("clone: exit %d, asked %d", code, len(r.asked))
@@ -485,6 +489,8 @@ func TestDenyHintFitsTheReason(t *testing.T) {
 		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.VMSlots}}}, "budget.max_macos_vms"},
 		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.WorktreeCap}}}, "reuse or stop"},
 		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.IdleHolder}}}, "reuse or stop"},
+		// Full slots can wait; the cap that also fails cannot.
+		{protocol.Decision{Reasons: []protocol.Reason{{Code: policy.VMSlots, Retry: true}, {Code: policy.WorktreeCap}}}, "reuse or stop"},
 	} {
 		if got := denyHint(&c.d); !strings.Contains(got, c.want) {
 			t.Errorf("%+v: hint %q, want %q", c.d.Reasons, got, c.want)

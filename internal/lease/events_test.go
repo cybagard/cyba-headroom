@@ -3,6 +3,7 @@ package lease_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -70,5 +71,66 @@ func TestAnEventBindsNothingUnchecked(t *testing.T) {
 	b.Observe(addContainer(snap(), protocol.Container{ID: "U", Name: "u"}, "w1"))
 	if got := ungatedKeys(b); len(got) != 1 {
 		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// read is a snapshot whose Docker reading began at began.
+func read(s *protocol.Snapshot, began time.Time) *protocol.Snapshot {
+	s.Sources = map[string]protocol.SourceStatus{"docker": {At: began.Add(time.Second), Took: time.Second}}
+	return s
+}
+
+// A reading begun before a container's start event may lack it: that does
+// not end the lease the event bound.
+func TestAReadingOlderThanTheStartKeepsTheLease(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), t0))
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "X", "x", map[string]string{protocol.LeaseLabel: d.LeaseID})
+	b.Observe(read(snap(), t0.Add(time.Second)))
+	if len(b.List()) != 1 {
+		t.Fatal("a reading from before the start ended the lease")
+	}
+	c.t = t0.Add(10 * time.Second)
+	b.Observe(read(snap(), t0.Add(5*time.Second)))
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v: a later reading without x ends it", l)
+	}
+}
+
+// A die after a reading began is kept: with its sibling's, it ends the lease.
+func TestADieNewerThanTheReadingIsKept(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		Others: []policy.Start{{ID: "B"}}}, snap(), cfg)
+	both := addContainer(addContainer(snap(), protocol.Container{ID: "A", Name: "a"}, "w1"), protocol.Container{ID: "B", Name: "b"}, "w1")
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(both, t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("die", "A", "a", nil)
+	b.Observe(read(both, t0.Add(9*time.Second))) // began before a's die
+	b.ContainerEvent("die", "B", "b", nil)
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want none: both exited", l)
+	}
+}
+
+// Two worktrees bring up one project name: an event cannot tell whose
+// container it is, so the reading's attribution binds it.
+func TestAnEventLeavesATieToTheReading(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app"}
+	b.Check(up, snap(), cfg)
+	up.Worktree = "w2"
+	b.Check(up, snap(), cfg)
+	b.ContainerEvent("start", "web", "web", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.Observe(withComposeContainer(snap(), "web", "w2", gib/2))
+	for _, l := range b.List() {
+		if want := map[string]uint64{"w1": 2 * gib, "w2": 2*gib - gib/2}[l.Worktree]; l.Bytes != want {
+			t.Errorf("%s holds %d MiB, want %d", l.Worktree, l.Bytes>>20, want>>20)
+		}
 	}
 }

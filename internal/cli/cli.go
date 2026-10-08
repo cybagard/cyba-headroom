@@ -439,6 +439,50 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 	return book
 }
 
+// lookUpStarts resolves the containers a start names on the daemon's
+// Docker engine. Each one's ID is the lease's key, and a lease label on it
+// names the run or create this start takes over. Asked afresh every
+// check: whether it runs changes by the second (docker stop && docker
+// start). One not looked up (another engine) or not resolved may still
+// start: it counts as Unresolved, and costs.
+func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, docker Inspector, socket string) {
+	targets := r.Targets
+	if len(targets) == 0 {
+		targets = []string{r.Target}
+	}
+	if docker == nil || !sameSocket(r.Engine, socket) {
+		req.Unresolved = len(targets) - 1
+		return
+	}
+	type found struct {
+		ok bool
+		policy.Start
+	}
+	got := make([]found, len(targets))
+	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Go(func() {
+			if cid, labels, running, err := docker.Inspect(ctx, t); err == nil {
+				got[i] = found{true, policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running}}
+			}
+		})
+	}
+	wg.Wait()
+	if got[0].ok {
+		req.ContainerID, req.TakesOver, req.Running = got[0].ID, got[0].TakesOver, got[0].Running
+		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
+	}
+	for _, f := range got[1:] {
+		if f.ok {
+			req.Others = append(req.Others, f.Start)
+		} else {
+			req.Unresolved++
+		}
+	}
+}
+
 // Eventer streams Docker's container starts and exits: the Docker source.
 type Eventer interface {
 	Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error
@@ -511,26 +555,8 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
 			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op}
-		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" && docker != nil && sameSocket(r.Engine, socket) {
-			// The container exists: its ID is the lease's key, and a lease
-			// label on it names the run or create this start takes over.
-			// Asked afresh every check: whether it runs changes by the
-			// second (docker stop && docker start).
-			ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
-			if cid, labels, running, err := docker.Inspect(ctx, r.Target); err == nil {
-				req.ContainerID, req.TakesOver, req.Running = cid, labels[protocol.LeaseLabel], running
-				req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
-				for _, t := range r.Targets[min(1, len(r.Targets)):] {
-					// docker start a b c: each is the lease's. One Docker
-					// cannot resolve leaves the lease unsure of its others.
-					if cid, labels, running, err := docker.Inspect(ctx, t); err == nil {
-						req.Others = append(req.Others, policy.Start{ID: cid, TakesOver: labels[protocol.LeaseLabel], Running: running})
-					} else {
-						req.MultiTarget = true
-					}
-				}
-			}
-			cancel()
+		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
+			lookUpStarts(&req, r, docker, socket)
 		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by

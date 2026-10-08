@@ -753,8 +753,8 @@ func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
 		t.Fatalf("first lease still open: %+v", l)
 	}
 	b.Check(up, s, cfg)
-	if r := reserved(b); r != 2*gib-gib/2 {
-		t.Fatalf("reserved %d MiB, want the estimate less what web uses", r>>20)
+	if r := reserved(b); r != 2*gib {
+		t.Fatalf("reserved %d MiB, want the estimate: web counts already", r>>20)
 	}
 	c.t = c.t.Add(3 * time.Minute)
 	b.Observe(s)
@@ -774,5 +774,45 @@ func TestComposeUpBindsNoOtherWorktreesStack(t *testing.T) {
 	b.Observe(s)
 	if !strings.Contains(log.String(), "never appeared") {
 		t.Fatal("w1's up bound w2's container")
+	}
+}
+
+// docker start typo b c: the first is not found, the others still start.
+// Each named target costs, minus only those known to run or be held.
+func TestAStartChargesTargetsDockerCouldNotResolve(t *testing.T) {
+	for name, r := range map[string]policy.Request{
+		"first unresolved": {Worktree: "w1", Kind: "container", Command: "docker start x", Target: "x",
+			Others: []policy.Start{{ID: "B"}, {ID: "C"}}},
+		"one other unresolved": {Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+			Others: []policy.Start{{ID: "B"}}, Unresolved: 1},
+		"running first, others unresolved": {Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A", Running: true,
+			Unresolved: 3},
+	} {
+		b, _, _ := book(t)
+		b.Observe(snap())
+		if d := b.Check(r, snap(), cfg); d.LeaseID == "" || reserved(b) != 3*gib {
+			t.Errorf("%s: decision %+v, reserved %d GiB, want 3", name, d, reserved(b)>>30)
+		}
+	}
+}
+
+// docker start db <db's ID>: one container, at one container's cost.
+func TestAStartNamingOneContainerTwiceCostsOne(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "A",
+		Others: []policy.Start{{ID: "A"}}}, snap(), cfg)
+	if reserved(b) != gib {
+		t.Fatalf("reserved %d GiB, want 1", reserved(b)>>30)
+	}
+}
+
+// A huge estimate times its targets does not wrap to a small cost.
+func TestAStartsCostDoesNotWrap(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start a", Target: "a", ContainerID: "A",
+		CostBytes: (1<<64 + 2) / 3, Others: []policy.Start{{ID: "B"}, {ID: "C"}}}, snap(), cfg); d.Allow {
+		t.Fatalf("allowed %+v", d)
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -71,9 +72,9 @@ type Book struct {
 	// of: until then, every resource of that source may have been there
 	// already.
 	based map[string]bool
-	// gone are the containers Docker's events said exited since the last
-	// reading (#67).
-	gone map[string]bool
+	// seen are the containers Docker's events said started or exited
+	// (#67), until a reading begun after the event shows them.
+	seen map[string]seen
 	// verdicts say, for each resource seen within the lease timeout, how it
 	// started (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
@@ -149,7 +150,7 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
 	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
-		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, gone: map[string]bool{}}
+		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, seen: map[string]seen{}}
 }
 
 // dockerSettle is how long after the Docker engine comes back its
@@ -172,7 +173,16 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.ContainerID != "" {
 		starts = append([]policy.Start{{ID: r.ContainerID, TakesOver: r.TakesOver, Running: r.Running}}, r.Others...)
 	}
-	if len(starts) > 0 && !r.MultiTarget && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
+	// docker start db <db's ID>: one container.
+	starts = slices.CompactFunc(slices.SortedStableFunc(slices.Values(starts), func(x, y policy.Start) int { return strings.Compare(x.ID, y.ID) }),
+		func(x, y policy.Start) bool { return x.ID == y.ID })
+	// Named but not resolved: each still starts. The first, unresolved,
+	// is a start of several only when it names others.
+	unresolved := r.Unresolved
+	if r.ContainerID == "" && (len(r.Others) > 0 || r.Unresolved > 0) {
+		unresolved++
+	}
+	if r.ContainerID != "" && unresolved == 0 && !r.MultiTarget && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
 		// A start or restart of containers Docker says run: it starts
 		// nothing new, and they already count. Allowed, whatever the
 		// pressure, and no lease.
@@ -192,7 +202,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
 		return t.Running || b.boundAnywhere("container:"+t.ID)
 	})
-	if r.ContainerID != "" && len(starts) == 0 && !r.MultiTarget {
+	if r.ContainerID != "" && len(starts) == 0 && unresolved == 0 && !r.MultiTarget {
 		// Allowed, and no new lease. Not when others went unresolved:
 		// they are no lease's.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
@@ -206,9 +216,14 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			r.PendingMacOS++ // once bound, its VM counts as running
 		}
 	}
-	if len(starts) > 1 {
+	n := len(starts) + unresolved
+	if n > 1 {
 		// docker start a b c: each costs what one would.
-		r.CostBytes = uint64(len(starts)) * cmp.Or(r.CostBytes, c.DefaultContainerBytes)
+		per := cmp.Or(r.CostBytes, c.DefaultContainerBytes)
+		r.CostBytes = math.MaxUint64
+		if per <= math.MaxUint64/uint64(n) {
+			r.CostBytes = uint64(n) * per
+		}
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -265,13 +280,15 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 		if !e.oneoff && e.project != "" && s != nil && r.Worktree != "" {
 			// compose up -d of a stack that already runs, once its lease
-			// ended: its running containers are this lease's, so it holds
-			// only what they do not use, and ends quietly. Only those of
+			// ended: its running containers are this lease's, so it ends
+			// quietly when the up starts nothing new. Their memory counts
+			// already: it is added to the cost, not taken from it, so the
+			// estimate stays reserved for what the up adds. Only those of
 			// this worktree, and held by no lease.
 			for _, x := range resources(s) {
 				if x.kind == "compose" && !x.oneoff && x.project == e.project && x.worktree == r.Worktree && !e.bound[x.key] && !b.boundAnywhere(x.key) {
 					e.bind(x)
-					e.used += x.bytes
+					e.cost, e.used = e.cost+x.bytes, e.used+x.bytes
 				}
 			}
 		}
@@ -281,7 +298,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// lease is for the others, so it is not keyed by a's name.
 		e.target = ""
 	}
-	per := d.CostBytes / uint64(max(1, len(starts)))
+	per := d.CostBytes / uint64(max(1, n))
 	for _, t := range starts {
 		if t.TakesOver == "" {
 			continue
@@ -348,13 +365,8 @@ func resources(s *protocol.Snapshot) []resource {
 	var out []resource
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
-			k := "container:" + c.ID
-			r := resource{key: k, name: c.Name, id: c.ID, kind: "container", worktree: owner[k], bytes: c.MemoryBytes,
-				lease: c.Labels[protocol.LeaseLabel]}
-			if p := c.Labels[protocol.ComposeProjectLabel]; p != "" {
-				r.kind, r.project, r.dir = "compose", p, c.Labels[protocol.ComposeWorkingDirLabel]
-				r.oneoff = c.Labels["com.docker.compose.oneoff"] == "True"
-			}
+			r := containerResource(c.ID, c.Name, c.Labels)
+			r.worktree, r.bytes = owner[r.key], c.MemoryBytes
 			out = append(out, r)
 		}
 	}
@@ -365,6 +377,16 @@ func resources(s *protocol.Snapshot) []resource {
 		}
 	}
 	return out
+}
+
+// containerResource is the container id: its labels say which keys apply.
+func containerResource(id, name string, labels map[string]string) resource {
+	r := resource{key: "container:" + id, name: name, id: id, kind: "container", lease: labels[protocol.LeaseLabel]}
+	if p := labels[protocol.ComposeProjectLabel]; p != "" {
+		r.kind, r.project, r.dir = "compose", p, labels[protocol.ComposeWorkingDirLabel]
+		r.oneoff = labels["com.docker.compose.oneoff"] == "True"
+	}
+	return r
 }
 
 // waitsFor is the resource kind a lease binds: a VM for tart, a compose
@@ -406,7 +428,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	defer b.mu.Unlock()
 	now := b.now()
 	res := resources(s)
-	clear(b.gone) // the reading is the word on what runs now
+	// The reading is the word on what runs, for events before it began.
+	began := readingBegan(s)
+	for k, v := range b.seen {
+		if v.at.Before(began) {
+			delete(b.seen, k)
+		}
+	}
 	// The Docker engine back after a fresh reading showed it down restarts
 	// containers itself: those appearing soon after are a baseline.
 	if d := s.Docker; d != nil && readable(s, "container") {
@@ -558,7 +586,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		alive := false
 		for k := range e.bound {
 			_, ok := present[k]
-			alive = alive || ok || !readable(s, e.waitsFor())
+			started := b.seen[k].at.After(began) && !b.seen[k].gone // during the reading, so it may lack it
+			alive = alive || ok || started || !readable(s, e.waitsFor())
 		}
 		switch {
 		case e.Kind == "tart" && len(e.bound) == 0 && e.pid > 0 && !b.alive(e.pid):
@@ -582,6 +611,21 @@ func (e *entry) over() bool {
 	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= len(e.containerIDs)
 }
 
+// seen is what Docker's events last said of a container, and when.
+type seen struct {
+	at   time.Time
+	gone bool
+}
+
+// readingBegan is when s's Docker reading began: an event after it may be
+// missing from it. Unknown: when s was stamped.
+func readingBegan(s *protocol.Snapshot) time.Time {
+	if st, ok := s.Sources["docker"]; ok && !st.At.IsZero() {
+		return st.At.Add(-st.Took)
+	}
+	return s.CollectedAt
+}
+
 // ContainerEvent takes Docker's word that a container started or exited
 // (#67): one that lives between two readings still binds the lease its
 // call took, and its exit ends that lease at once. An event only binds:
@@ -589,15 +633,11 @@ func (e *entry) over() bool {
 func (b *Book) ContainerEvent(action, id, name string, labels map[string]string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	r := resource{key: "container:" + id, id: id, name: name, kind: "container", lease: labels[protocol.LeaseLabel]}
-	if p := labels[protocol.ComposeProjectLabel]; p != "" {
-		r.kind, r.project, r.dir = "compose", p, labels[protocol.ComposeWorkingDirLabel]
-		r.oneoff = labels["com.docker.compose.oneoff"] == "True"
-	}
+	r := containerResource(id, name, labels)
 	now := b.now()
 	switch action {
 	case "start":
-		delete(b.gone, r.key)
+		b.seen[r.key] = seen{at: now}
 		if b.boundAnywhere(r.key) {
 			return
 		}
@@ -609,18 +649,22 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			return // a container already seen (a restart policy's restart) is no name's
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run
+		case tied(b.open, r, e):
+			// Two worktrees' leases match it equally, and an event says
+			// nothing of whose it is: the reading's attribution decides.
+			return
 		}
 		e.bind(r)
 		b.judge(r, gated, now)
 	case "die":
-		b.gone[r.key] = true
+		b.seen[r.key] = seen{at: now, gone: true}
 		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 			if !e.bound[r.key] || !e.over() {
 				return false
 			}
 			for k := range e.bound {
-				if !b.gone[k] {
-					return false
+				if v, ok := b.seen[k]; ok && !v.gone || !ok && b.prev[k] {
+					return false // it runs, by an event or the last reading
 				}
 			}
 			b.log.Debug("lease ended: its container exited", "lease", e.ID, "worktree", e.Worktree)
@@ -699,26 +743,38 @@ func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
 
+// rank is how sure e's key for r is: a label, then a start's container ID
+// or a compose project's name, then a name, or a compose run's lease for a
+// service (after any up's).
+func rank(e *entry, r resource) int {
+	switch {
+	case e.labelled:
+		return 0
+	case len(e.containerIDs) > 0, e.Kind == "compose" && (!e.oneoff || r.oneoff):
+		return 1
+	}
+	return 2
+}
+
+// tied reports whether another worktree's lease in es keys r as surely as
+// e does: only r's attribution can tell them apart.
+func tied(es []*entry, r resource, e *entry) bool {
+	return slices.ContainsFunc(es, func(o *entry) bool {
+		return o != e && o.Worktree != e.Worktree && o.key(r, true) && rank(o, r) == rank(e, r)
+	})
+}
+
 // keyed is the lease in es whose key r matches. The surest key wins: a
 // container's label names its lease outright, before a start's container ID
 // or a compose project's name, before a name (docker start db || docker
 // run --name db: the run's label beats the start's name). Without a
 // baseline (based false), only a label or a container ID counts.
 func keyed(es []*entry, r resource, based bool) *entry {
-	rank := func(e *entry) int {
-		switch {
-		case e.labelled:
-			return 0
-		case len(e.containerIDs) > 0, e.Kind == "compose" && (!e.oneoff || r.oneoff):
-			return 1
-		}
-		return 2 // a name; or a compose run's lease for a service, after any up's
-	}
 	// Among equal keys, the lease of the worktree r is attributed to: two
 	// worktrees may bring up one project.
 	better := func(e, best *entry) bool {
-		if rank(e) != rank(best) {
-			return rank(e) < rank(best)
+		if rank(e, r) != rank(best, r) {
+			return rank(e, r) < rank(best, r)
 		}
 		if r.worktree != "" {
 			return e.Worktree == r.worktree && best.Worktree != r.worktree

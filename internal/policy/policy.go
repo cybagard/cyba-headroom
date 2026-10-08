@@ -98,6 +98,10 @@ type Request struct {
 	// Others are the other containers a start names, as Docker resolved
 	// them (docker start a b c).
 	Others []Start
+	// Unresolved counts the other containers a start names that were not
+	// looked up or that Docker did not resolve: each may still start, and
+	// costs one container.
+	Unresolved int
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

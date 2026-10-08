@@ -299,3 +299,18 @@ func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
 		t.Fatalf("waits = %v", waits)
 	}
 }
+
+// A first target Docker cannot find does not stop the others' lookup.
+func TestGateLooksUpTheOthersWhenTheFirstIsUnknown(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	insp := mapInspector{"b": {"B", false}, "c": {"C", false}}
+	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start typo",
+		Target: "typo", Targets: []string{"typo", "b", "c", "gone"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
+	if l := book.List(); len(l) != 1 || l[0].Bytes != 4*pol.DefaultContainerBytes {
+		t.Fatalf("leases %+v: want all four named reserved", l)
+	}
+}

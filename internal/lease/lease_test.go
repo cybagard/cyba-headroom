@@ -67,13 +67,15 @@ func TestAnAllowLeasesItsCost(t *testing.T) {
 	}
 }
 
-func TestManualCallsAreLeasedToo(t *testing.T) {
+func TestManualCallsAreNotLeased(t *testing.T) {
+	// A manual call is outside admission control: it must not hold back
+	// memory from gated calls. Its container counts once it appears.
 	b, _, _ := book(t)
-	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeaseID == "" {
+	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeaseID != "" {
 		t.Fatalf("manual = %+v", d)
 	}
-	if d := b.Check(req("w1", 4*gib), snap(), cfg); d.Allow {
-		t.Fatalf("manual memory not counted: %+v", d)
+	if d := b.Check(req("w1", 4*gib), snap(), cfg); !d.Allow {
+		t.Fatalf("a manual call held back memory: %+v", d)
 	}
 }
 
@@ -311,33 +313,6 @@ func TestAContainerOnTheDeadlineSettlesItsOwnLease(t *testing.T) {
 	}
 }
 
-func TestAManualCallsContainerInAWorktreeSettlesItsLease(t *testing.T) {
-	b, _, log := book(t)
-	b.Check(req("", gib), snap(), cfg) // manual
-	b.Observe(withContainer(snap(), "c2", "w1"))
-	if len(b.List()) != 0 {
-		t.Fatalf("manual lease not settled by a worktree's container: %+v (%s)", b.List(), log)
-	}
-}
-
-func TestCommandsAreRedacted(t *testing.T) {
-	b, c, log := book(t)
-	r := req("w1", gib)
-	r.Command = "docker run -e AWS_SECRET_ACCESS_KEY=abc123 --env TOKEN=xyz -e PLAIN --build-arg KEY=val img sh -c x=1"
-	b.Check(r, snap(), cfg)
-	cmd := b.List()[0].Command
-	c.t = t0.Add(2 * time.Minute)
-	b.Observe(snap())
-	for _, secret := range []string{"abc123", "xyz", "val", "x=1"} {
-		if strings.Contains(cmd, secret) || strings.Contains(log.String(), secret) {
-			t.Errorf("%q leaked: %q / %s", secret, cmd, log)
-		}
-	}
-	if !strings.Contains(cmd, "AWS_SECRET_ACCESS_KEY=…") || !strings.Contains(cmd, "-e PLAIN") || !strings.Contains(cmd, "img") {
-		t.Errorf("redacted too much: %q", cmd)
-	}
-}
-
 func TestComposeAndPlainLeasesTakeTheirOwnContainers(t *testing.T) {
 	b, c, _ := book(t)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
@@ -375,28 +350,96 @@ func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
 	}
 }
 
-func TestArgsAreRedactedWhole(t *testing.T) {
-	got := lease.RedactArgs([]string{"docker", "run", "-e", "API_KEY=abc def ghi", "--env=TOKEN=x y",
-		"-e", "PLAIN", "img", "git", "clone", "https://user:pa ss@host/repo", "sh", "-c", "echo hi there"})
-	for _, secret := range []string{"abc", "def", "ghi", "x y", "pa ss", "user:"} {
-		if strings.Contains(got, secret) {
-			t.Errorf("%q leaked: %s", secret, got)
-		}
+func TestAContainerMissingFromOneSnapshotKeepsItsLease(t *testing.T) {
+	b, c, _ := book(t)
+	b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withContainerMem(snap(), "c2", "w1", gib)) // binds, 5 GB still reserved
+	c.t = c.t.Add(time.Second)
+	b.Check(req("w1", gib), snap(), cfg) // another call from w1, still starting
+	missing := snap()
+	missing.Sources = map[string]protocol.SourceStatus{"docker": {Stale: true}}
+	b.Observe(missing) // the docker read failed: c2 is not in it
+	if r := reserved(b); r != 5*gib+gib {
+		t.Fatalf("reserved %d after a failed read, want 6 GiB", r)
 	}
-	for _, kept := range []string{"API_KEY=…", "--env=TOKEN=…", "-e PLAIN", "img", "https://…@host/repo", `"echo hi there"`} {
-		if !strings.Contains(got, kept) {
-			t.Errorf("lost %q: %s", kept, got)
+	b.Observe(withContainerMem(snap(), "c2", "w1", gib)) // c2 is back
+	ls := b.List()
+	if len(ls) != 2 {
+		t.Fatalf("c2 came back and took the other lease: %+v", ls)
+	}
+}
+
+func TestComposeLeasesKeepToTheirProject(t *testing.T) {
+	b, c, _ := book(t)
+	compose := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}
+	b.Check(compose, snap(), cfg)
+	b.Observe(withComposeProject(snap(), "a-db", "w1", "a", gib))
+	c.t = c.t.Add(time.Second)
+	b.Check(compose, snap(), cfg) // a second project
+	s := withComposeProject(withComposeProject(snap(), "a-db", "w1", "a", gib), "b-db", "w1", "b", gib)
+	b.Observe(s)
+	for _, l := range b.List() {
+		if l.Bytes != 2*gib {
+			t.Fatalf("lease %s reserves %d, want 2 GiB: each project bound its own container", l.ID, l.Bytes)
 		}
 	}
 }
 
-func TestLeasesRedactTheArgsWhenGiven(t *testing.T) {
+func withComposeProject(s *protocol.Snapshot, id, wt, project string, mem uint64) *protocol.Snapshot {
+	return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: mem,
+		Labels: map[string]string{"com.docker.compose.project": project}}, wt)
+}
+
+func TestTheCapCountsTheWorktreesOwnLeases(t *testing.T) {
+	b, _, _ := book(t)
+	c := cfg
+	c.PerWorktreeCapBytes = 5 * gib
+	if d := b.Check(req("w1", 3*gib), snap(), c); !d.Allow {
+		t.Fatalf("first = %+v", d)
+	}
+	if d := b.Check(req("w1", 3*gib), snap(), c); d.Allow || d.Reasons[0].Code != policy.WorktreeCap {
+		t.Fatalf("second = %+v: its first 3 GB are leased", d)
+	}
+}
+
+func TestChecksUseTheDaemonsSnapshotWhenDeriveStopped(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap()) // normal pressure
+	c.t = c.t.Add(time.Minute)
+	fresh := snap()
+	fresh.CollectedAt = c.t
+	fresh.Host.Pressure = "critical" // derive failed since: Observe never saw this
+	if d := b.Check(req("w1", gib), fresh, cfg); d.Allow {
+		t.Fatalf("decided on a frozen snapshot: %+v", d)
+	}
+}
+
+func TestNoSnapshotYet(t *testing.T) {
+	b, _, _ := book(t)
+	if d := b.Check(req("w1", gib), nil, cfg); !d.Allow {
+		t.Fatalf("before the first tick: %+v", d)
+	}
+}
+
+func TestLeasesKeepOnlyWhatTheCallWas(t *testing.T) {
+	for cmd, want := range map[string]string{
+		"docker run postgres:17":                  "docker run postgres:17",
+		"docker run -e TOKEN=x -v /a:/b img":      "docker run",
+		"docker compose -f a.yml up -d":           "docker compose",
+		"docker compose up -d":                    "docker compose up",
+		"tart run ci-vm --dir src:/Users/dev/w/a": "tart run ci-vm",
+		"docker run img sh -c 'echo KEY=x'":       "docker run img",
+		"docker run user@host":                    "docker run",
+	} {
+		if got := lease.Summary(cmd); got != want {
+			t.Errorf("Summary(%q) = %q, want %q", cmd, got, want)
+		}
+	}
 	b, _, _ := book(t)
 	r := req("w1", gib)
-	r.Command = "docker run -e API_KEY=abc def img"
-	r.Args = []string{"docker", "run", "-e", "API_KEY=abc def", "img"}
+	r.Command = "docker run -e TOKEN=x img"
 	b.Check(r, snap(), cfg)
-	if cmd := b.List()[0].Command; strings.Contains(cmd, "def") {
-		t.Fatalf("command = %q", cmd)
+	if got := b.List()[0].Command; got != "docker run" {
+		t.Fatalf("lease command = %q", got)
 	}
 }

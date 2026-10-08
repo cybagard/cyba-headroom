@@ -315,6 +315,6 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 	})
 	pol := cfg.Policy.Config()
 	d.SetCheck(func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
-		return book.Check(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, Args: r.Args, CostBytes: r.CostBytes}, s, pol)
+		return book.Check(policy.Request{Worktree: r.Worktree, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes}, s, pol)
 	})
 }

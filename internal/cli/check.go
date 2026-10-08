@@ -49,7 +49,6 @@ func runCheck(e Env) int {
 		return checkUsage(e) // no -- or nothing after it
 	}
 	req.Command = strings.Join(a[1:], " ")
-	req.Args = a[1:]
 
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {

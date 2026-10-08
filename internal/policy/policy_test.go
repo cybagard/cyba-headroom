@@ -347,3 +347,28 @@ func TestNoMacOSVMsWithoutATartReading(t *testing.T) {
 		t.Fatalf("%+v", d)
 	}
 }
+
+// A host source that hangs keeps its last reading in every fresh snapshot;
+// once that reading is too old, nothing current is known (#30).
+func TestAnOldHostReadingIsUnknown(t *testing.T) {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(0) // would deny
+	s.CollectedAt = now
+	s.Sources = map[string]protocol.SourceStatus{"host": {Stale: true, At: now.Add(-10 * time.Minute)}}
+	c := cfg
+	c.MaxSnapshotAge = time.Minute
+	if d := policy.Decide(req("busy", gib), s, c); !d.Allow || d.Reasons[0].Code != policy.StaleSnapshot {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A stale Tart reading names no holders: they may be gone.
+func TestAStaleTartReadingNamesNoHolders(t *testing.T) {
+	s := slotSnap()
+	s.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true}}
+	r := tartReq("busy", true)
+	r.PendingMacOS = 2
+	if d := policy.Decide(r, s, slotCfg); d.Allow || strings.Contains(d.Reasons[0].Text, "ci-mac") {
+		t.Fatalf("%+v", d)
+	}
+}

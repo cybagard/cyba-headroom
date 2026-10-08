@@ -39,10 +39,8 @@ type daemonError struct{ said string }
 func (e daemonError) Error() string { return errCannotCheck.Error() + " (" + e.said + ")" }
 func (e daemonError) Unwrap() error { return errCannotCheck }
 
-// olderDaemon are the answers of a daemon that does not know the check: a
-// build from before #24, or one without its check wired ("": an OK reply
-// with no decision).
-var olderDaemon = map[string]bool{`unknown op "check"`: true, "check: not supported by this daemon": true, "": true}
+// olderDaemon is the answer of a daemon built before the check (#24).
+const olderDaemon = `unknown op "check"`
 
 // gated is how gate decided.
 type gated struct {
@@ -200,10 +198,12 @@ func daemonCause(err error, timeout time.Duration, socket string) string {
 	var ne net.Error
 	var de daemonError
 	switch {
-	case errors.Is(err, client.ErrVersion), errors.As(err, &de) && olderDaemon[de.said]:
+	case errors.Is(err, client.ErrVersion), errors.As(err, &de) && de.said == olderDaemon:
 		return "is another version: restart it with this build: headroom install"
+	case errors.As(err, &de) && de.said == "":
+		return "gave no decision; restart it with this build: headroom install"
 	case errors.As(err, &de):
-		return "error: " + strings.Join(strings.Fields(de.said), " ")
+		return "gave no decision (" + strings.Join(strings.Fields(de.said), " ") + "); restart it with this build: headroom install"
 	case errors.Is(err, client.ErrBadReply):
 		return "gave a bad reply"
 	case errors.As(err, &ne) && ne.Timeout(): // deadlines of conn and context alike

@@ -116,7 +116,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	// decide by the same rules on an empty one, so only what does not come
 	// from readings (the config, the leases) can deny (R7, #30).
 	age, stale := snapshotAge(s, c)
-	if stale = stale && age > c.MaxSnapshotAge; stale {
+	if stale {
 		s = &protocol.Snapshot{}
 	}
 	if s.Budget != nil {
@@ -165,10 +165,9 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		}
 	}
 	d.Allow = len(d.Reasons) == 0
-	staleText := fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
 	switch {
 	case d.Allow && stale:
-		d.Reasons = []Reason{{Code: StaleSnapshot, Text: staleText + ", so headroom cannot gate this call"}}
+		d.Reasons = []Reason{{Code: StaleSnapshot, Text: staleText(age) + ", so headroom cannot gate this call"}}
 	case d.Allow && d.HeadroomBytes == nil:
 		// Fail open (R7): with no budget, headroom cannot gate the call.
 		d.Reasons = []Reason{{Code: Unknown, Text: "the budget is unknown (no host reading yet), so headroom cannot gate this call"}}
@@ -179,20 +178,31 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	}
 	d.Message = message(r, s, d)
 	if !d.Allow && stale {
-		d.Message += "; " + staleText
+		d.Message += "; " + staleText(age)
 	}
 	return d
 }
 
-// snapshotAge is how old s is; ok is false when that is not known or not
-// limited.
+// snapshotAge is how old s's readings are, and whether that is too old to
+// decide on: the snapshot's own age, or its host reading's when the host
+// source keeps failing (each tick reapplies its last reading).
 func snapshotAge(s *protocol.Snapshot, c Config) (time.Duration, bool) {
 	if c.MaxSnapshotAge <= 0 || c.Now == nil || s.CollectedAt.IsZero() {
 		return 0, false
 	}
 	// Wall clocks: a monotonic reading stops while the Mac sleeps, and a
 	// snapshot from before a sleep is old.
-	return c.Now().Round(0).Sub(s.CollectedAt.Round(0)), true
+	now := c.Now().Round(0)
+	age := now.Sub(s.CollectedAt.Round(0))
+	if h := s.Sources["host"]; h.Stale && !h.At.IsZero() {
+		age = max(age, now.Sub(h.At.Round(0)))
+	}
+	return age, age > c.MaxSnapshotAge
+}
+
+// staleText says how old the readings are.
+func staleText(age time.Duration) string {
+	return fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
 }
 
 // slots is the macOS VM slot rule: running plus starting macOS VMs must
@@ -225,7 +235,7 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 	}
 	var holders []string
 	var idle string
-	if s.Tart != nil {
+	if s.Tart != nil && !s.Sources["tart"].Stale { // a stale reading's VMs may be gone
 		holders, idle = slotHolders(s, c)
 	}
 	if len(holders) > 0 {

@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -60,13 +59,13 @@ func runCheck(e Env) int {
 		return 1
 	}
 	d, err := askDaemon(cfg, req)
-	switch {
-	case errors.Is(err, errCannotCheck), errors.Is(err, client.ErrVersion), errors.Is(err, client.ErrBadReply):
-		// Answered, but not with a decision: the shim's advice applies.
-		fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket))
-		return 1
-	case err != nil:
-		unreachable(e, cfg.Socket, err)
+	if err != nil {
+		// The shim's diagnosis; only a daemon not running needs starting.
+		if cause := daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket); cause != "not running" {
+			fmt.Fprintf(e.Stderr, "headroom: the daemon %s\n", cause)
+		} else {
+			unreachable(e, cfg.Socket, err)
+		}
 		return 1
 	}
 	// A deny goes to stderr, where an agent looks for why a command failed.

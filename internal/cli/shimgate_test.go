@@ -504,11 +504,10 @@ func TestDaemonCause(t *testing.T) {
 		err  error
 		want string
 	}{
-		{daemonError{said: `unknown op "check"`}, "headroom install"},
-		{daemonError{said: "check: not supported by this daemon"}, "headroom install"},
-		{daemonError{}, "headroom install"},
-		{daemonError{said: "bad request: unexpected EOF"}, "error: bad request: unexpected EOF"},
-		{daemonError{said: "policy: not supported for this kind"}, "error: policy: not supported"},
+		{daemonError{said: `unknown op "check"`}, "is another version: restart it with this build: headroom install"},
+		{daemonError{said: "check: not supported by this daemon"}, "gave no decision (check: not supported by this daemon); restart it"},
+		{daemonError{}, "gave no decision; restart it"},
+		{daemonError{said: "bad request: unexpected EOF"}, "gave no decision (bad request: unexpected EOF); restart it"},
 	} {
 		if got := daemonCause(c.err, time.Second, "/nonexistent/d.sock"); !strings.Contains(got, c.want) {
 			t.Errorf("%v: %q, want %q", c.err, got, c.want)

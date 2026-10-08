@@ -92,8 +92,9 @@ func TestShimFailsOpenWithinTheTimeout(t *testing.T) {
 				exec: func(path string, _, _ []string) error { r.execed = path; return nil }})
 			took := time.Since(start)
 			stderr := errb.String()
-			// The daemon timeout plus room for a loaded runner and -race.
-			if code != 0 || r.execed == "" || took > 900*time.Millisecond {
+			// Bounded by the daemon timeout, not by the daemon: the hung ones
+			// would hold it 2 s. The margin is for loaded runners and -race.
+			if code != 0 || r.execed == "" || took > 1500*time.Millisecond {
 				t.Fatalf("exit %d, exec %q, took %v", code, r.execed, took)
 			}
 			if strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(stderr, "headroom: not gated (daemon ") ||

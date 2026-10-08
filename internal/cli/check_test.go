@@ -112,3 +112,13 @@ func TestCheckAgainstGarbage(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 }
+
+// headroom check diagnoses a hung daemon as the shim does, not as "start it".
+func TestCheckAgainstAHungDaemon(t *testing.T) {
+	r := newShimRig(t)
+	serveOnce(t, filepath.Join(r.dir, "d.sock"), "", 0)
+	code, _, stderr := run(t, map[string]string{"HEADROOM_CONFIG_DIR": r.dir}, "headroom", "check", "--worktree", "w", "--", "docker", "run", "x")
+	if code != 1 || !strings.Contains(stderr, "no answer in 500ms") || strings.Contains(stderr, "start it") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}

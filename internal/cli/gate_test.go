@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -19,7 +20,7 @@ import (
 // The daemon's own wiring: a second check sees the first allow's lease.
 func TestGateLeasesAcrossChecks(t *testing.T) {
 	env, d := serveDaemonWith(t, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		wireGate(d, config.Defaults("/x"), slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	})
 	// 64 GiB host, nothing else known: 64 GiB headroom. 40 + 40 do not fit.
 	code, out, _ := run(t, env, "headroom", "check", "--worktree", "w", "--cost", "40G", "--", "docker", "run", "a")
@@ -45,7 +46,7 @@ func TestGateLeasesAcrossChecks(t *testing.T) {
 // The daemon resolves who is calling before deciding (#28).
 func TestGateIdentifiesTheCaller(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	check := gateCheck(book, config.Defaults("/x").PolicyConfig())
+	check := gateCheck(book, config.Defaults("/x").PolicyConfig(), nil)
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},
@@ -85,7 +86,7 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 func TestGateCountsMacOSSlots(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
 	cfg := config.Defaults("/x")
-	check := gateCheck(book, cfg.PolicyConfig())
+	check := gateCheck(book, cfg.PolicyConfig(), nil)
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},
@@ -102,7 +103,7 @@ func TestGateCountsMacOSSlots(t *testing.T) {
 // is not decided on (#30).
 func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
-	check := gateCheck(book, config.Defaults("/x").PolicyConfig())
+	check := gateCheck(book, config.Defaults("/x").PolicyConfig(), nil)
 	headroom := int64(0) // would deny
 	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}, CollectedAt: time.Now().Add(-5 * time.Minute)}
 	book.Observe(s)
@@ -122,5 +123,40 @@ func TestDeriveListsUngated(t *testing.T) {
 	tick(s)
 	if len(s.Ungated) != 1 || s.Ungated[0].Name != "testcontainers-ryuk" {
 		t.Fatalf("ungated = %+v", s.Ungated)
+	}
+}
+
+type fakeInspector map[string]struct {
+	id     string
+	labels map[string]string
+}
+
+func (f fakeInspector) Inspect(_ context.Context, ref string) (string, map[string]string, error) {
+	c, ok := f[ref]
+	if !ok {
+		return "", nil, errors.New("no such container")
+	}
+	return c.id, c.labels, nil
+}
+
+// A start's lease is keyed by the container Docker resolves, and takes over
+// the run or create whose label it carries (#33).
+func TestGateResolvesAStartsContainer(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	created := gateCheck(book, pol, nil)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
+	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
+	started := gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db"}, s)
+	ls := book.List()
+	if len(ls) != 1 || ls[0].ID != started.LeaseID || ls[0].Bytes != 4<<30 {
+		t.Fatalf("leases = %+v, want the start's, with the create's 4 GiB", ls)
+	}
+	// Docker cannot say: the start's lease stands alone.
+	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start nope", Target: "nope"}, s)
+	if len(book.List()) != 2 {
+		t.Fatalf("leases = %+v", book.List())
 	}
 }

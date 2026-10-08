@@ -218,9 +218,10 @@ func runDaemon(e Env) int {
 	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
+	dockerSrc := docker.New(cfg.Docker.Socket, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
-		docker.New(cfg.Docker.Socket, vms),
+		dockerSrc,
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 		orca.New(orcaCLI),
 		lmstudio.New(lmsCLI, vmproc.Host{}, e.Getenv("HOME")),
@@ -230,7 +231,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	wireGate(d, cfg, log)
+	wireGate(d, cfg, log, dockerSrc)
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
@@ -428,10 +429,10 @@ func usage(w io.Writer) {
 // leases (#25) to d. Every tick derives the budget and attribution, settles
 // or expires leases against that snapshot, and lists the open ones in it.
 // Checks decide against the latest snapshot and the open leases.
-func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
+func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) {
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
 	d.SetDerive(derive(book, cfg.Budget.Params()))
-	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
+	d.SetCheck(gateCheck(book, cfg.PolicyConfig(), docker))
 	d.SetRelease(book.Release)
 }
 
@@ -450,13 +451,33 @@ func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
 	}
 }
 
+// Inspector resolves a container name or ID to its full ID and labels:
+// the Docker source.
+type Inspector interface {
+	Inspect(ctx context.Context, ref string) (id string, labels map[string]string, err error)
+}
+
+// inspectTimeout bounds the Docker lookup a start's check makes: well within
+// the shim's daemon timeout.
+const inspectTimeout = 200 * time.Millisecond
+
 // gateCheck answers a check: it finds the calling worktree (#28), then
 // decides with the lease book.
-func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
+func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
-			Target: r.Target, Name: r.Name, Labelled: r.Labelled}, s, pol)
+		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled, ComposeDir: r.ComposeDir}
+		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" && docker != nil {
+			// The container exists: its ID is the lease's key, and a lease
+			// label on it names the run or create this start takes over.
+			ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+			if cid, labels, err := docker.Inspect(ctx, r.Target); err == nil {
+				req.ContainerID, req.TakesOver = cid, labels[protocol.LeaseLabel]
+			}
+			cancel()
+		}
+		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

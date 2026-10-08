@@ -104,7 +104,10 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	h := e.withDefaults()
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
-	req.Target, req.Name = c.Target, c.Name
+	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
+	if c.Kind == "compose" {
+		req.Target, req.ComposeDir = composeKey(c, getenv, h.getwd)
+	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
 	_, req.Labelled = shim.Labelled(name, e.Args[1:], protocol.LeaseLabel, "")
@@ -202,6 +205,31 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 	}
 	r.Ancestors = ancestors()
 	return r
+}
+
+// composeKey is a compose call's project, as Compose names it (-p, then
+// COMPOSE_PROJECT_NAME), and its project directory, absolute: the key of
+// its lease when it names no project (#33). Compose labels each container
+// with both.
+func composeKey(c shim.Call, getenv func(string) string, getwd func() (string, error)) (project, dir string) {
+	project = c.Target
+	if project == "" {
+		project = getenv("COMPOSE_PROJECT_NAME")
+	}
+	dir = c.ComposeDir
+	if dir == "" {
+		if f, _, _ := strings.Cut(getenv("COMPOSE_FILE"), string(filepath.ListSeparator)); f != "" {
+			dir = filepath.Dir(f)
+		}
+	}
+	cwd, err := getwd()
+	if err != nil {
+		return project, ""
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	return project, filepath.Clean(dir)
 }
 
 // notGated warns, in one line, that a call runs without a check (R7).

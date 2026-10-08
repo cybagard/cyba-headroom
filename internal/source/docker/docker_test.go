@@ -301,3 +301,22 @@ func TestStatsFetchedConcurrently(t *testing.T) {
 		t.Fatalf("stats requests were sequential (peak %d in flight)", peak.Load())
 	}
 }
+
+func TestInspectResolvesAContainer(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		"/containers/db/json": `{"Id":"abc123","Config":{"Labels":{"dev.headroom.lease":"lease-1-2"}}}`,
+	})
+	s := docker.New(sock, nil)
+	id, labels, err := s.Inspect(context.Background(), "db")
+	if err != nil || id != "abc123" || labels["dev.headroom.lease"] != "lease-1-2" {
+		t.Fatalf("Inspect = %q, %v, %v", id, labels, err)
+	}
+	if _, _, err := s.Inspect(context.Background(), "gone"); err == nil {
+		t.Fatal("want an error for no such container")
+	}
+	for _, ref := range []string{"", "../images/json", "db?x=1", "a/b"} {
+		if _, _, err := s.Inspect(context.Background(), ref); err == nil {
+			t.Errorf("Inspect(%q): want an error, not a request", ref)
+		}
+	}
+}

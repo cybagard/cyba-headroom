@@ -66,6 +66,11 @@ type CheckRequest struct {
 	// Labelled is set when the shim adds the lease's ID to the container
 	// as LeaseLabel (a run or create): its lease binds that container only.
 	Labelled bool `json:"labelled,omitempty"`
+	// Op is the call's subcommand (run, create, start, restart, up, ...).
+	Op string `json:"op,omitempty"`
+	// ComposeDir is a compose call's project directory, absolute: the key
+	// of its lease when it names no project (Target).
+	ComposeDir string `json:"compose_dir,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

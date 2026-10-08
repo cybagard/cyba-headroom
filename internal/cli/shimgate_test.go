@@ -307,7 +307,7 @@ func TestShimGateWaitInterrupted(t *testing.T) {
 // fit, one runs and the other is denied (R5, R10).
 func TestShimGateAgainstTheDaemon(t *testing.T) {
 	envMap, _ := serveDaemonWith(t, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	r.env = []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
@@ -354,7 +354,7 @@ func TestShimGateDebugNamesTheWorktree(t *testing.T) {
 // A call whose exec fails hands its lease back to the daemon.
 func TestShimGateReleaseAgainstTheDaemon(t *testing.T) {
 	envMap, d := serveDaemonWith(t, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
@@ -443,7 +443,7 @@ func (r tartReading) Apply(s *protocol.Snapshot) { s.Tart = &r.t }
 func TestShimGateMacOSSlotsAgainstTheDaemon(t *testing.T) {
 	tart := &fakeTart{vms: []protocol.TartVM{{Name: "a-mac", OS: "darwin"}, {Name: "b-mac", OS: "darwin"}}}
 	envMap, d := serveDaemonFrom(t, []daemon.Source{hostSource{}, tart}, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	tartHome := filepath.Join(r.dir, "tarthome")
@@ -548,5 +548,29 @@ func TestShimDoesNotLabelStart(t *testing.T) {
 	r.run("docker", "start", "db")
 	if !slices.Equal(r.execArgv, []string{"docker", "start", "db"}) || r.asked[0].Labelled {
 		t.Fatalf("argv = %q, labelled %v", r.execArgv, r.asked[0].Labelled)
+	}
+}
+
+func TestComposeKey(t *testing.T) {
+	wd := func() (string, error) { return "/Users/dev/src/a", nil }
+	for name, tc := range map[string]struct {
+		call             shim.Call
+		env              map[string]string
+		project, wantDir string
+	}{
+		"cwd":                  {shim.Call{}, nil, "", "/Users/dev/src/a"},
+		"-p":                   {shim.Call{Target: "p"}, nil, "p", "/Users/dev/src/a"},
+		"COMPOSE_PROJECT_NAME": {shim.Call{}, map[string]string{"COMPOSE_PROJECT_NAME": "e"}, "e", "/Users/dev/src/a"},
+		"-p wins over env":     {shim.Call{Target: "p"}, map[string]string{"COMPOSE_PROJECT_NAME": "e"}, "p", "/Users/dev/src/a"},
+		"-f relative":          {shim.Call{ComposeDir: "deploy"}, nil, "", "/Users/dev/src/a/deploy"},
+		"--project-directory":  {shim.Call{ComposeDir: "/srv/app"}, nil, "", "/srv/app"},
+		"COMPOSE_FILE":         {shim.Call{}, map[string]string{"COMPOSE_FILE": "ops/c.yml:ops/d.yml"}, "", "/Users/dev/src/a/ops"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, d := composeKey(tc.call, func(k string) string { return tc.env[k] }, wd)
+			if p != tc.project || d != tc.wantDir {
+				t.Fatalf("composeKey = %q, %q; want %q, %q", p, d, tc.project, tc.wantDir)
+			}
+		})
 	}
 }

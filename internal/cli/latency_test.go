@@ -24,7 +24,7 @@ func BenchmarkShimPassThrough(b *testing.B) {
 // A gated call: config load, the check round trip to a daemon with the
 // real wiring (policy and lease book), and the exec hook.
 func BenchmarkShimGatedCall(b *testing.B) {
-	envMap, _ := serveDaemonWith(b, func(d *daemon.Daemon) { wireGate(d, config.Defaults("/x"), discardLog()) })
+	envMap, _ := serveDaemonWith(b, func(d *daemon.Daemon) { wireGate(d, config.Defaults("/x"), discardLog(), nil) })
 	r := newShimRig(b)
 	vars := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
 	env := Env{Args: []string{"docker", "run", "-m", "1m", "alpine"}, Stdout: io.Discard, Stderr: io.Discard,

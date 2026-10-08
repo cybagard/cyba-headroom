@@ -47,8 +47,8 @@ func TestANewContainerWithoutALeaseIsUngated(t *testing.T) {
 func TestAContainerThatBindsALeaseIsGated(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(snap())
-	b.Check(req("w1", gib), snap(), cfg)
-	b.Observe(withContainer(snap(), "c2", "w1"))
+	d := b.Check(req("w1", gib), snap(), cfg)
+	b.Observe(withRun(snap(), "c2", "w1", 64*gib, d.LeaseID))
 	if k := ungatedKeys(b); len(k) != 0 {
 		t.Fatalf("ungated = %v", k)
 	}
@@ -123,36 +123,23 @@ func TestAManualCallThroughTheShimIsNotUngated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b, _, _ := book(t)
 			b.Observe(snap())
-			m := named("", "", "alpine")
+			m := labelled("", "alpine")
 			m.CostBytes = 6 * gib
-			if d := b.Check(m, snap(), cfg); !d.Allow {
+			d := b.Check(m, snap(), cfg)
+			if !d.Allow {
 				t.Fatalf("manual = %+v", d)
 			}
 			// It holds nothing back from gated calls.
 			if d := b.Check(req("w2", 7*gib), snap(), cfg); !d.Allow {
 				t.Fatalf("a manual call held back memory: %+v", d)
 			}
-			b.Observe(withNamed(snap(), "c2", "c2", "alpine", wt))
+			b.Observe(withLabel(snap(), "c2", "alpine", d.LeaseID, wt))
 			for _, u := range b.Ungated() {
 				if u.Key == "container:c2" {
 					t.Fatalf("manual container flagged: %+v", u)
 				}
 			}
 		})
-	}
-}
-
-func TestAWorktreesOwnLeaseWinsOverAManualOne(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	b.Check(req("", gib), snap(), cfg)
-	c.t = c.t.Add(time.Second)
-	b.Check(req("w1", gib), snap(), cfg)
-	b.Observe(withContainer(snap(), "c2", "w1"))
-	for _, l := range b.List() {
-		if l.Worktree == "w1" {
-			t.Fatalf("w1's lease still open; the manual one took its container: %+v", b.List())
-		}
 	}
 }
 
@@ -194,17 +181,6 @@ func TestALeaseBindsItsOwnNamedContainer(t *testing.T) {
 	}
 }
 
-func TestALeaseBindsItsImageFirst(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("w1", "", "postgres:17"), snap(), cfg)
-	s := withNamed(withNamed(snap(), "a", "eager_turing", "redis", ""), "b", "calm_hopper", "docker.io/library/postgres:17", "")
-	b.Observe(s)
-	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:a" {
-		t.Fatalf("ungated = %v, want the redis one", got)
-	}
-}
-
 func TestStartBindsTheContainerItNames(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(snap())
@@ -227,47 +203,6 @@ func TestAComposeLeaseKnowsItsProjectFromTheCall(t *testing.T) {
 	}
 }
 
-func TestAnImageMismatchStillBinds(t *testing.T) {
-	// Image names have many spellings (a mirror, a digest): only a name
-	// says for sure that a container is not the call's.
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("w1", "", "my-registry.local/alpine"), snap(), cfg)
-	b.Observe(withNamed(snap(), "a", "eager_turing", "alpine", ""))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestAnImageNamesOnlyInItsOwnWorktree(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("w1", "", "postgres"), snap(), cfg) // w1's, still pulling
-	c.t = c.t.Add(time.Second)
-	// An SDK in w2 starts postgres through the socket.
-	b.Observe(withNamed(snap(), "sdk", "sdk-pg", "postgres", "w2"))
-	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:sdk" {
-		t.Fatalf("ungated = %v, want w2's SDK container", got)
-	}
-	// w1's own container then binds w1's lease.
-	b.Observe(withNamed(withNamed(snap(), "sdk", "sdk-pg", "postgres", "w2"), "own", "eager_turing", "postgres", "w1"))
-	if got := ungatedKeys(b); len(got) != 1 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestAManualLeaseTakesOnlyWhatItNames(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	// docker run --rm hello-world by hand: gone before any tick sees it.
-	b.Check(named("", "", "hello-world"), snap(), cfg)
-	// Testcontainers in w1, through the socket, within the lease timeout.
-	b.Observe(withNamed(snap(), "tc", "tc-redis", "redis", "w1"))
-	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:tc" {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
 func TestAContainerMissingForATickIsNotUngated(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(withNamed(snap(), "db", "db", "postgres", "w1"))
@@ -285,10 +220,11 @@ func TestComposeServicesOnLaterTicksAreGated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b, c, _ := book(t)
 			b.Observe(snap())
-			b.Check(policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib}, snap(), cfg)
+			// Without -p: its project directory is the key.
+			b.Check(policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib, ComposeDir: "/Users/dev/src/app"}, snap(), cfg)
 			app := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
 				return addContainer(s, protocol.Container{ID: id, Name: "app-" + id, MemoryBytes: 2 * gib,
-					Labels: map[string]string{"com.docker.compose.project": "app"}}, wt)
+					Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: "/Users/dev/src/app"}}, wt)
 			}
 			b.Observe(app(snap(), "db")) // uses the whole cost at once
 			c.t = c.t.Add(30 * time.Second)
@@ -395,49 +331,6 @@ func TestAManualComposeWithAProjectIsGated(t *testing.T) {
 	}
 }
 
-func TestPodmansLocalImagesMatch(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("", "", "myimg"), snap(), cfg)
-	b.Observe(withNamed(snap(), "a", "eager_turing", "localhost/myimg:latest", ""))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestStartByAShortIDPrefix(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Kind: "container", Command: "docker start 3f", Target: "3f"}, snap(), cfg)
-	b.Observe(withNamed(snap(), "3fab12", "db", "postgres", ""))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestWithoutABaselineAnImageNamesOnlyTheWorktreesOwn(t *testing.T) {
-	b, _, _ := book(t)
-	none := snap()
-	none.Docker = nil
-	b.Check(named("w1", "", "postgres"), none, cfg) // no baseline yet
-	s := addContainer(snap(), protocol.Container{ID: "earlier", Name: "earlier", Image: "postgres", MemoryBytes: 3 * gib}, "")
-	s = withNamed(s, "new", "new", "postgres", "w1")
-	b.Observe(s)
-	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
-		t.Fatalf("leases = %+v, want w1's bound to its own container", l)
-	}
-}
-
-func TestAManualLeaseWithoutATargetLeavesWorktreesContainers(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Kind: "container", Command: "docker run"}, snap(), cfg) // target unparsed
-	b.Observe(withNamed(snap(), "tc", "tc-redis", "redis", "w1"))
-	if got := ungatedKeys(b); len(got) != 1 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
 // A check whose snapshot had a Tart reading but no Docker one is no
 // baseline for containers: those running are not ungated.
 func TestABaselineIsPerSource(t *testing.T) {
@@ -467,57 +360,6 @@ func TestRestartPolicyContainersAfterDockerStartsAreNotUngated(t *testing.T) {
 	c.t = c.t.Add(time.Minute)
 	b.Observe(withNamed(withNamed(snap(), "r", "always", "redis", ""), "n", "sdk", "redis", ""))
 	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:n" {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestAContainerAfterASlowPullIsGated(t *testing.T) {
-	b, c, log := book(t)
-	b.Observe(snap())
-	b.Check(named("w1", "", "big-image"), snap(), cfg)
-	c.t = c.t.Add(3 * time.Minute) // the pull outlasts the lease
-	b.Observe(snap())
-	c.t = c.t.Add(5 * time.Second)
-	b.Observe(withNamed(snap(), "big", "eager_turing", "big-image", "w1"))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v\n%s", got, log)
-	}
-	if l := b.List(); len(l) != 0 {
-		t.Fatalf("a lapsed lease reserves again: %+v", l)
-	}
-}
-
-func TestImagesUnderAnotherRegistryMatch(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("", "", "myimg"), snap(), cfg)
-	b.Observe(withNamed(snap(), "a", "eager_turing", "quay.io/org/myimg:latest", ""))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestAWorktreesOwnLeaseNamesItsContainerFirst(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	b.Check(named("", "", "postgres"), snap(), cfg) // manual, older
-	c.t = c.t.Add(time.Second)
-	b.Check(named("w1", "", "postgres"), snap(), cfg)
-	s := withNamed(snap(), "own", "own", "postgres", "w1")
-	s = addContainer(s, protocol.Container{ID: "man", Name: "man", Image: "postgres", MemoryBytes: 3 * gib}, "")
-	b.Observe(s)
-	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
-		t.Fatalf("leases = %+v, want w1's bound to its own container", l)
-	}
-}
-
-func TestACatchAllManualLeaseMatchesOnlyBriefly(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	b.Check(policy.Request{Kind: "container", Command: "docker run"}, snap(), cfg) // target unparsed
-	c.t = c.t.Add(30 * time.Second)
-	b.Observe(withNamed(snap(), "tc", "tc-redis", "redis", ""))
-	if got := ungatedKeys(b); len(got) != 1 {
 		t.Fatalf("ungated = %v", got)
 	}
 }
@@ -593,7 +435,10 @@ func TestAStartLeaseTakesALabelledContainer(t *testing.T) {
 	cr.Command = "docker create postgres"
 	created := b.Check(cr, snap(), cfg)
 	c.t = c.t.Add(time.Second)
-	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
+	// The gate asked Docker: db1 is the container, and the create's label
+	// is on it.
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db",
+		ContainerID: "db1", TakesOver: created.LeaseID}, snap(), cfg)
 	s := addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
 		Labels: map[string]string{protocol.LeaseLabel: created.LeaseID}}, "w1")
 	b.Observe(s)
@@ -723,7 +568,9 @@ func TestAStartAfterAnUnboundRunTakesTheContainer(t *testing.T) {
 	r.Name = "x"
 	run := b.Check(r, snap(), cfg) // its container exited before a tick
 	c.t = c.t.Add(30 * time.Second)
-	b.Check(startOf("w1", "x"), snap(), cfg)
+	st := startOf("w1", "x")
+	st.ContainerID, st.TakesOver = "x1", run.LeaseID
+	b.Check(st, snap(), cfg)
 	b.Observe(addContainer(snap(), protocol.Container{ID: "x1", Name: "x", Image: "img", MemoryBytes: gib / 2,
 		Labels: map[string]string{protocol.LeaseLabel: run.LeaseID}}, "w1"))
 	ls := b.List()
@@ -740,24 +587,12 @@ func TestAReturningContainerIsNotTakenByAGuess(t *testing.T) {
 	b.Observe(old(snap()))
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(snap()) // crash-looping
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "new"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(old(snap())) // back: must not take the new compose lease
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(addContainer(old(snap()), protocol.Container{ID: "N", Name: "new-web", Labels: map[string]string{"com.docker.compose.project": "new"}}, "w1"))
 	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
-func TestAStartPrefersAnExactNameToAnIDPrefix(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	b.Check(startOf("w1", "db"), snap(), cfg)
-	s := withNamed(snap(), "db3f00", "impostor", "alpine", "") // first in the list
-	s = withNamed(s, "abc123", "db", "postgres", "w1")
-	b.Observe(s)
-	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:db3f00" {
 		t.Fatalf("ungated = %v", got)
 	}
 }

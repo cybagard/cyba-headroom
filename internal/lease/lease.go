@@ -3,13 +3,19 @@
 // overcommit.
 //
 // The shim replaces itself with the real binary on allow, so nothing reports
-// back: the book recognises the new resource itself. A resource the book has
-// not seen recently is new, and binds the oldest fitting lease, preferring
-// the lease's own worktree. A bound lease keeps reserving what its resources
+// back: the book recognises the new resource itself, by a key each lease
+// gets when its call is checked (#33). A run or create's container carries
+// the lease's ID as a label; a start names its container's ID, which the
+// daemon asks Docker for; a compose call names its project, or its project
+// directory, which Compose labels each container with; a tart run names its
+// VM. A new resource binds the lease whose key it matches, and no other: the
+// book never guesses. A bound lease keeps reserving what its resources
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
 // cost, when they are gone, or at its timeout; one that never saw its
-// resource is logged as expired.
+// resource is logged as expired. A lease with no key (headroom check
+// without --name, or Docker not answering at a start) never binds: it holds
+// its cost to its timeout.
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -25,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -96,12 +103,17 @@ type entry struct {
 	// pid is the tart run process, for a tart lease: if it exits before its
 	// VM appears, the run failed.
 	pid int
-	// target and name are what the call starts (shim.Call), so the lease
-	// binds its own resource when several appear at once (#33).
-	target, name string
-	// labelled is set when its container carries the lease's ID
-	// (protocol.LeaseLabel): it binds that container and no other.
-	labelled bool
+	// The lease's key (#33). labelled: its container carries the lease's ID
+	// (protocol.LeaseLabel). containerID: a start's container, as Docker
+	// resolved it. name: a run's --name, for a call the shim did not label.
+	// target: a start's container as given, when Docker could not resolve
+	// it, or a tart run's VM. composeDir: a compose call's project
+	// directory, when it names no project.
+	labelled    bool
+	containerID string
+	name        string
+	target      string
+	composeDir  string
 }
 
 // How a resource started (#33).
@@ -134,11 +146,6 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 // dockerSettle is how long after the Docker engine comes back its
 // restart-policy containers count as a baseline.
 const dockerSettle = 30 * time.Second
-
-// catchAll is how long a manual lease that does not know what it starts
-// may bind any unattributed container: briefly, so it cannot hide an
-// ungated one for its whole timeout.
-const catchAll = 15 * time.Second
 
 // stale is how much newer the daemon's snapshot must be than the one leases
 // were settled on before checks use it instead: derive (which settles them)
@@ -186,10 +193,49 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			Created: now, Expires: now.Add(b.timeout),
 		},
 		cost: d.CostBytes, bound: map[string]bool{}, macOS: r.MacOS, pid: r.PID,
-		target: r.Target, name: r.Name, labelled: r.Labelled,
+		labelled: r.Labelled, containerID: r.ContainerID, name: r.Name, target: r.Target,
 	}
 	if r.Kind == "compose" {
-		e.project = r.Target // -p, when given: the lease waits for that project
+		// The project it names (-p, COMPOSE_PROJECT_NAME), else its
+		// directory, which Compose labels each container with.
+		e.project, e.target, e.composeDir = r.Target, "", r.ComposeDir
+	}
+	if e.Kind == "compose" {
+		// compose up again for a project an open lease already waits for
+		// or holds (compose stop, then up): this call's lease takes that one
+		// over, with its containers, and keeps the larger cost.
+		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
+			same := o.Kind == "compose" && (e.project != "" && e.project == o.project ||
+				e.composeDir != "" && o.composeDir != "" && sameDir(e.composeDir, o.composeDir))
+			if !same {
+				return false
+			}
+			e.cost, e.used = max(e.cost, o.cost), o.used
+			for k := range o.bound {
+				e.bound[k] = true
+			}
+			if e.project == "" {
+				e.project = o.project
+			}
+			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
+			return true
+		})
+	}
+	if r.TakesOver != "" {
+		// A start of a container a run or create made that has not run
+		// yet: that lease ends here, and this one keeps the larger cost.
+		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
+			*list = slices.DeleteFunc(*list, func(o *entry) bool {
+				if o.ID != r.TakesOver || !o.labelled || len(o.bound) > 0 {
+					return false
+				}
+				if list == &b.open {
+					e.cost = max(e.cost, o.cost)
+				}
+				b.log.Debug("lease ended: its container was started by a later call", "lease", o.ID, "by", e.ID)
+				return true
+			})
+		}
 	}
 	if r.Worktree == "" {
 		// Manual calls are not gated and hold nothing back: the lease
@@ -205,8 +251,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 type resource struct {
 	key      string // "container:<id>" or "vm:<name>"
 	name     string
-	image    string // a container's image
+	id       string // a container's ID
 	lease    string // the lease ID its LeaseLabel carries
+	dir      string // a compose container's project directory
 	kind     string // container, compose (a compose project's container) or vm
 	project  string // the compose project, for compose
 	worktree string // "" when unattributed
@@ -233,10 +280,10 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
 			k := "container:" + c.ID
-			r := resource{key: k, name: c.Name, image: c.Image, kind: "container", worktree: owner[k], bytes: c.MemoryBytes,
+			r := resource{key: k, name: c.Name, id: c.ID, kind: "container", worktree: owner[k], bytes: c.MemoryBytes,
 				lease: c.Labels[protocol.LeaseLabel]}
 			if p := c.Labels[protocol.ComposeProjectLabel]; p != "" {
-				r.kind, r.project = "compose", p
+				r.kind, r.project, r.dir = "compose", p, c.Labels[protocol.ComposeWorkingDirLabel]
 			}
 			out = append(out, r)
 		}
@@ -309,57 +356,17 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			fresh = append(fresh, r)
 		}
 	}
-	// Resources a call names bind first, so another one appearing in the
-	// same tick cannot take their lease; then the rest, by kind and
-	// worktree. Without a baseline (a lease taken before the first
-	// reading), any resource may have been there already: only one of the
-	// lease's own worktree is taken as its call's.
-	// A container that carries the ID of an open lease of a labelled call
-	// went through the shim: it binds that lease. Any other label value
-	// counts for nothing: forged, inherited from a committed image, or of
-	// a lease long gone (the container is matched as any other).
+	// Each new resource binds the open lease whose key it matches. Before a
+	// source's first reading, only a key nothing else can match (a label,
+	// a container ID) binds: anything else may have been there already.
 	var unbound []resource
 	for _, r := range fresh {
-		e, open := b.labelledLease(r)
-		if e == nil {
-			unbound = append(unbound, r)
-			continue
-		}
-		// A docker start after its run or create (open or lapsed) that
-		// bound nothing: the start's lease takes the container, and the
-		// labelled one ends, having started nothing still running.
-		if st := b.startNaming(e, r); st != nil {
-			st.bind(r)
-			if open {
-				b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
-				b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
-			}
-		} else if open {
+		if e := keyed(b.open, r, b.based[source(r.kind)]); e != nil {
 			e.bind(r)
-		} // else its lease lapsed while the image pulled: checked, reserving nothing
-		b.judge(r, gated, now)
-	}
-	// Exact names first, across every new resource, then looser ones (an
-	// ID prefix, an image), as Docker resolves a name before an ID prefix.
-	exact := func(r resource, now time.Time, ownOnly bool) *entry { return b.named(r, now, ownOnly, false) }
-	loose := func(r resource, now time.Time, ownOnly bool) *entry { return b.named(r, now, ownOnly, true) }
-	for pass, find := range []func(resource, time.Time, bool) *entry{exact, loose, b.match} {
-		var left []resource
-		for _, r := range unbound {
-			if v := b.verdicts[r.key]; pass == 2 && v != nil && r.kind != "vm" {
-				// Back after a tick or two away, with its verdict: only a
-				// lease that names it takes it, never a guess.
-				left = append(left, r)
-				continue
-			}
-			if e := find(r, now, !b.based[source(r.kind)]); e != nil {
-				e.bind(r)
-				b.judge(r, gated, now)
-			} else {
-				left = append(left, r)
-			}
+			b.judge(r, gated, now)
+		} else {
+			unbound = append(unbound, r)
 		}
-		unbound = left
 	}
 	// Compose projects running containers whose call was checked: a later
 	// service (depends_on, a slow healthcheck) belongs to the same call.
@@ -378,7 +385,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
 			b.judge(r, baseline, now) // it may have been there before
 		case r.kind == "compose" && gatedProject[r.project] || b.lapsedFor(r):
-			b.judge(r, gated, now)
+			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
 			b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
@@ -462,6 +469,7 @@ func (b *Book) expire(now time.Time) {
 			return false
 		case len(e.bound) > 0:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
+			return true
 		case e.Worktree == "":
 			// A manual call's: it reserved nothing, and many start nothing
 			// that lives long enough to be seen (docker run --rm).
@@ -469,8 +477,8 @@ func (b *Book) expire(now time.Time) {
 		default:
 			b.log.Warn("lease expired: its container or VM never appeared", "lease", e.ID, "worktree", e.Worktree,
 				"command", e.Command, "bytes", e.cost, "age", now.Sub(e.Created).Round(time.Second))
-			b.lapsed = append(b.lapsed, e)
 		}
+		b.lapsed = append(b.lapsed, e) // its resource may still come (a slow pull)
 		return true
 	})
 }
@@ -517,113 +525,83 @@ func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
 }
 
-// match finds the lease a new resource r binds to: the oldest open lease of
-// its kind that can take it, of r's own worktree, or of any worktree when r
-// is unattributed (unless ownOnly). Leases still within their time come before expired ones,
-// so a lease whose own call failed cannot take a newer lease's resource on
-// its last tick.
-func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
-	// A VM whose tart run is a lease's own process is that lease's: the
-	// shim became tart run, keeping its PID.
-	if r.runPID > 0 {
-		for _, e := range b.open {
-			if e.pid == r.runPID && e.waitsFor() == r.kind && len(e.bound) == 0 {
-				return e // its own VM, whatever the shim guessed its OS to be
-			}
+// keyed is the lease in es whose key r matches. The surest key wins: a
+// container's label names its lease outright, before a start's container ID,
+// before a name (docker start db || docker run --name db: the run's label
+// beats the start's name). Without a baseline (based false), only a label or
+// a container ID counts.
+func keyed(es []*entry, r resource, based bool) *entry {
+	rank := func(e *entry) int {
+		switch {
+		case e.labelled:
+			return 0
+		case e.containerID != "":
+			return 1
 		}
+		return 2
 	}
-	for _, live := range []bool{true, false} {
-		var other, manual *entry
-		for _, e := range unlabelled(b.open) {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || e.namesOther(r) {
-				continue
-			}
-			switch {
-			case e.Worktree == "":
-				// A manual call's, made anywhere (also in a worktree's
-				// directory): last, after every worktree's own lease. One
-				// that knows its target takes only that (named).
-				// One that does not, only an unattributed resource.
-				if manual == nil && !ownOnly && e.target == "" && e.name == "" && r.worktree == "" && now.Sub(e.Created) < catchAll {
-					manual = e
-				}
-			case r.worktree != "" && e.Worktree == r.worktree:
-				return e
-			case r.worktree == "" && other == nil && !ownOnly:
-				other = e
-			}
-		}
-		if other != nil {
-			return other
-		}
-		if manual != nil {
-			return manual
-		}
-	}
-	return nil
-}
-
-// labelledLease is the lease r's label names, if it is a labelled call's
-// (a run or create, so a container; one a compose label marks too) that
-// has bound nothing: an open one, or a lapsed one after a slow pull,
-// which is spent.
-func (b *Book) labelledLease(r resource) (e *entry, open bool) {
-	if r.lease == "" || source(r.kind) != "container" {
-		return nil, false
-	}
-	is := func(e *entry) bool { return e.ID == r.lease && e.labelled && len(e.bound) == 0 }
-	if i := slices.IndexFunc(b.open, is); i >= 0 {
-		return b.open[i], true
-	}
-	if i := slices.IndexFunc(b.lapsed, is); i >= 0 {
-		e = b.lapsed[i]
-		b.lapsed = slices.Delete(b.lapsed, i, i+1)
-		return e, false
-	}
-	return nil, false
-}
-
-// startNaming is an open docker start or restart lease of e's worktree,
-// taken after e, that names r: the start runs what e's run or create made.
-// One taken before e is not (docker start db || docker run --name db).
-func (b *Book) startNaming(e *entry, r resource) *entry {
-	for _, st := range unlabelled(b.open) {
-		if isStart(st.Command) && st.Worktree == e.Worktree && st.Created.After(e.Created) &&
-			st.waitsFor() == "container" && st.takes(r) && st.names(r, false) {
-			return st
-		}
-	}
-	return nil
-}
-
-// unlabelled leaves out the leases of labelled calls: their container
-// carries their ID, so only labelledLease binds it, never a guess.
-func unlabelled(es []*entry) []*entry {
-	var out []*entry
+	var best *entry
 	for _, e := range es {
-		if !e.labelled {
-			out = append(out, e)
+		if e.key(r, based) && (best == nil || rank(e) < rank(best)) {
+			best = e
 		}
 	}
-	return out
+	return best
 }
 
-// lapsedFor reports whether a lapsed lease is r's, and spends it: one its
-// call names, or else one of r's own worktree.
-func (b *Book) lapsedFor(r resource) bool {
-	lapsed := unlabelled(b.lapsed)
-	i := slices.IndexFunc(lapsed, func(e *entry) bool { return e.waitsFor() == r.kind && e.takes(r) && e.names(r, true) })
-	if i < 0 {
-		i = slices.IndexFunc(lapsed, func(e *entry) bool {
-			return e.waitsFor() == r.kind && e.takes(r) && r.worktree != "" && e.Worktree == r.worktree && !e.namesOther(r)
-		})
+// key reports whether r is the resource e's call started.
+func (e *entry) key(r resource, based bool) bool {
+	switch {
+	case r.kind == "vm":
+		// A tart run's VM: the one its tart run process runs, whatever the
+		// shim guessed its OS to be, else by its name.
+		if e.Kind != "tart" || len(e.bound) > 0 {
+			return false
+		}
+		return e.pid > 0 && e.pid == r.runPID || based && e.takes(r) && e.target != "" && e.target == r.name
+	case e.labelled:
+		// A run's or create's container carries its lease's ID; Compose may
+		// have labelled it a project's too (a --label on run).
+		return r.lease == e.ID && len(e.bound) == 0
+	case e.Kind == "compose" && r.kind == "compose":
+		switch {
+		case e.project != "":
+			return based && e.project == r.project // -p, or locked by its first container
+		case e.composeDir != "":
+			return based && r.dir != "" && sameDir(e.composeDir, r.dir)
+		}
+		return false
+	case e.Kind != "container" || len(e.bound) > 0:
+		return false
+	case e.containerID != "":
+		return r.id == e.containerID
+	case e.name != "":
+		return based && e.name == r.name // a run checked with headroom check --name
+	case e.target != "":
+		return based && (e.target == r.name || e.target == r.id) // a start Docker could not resolve
 	}
-	if i < 0 {
+	return false
+}
+
+// lapsedFor reports whether a lapsed lease is r's (its key matches), and
+// spends it.
+func (b *Book) lapsedFor(r resource) bool {
+	e := keyed(b.lapsed, r, true)
+	if e == nil {
 		return false
 	}
-	spent := lapsed[i]
-	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return e == spent })
+	b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })
 	return true
+}
+
+// sameDir reports whether two paths name one directory, symlinks resolved.
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
 }
 
 // judge records how r started.
@@ -634,110 +612,12 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	return v
 }
 
-// named finds the open lease whose call names r, live ones first: it is
-// r's, whatever the worktrees say. Without a baseline (ownOnly) only an
-// exact --name, or a lease of r's own worktree, names it.
-func (b *Book) named(r resource, now time.Time, ownOnly, loose bool) *entry {
-	for _, live := range []bool{true, false} {
-		var other *entry
-		for _, e := range unlabelled(b.open) {
-			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) || !e.names(r, loose) {
-				continue
-			}
-			own := r.worktree != "" && e.Worktree == r.worktree
-			exact := e.name != "" && e.name == r.name
-			switch {
-			case own || exact:
-				return e // r's own worktree's lease before another's
-			case !ownOnly && other == nil:
-				other = e
-			}
-		}
-		if other != nil {
-			return other
-		}
-	}
-	return nil
-}
-
 // bind makes r one of e's resources.
 func (e *entry) bind(r resource) {
 	e.bound[r.key] = true
 	if e.Kind == "compose" && e.project == "" {
 		e.project = r.project
 	}
-}
-
-// names reports whether e's call names r: its --name, its container
-// (start), its VM or its compose project; loose also takes a start's ID
-// prefix and a run's image.
-func (e *entry) names(r resource, loose bool) bool {
-	switch {
-	case r.kind == "vm":
-		return e.target != "" && e.target == r.name
-	case r.kind == "compose":
-		return e.project != "" && e.project == r.project // -p, or its first container's
-	case e.name != "":
-		return e.name == r.name
-	case e.target == "":
-		return false
-	}
-	if e.target == r.name {
-		return true
-	}
-	if !loose {
-		return false
-	}
-	if isStart(e.Command) {
-		// docker start takes a container's ID, or a unique prefix of it.
-		id := strings.TrimPrefix(r.key, "container:")
-		return strings.HasPrefix(id, e.target)
-	}
-	// An image is no name: only in the lease's own worktree, or where the
-	// worktree is unknown, does it say the container is the call's.
-	ownSide := e.Worktree == "" || r.worktree == "" || e.Worktree == r.worktree
-	return ownSide && sameImage(e.target, r.image)
-}
-
-// isStart reports whether a call summary is a docker or podman start or
-// restart, whose target is a container rather than an image.
-func isStart(command string) bool { return isOp(command, "start") || isOp(command, "restart") }
-
-// isOp reports whether a call summary ("docker container create db") is
-// of subcommand op.
-func isOp(command, op string) bool {
-	w := strings.Fields(command)
-	if len(w) > 2 && w[1] == "container" {
-		w = w[1:]
-	}
-	return len(w) > 1 && w[1] == op
-}
-
-// namesOther reports whether e's call names a different container: a
-// --name is exact. An image is not (mirrors, digests), so it only orders.
-func (e *entry) namesOther(r resource) bool {
-	return r.kind == "container" && e.name != "" && e.name != r.name
-}
-
-// sameImage reports whether two image references name the same image, as
-// Docker reads a short one: docker.io/library/ and :latest are implied.
-func sameImage(a, b string) bool {
-	norm := func(s string) string {
-		for _, p := range []string{"docker.io/", "index.docker.io/", "localhost/", "library/"} {
-			s = strings.TrimPrefix(s, p) // podman lists local images as localhost/
-		}
-		if i := strings.LastIndex(s, "/"); !strings.Contains(s[i+1:], ":") && !strings.Contains(s, "@") {
-			s += ":latest"
-		}
-		return s
-	}
-	if a == "" || b == "" {
-		return false
-	}
-	// The same repository and tag under another registry (podman's
-	// unqualified search: myimg runs as quay.io/org/myimg).
-	base := func(s string) string { return s[strings.LastIndex(s, "/")+1:] }
-	return norm(a) == norm(b) || base(norm(a)) == base(norm(b))
 }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.

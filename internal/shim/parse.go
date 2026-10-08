@@ -2,6 +2,7 @@ package shim
 
 import (
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -21,6 +22,10 @@ type Call struct {
 	// Target is the image, container, compose project (-p) or VM; "" if
 	// unknown. It is the raw argument: use Command for anything shown.
 	Target string
+	// ComposeDir is a compose call's project directory as given:
+	// --project-directory, else the first -f file's directory; "" for the
+	// working directory. Compose labels each container with it (#33).
+	ComposeDir string
 	// Name is the container name given with --name, for run and create;
 	// "" if none. With Target it lets the daemon tell the call's container
 	// from others that appear at the same time (#33).
@@ -142,12 +147,18 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
-	var project string
+	var project, projectDir, file string
 	dryRun, noUp := false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
 			project = v
+		case "--project-directory":
+			projectDir = v
+		case "-f", "--file":
+			if file == "" {
+				file = v // the first file's directory is the project's
+			}
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		}
@@ -167,6 +178,16 @@ func parseCompose(endpoint string, words, args []string) Call {
 			project = v
 		}
 		switch f {
+		case "--project-directory":
+			projectDir = v
+		case "--file":
+			if file == "" {
+				file = v
+			}
+		case "-f":
+			if file == "" && op != "run" && op != "restart" {
+				file = v // some commands' own -f is something else
+			}
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		case "--no-up":
@@ -182,7 +203,10 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
-	c := Call{Kind: "compose", Op: op, Target: project, Endpoint: endpoint}
+	if projectDir == "" && file != "" && file != "-" {
+		projectDir = filepath.Dir(file)
+	}
+	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

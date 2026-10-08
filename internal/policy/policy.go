@@ -86,6 +86,13 @@ type Request struct {
 	Target, Name string
 	// Labelled means the container will carry the lease's ID (#33).
 	Labelled bool
+	// ContainerID is a start's container as Docker resolved it, and
+	// TakesOver the lease of the run or create that made it (its label),
+	// which this call's lease replaces (#33).
+	ContainerID, TakesOver string
+	// ComposeDir is a compose call's project directory, its lease's key
+	// when it names no project (#33).
+	ComposeDir string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

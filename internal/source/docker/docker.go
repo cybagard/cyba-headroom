@@ -247,3 +247,21 @@ func (r reading) Apply(s *protocol.Snapshot) {
 	d := r.d
 	s.Docker = &d
 }
+
+// Inspect resolves a container name, ID or ID prefix to its full ID and
+// labels, as Docker resolves the target of a docker start (#33).
+func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, error) {
+	if ref == "" || strings.ContainsAny(ref, "/?#%") {
+		return "", nil, fmt.Errorf("docker: not a container reference: %q", ref)
+	}
+	var c struct {
+		ID     string `json:"Id"`
+		Config struct {
+			Labels map[string]string
+		}
+	}
+	if err := s.get(ctx, "/containers/"+ref+"/json", &c); err != nil {
+		return "", nil, err
+	}
+	return c.ID, c.Config.Labels, nil
+}

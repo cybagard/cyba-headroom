@@ -36,7 +36,8 @@ func TestParse(t *testing.T) {
 		{"docker run -m= alpine true", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -m=1g alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", MemoryBytes: g}},
 		{"docker run --help=false alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
-		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db"}},
+		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db", MultiTarget: true}},
+		{"docker compose --env-file ops/.env up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeEnvFile: "ops/.env"}},
 		{"podman run --pod p1 --creds u:pw alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine"}},
 		// An unknown flag: still gated, but the image is a guess, so none.
 		{"docker run --future-flag x alpine", Call{Kind: "container", Op: "run", Command: "docker run"}},

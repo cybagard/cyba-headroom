@@ -128,7 +128,7 @@ func TestRestartingARunningContainerTakesNoLease(t *testing.T) {
 	b, _, _ := book(t)
 	s := addContainer(snap(), protocol.Container{ID: "C", Name: "c", MemoryBytes: 2 * gib}, "w1")
 	b.Observe(s)
-	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker restart c", CostBytes: gib, Target: "c", ContainerID: "C"}, s, cfg)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker restart c", CostBytes: gib, Target: "c", ContainerID: "C", Running: true}, s, cfg)
 	if !d.Allow || d.LeaseID != "" || len(b.List()) != 0 {
 		t.Fatalf("decision %+v, leases %+v", d, b.List())
 	}
@@ -173,5 +173,87 @@ func TestANamedProjectBeatsADirectoryKey(t *testing.T) {
 	b.Observe(ctr(ctr(snap(), "o1", "other"), "r1", "repo"))
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("logged: %s", log)
+	}
+}
+
+// A manual call does not take a worktree's lease over: it reserves
+// nothing, and the worktree's reservation must stand.
+func TestAManualCallTakesNoWorktreeLeaseOver(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 4 * gib, Target: "p"}, snap(), cfg)
+	cr := labelled("w1", "pg")
+	cr.Command, cr.CostBytes = "docker create pg", 2*gib
+	created := b.Check(cr, snap(), cfg)
+	b.Check(policy.Request{Kind: "compose", Command: "docker compose up", Target: "p"}, snap(), cfg)
+	b.Check(policy.Request{Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db1", TakesOver: created.LeaseID}, snap(), cfg)
+	if r := reserved(b); r != 6*gib {
+		t.Fatalf("reserved %d GiB, want the worktree's 6", r>>30)
+	}
+}
+
+// Whether the container runs is Docker's answer at the check, not a
+// snapshot's: docker stop db && docker start db within one tick.
+func TestAStartOfAContainerDockerSaysIsStoppedTakesALease(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "C", Name: "db", MemoryBytes: gib}, "w1")
+	b.Observe(s) // still lists db: stopped since
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db", ContainerID: "C"}, s, cfg)
+	if d.LeaseID == "" {
+		t.Fatalf("no lease: %+v", d)
+	}
+	d = b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db", ContainerID: "C", Running: true}, s, cfg)
+	if d.LeaseID != "" {
+		t.Fatalf("a lease for a running container: %+v", d)
+	}
+	d = b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db", ContainerID: "C", Running: true, MultiTarget: true}, s, cfg)
+	if d.LeaseID == "" {
+		t.Fatalf("docker start db other: the others may be stopped, want a lease: %+v", d)
+	}
+}
+
+// A lease that took another over, released because its call failed, gives
+// the other back.
+func TestReleaseGivesATakenOverLeaseBack(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 6 * gib, Target: "p"}, snap(), cfg)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "p"}, snap(), cfg)
+	if !b.Release(d.LeaseID) {
+		t.Fatal("release failed")
+	}
+	if r := reserved(b); r != 6*gib {
+		t.Fatalf("reserved %d GiB, want the first call's 6 back", r>>30)
+	}
+}
+
+// A later service counts as gated only for the same project from the same
+// directory: another stack that happens to share the name does not.
+func TestAGatedProjectIsKeyedByItsDirectory(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	ctr := func(s *protocol.Snapshot, id, dir string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: 2 * gib,
+			Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: dir}}, "")
+	}
+	b.Observe(ctr(snap(), "x1", "/repo-x"))
+	c.t = c.t.Add(time.Minute)
+	b.Observe(ctr(ctr(snap(), "x1", "/repo-x"), "y1", "/repo-y")) // another app, past the shim
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:y1" {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// docker stop db && docker start db within one tick: db never leaves the
+// snapshot, yet the start's lease binds it by its ID.
+func TestALeaseKeyedByIDBindsAContainerThatNeverLeft(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "C", Name: "db", MemoryBytes: gib / 2}, "w1")
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db", ContainerID: "C"}, s, cfg)
+	b.Observe(s)
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want the start's bound to db", l)
 	}
 }

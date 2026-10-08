@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -600,5 +602,86 @@ func TestComposeKeyFindsTheProjectAsComposeDoes(t *testing.T) {
 	gone := func() (string, error) { return "", os.ErrNotExist }
 	if _, d := composeKey(shim.Call{ComposeDir: "/srv/app"}, func(string) string { return "" }, gone); d != "/srv/app" {
 		t.Fatalf("dir = %q", d)
+	}
+}
+
+func TestComposeKeyReadsDotEnvAsComposeDoes(t *testing.T) {
+	root := t.TempDir()
+	wd := func() (string, error) { return root, nil }
+	none := func(string) string { return "" }
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".env", "export COMPOSE_PROJECT_NAME=app  # dev stack\n")
+	if p, _ := composeKey(shim.Call{}, none, wd); p != "app" {
+		t.Fatalf("project = %q, want app", p)
+	}
+	write(".env", "COMPOSE_FILE=docker/compose.yml\n")
+	if p, d := composeKey(shim.Call{}, none, wd); p != "" || d != filepath.Join(root, "docker") {
+		t.Fatalf("composeKey = %q, %q; want the file's directory", p, d)
+	}
+	write("ops/prod.env", "COMPOSE_PROJECT_NAME=prod\n")
+	if p, _ := composeKey(shim.Call{ComposeEnvFile: "ops/prod.env"}, none, wd); p != "prod" {
+		t.Fatalf("project = %q, want prod from --env-file", p)
+	}
+}
+
+func TestDefaultEngineHonoursTheCurrentContext(t *testing.T) {
+	dir := t.TempDir()
+	const sock = "/Users/dev/.docker/run/docker.sock"
+	env := map[string]string{"DOCKER_CONFIG": dir}
+	get := func(k string) string { return env[k] }
+	context := func(name, host string) {
+		t.Helper()
+		sum := sha256.Sum256([]byte(name))
+		meta := filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"Name":"` + name + `","Endpoints":{"docker":{"Host":"` + host + `"}}}`
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	use := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"currentContext":"`+name+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !defaultEngine(get, sock) {
+		t.Fatal("no config: the default engine")
+	}
+	context("desktop-linux", "unix://"+sock)
+	use("desktop-linux")
+	if !defaultEngine(get, sock) {
+		t.Fatal("Docker Desktop's context is the daemon's socket")
+	}
+	context("colima", "unix:///Users/dev/.colima/default/docker.sock")
+	use("colima")
+	if defaultEngine(get, sock) {
+		t.Fatal("docker context use colima: another engine")
+	}
+	use("missing")
+	if defaultEngine(get, sock) {
+		t.Fatal("a context with no metadata: cannot tell")
+	}
+	env["DOCKER_CONTEXT"] = "desktop-linux"
+	if !defaultEngine(get, sock) {
+		t.Fatal("DOCKER_CONTEXT=desktop-linux: the daemon's socket")
+	}
+	env["DOCKER_HOST"] = "unix://" + sock
+	if !defaultEngine(get, sock) {
+		t.Fatal("DOCKER_HOST at the daemon's socket")
+	}
+	env["DOCKER_HOST"] = "unix:///x.sock"
+	if defaultEngine(get, sock) {
+		t.Fatal("DOCKER_HOST elsewhere: not the default engine")
 	}
 }

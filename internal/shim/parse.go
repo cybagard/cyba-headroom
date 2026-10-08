@@ -22,6 +22,12 @@ type Call struct {
 	// Target is the image, container, compose project (-p) or VM; "" if
 	// unknown. It is the raw argument: use Command for anything shown.
 	Target string
+	// MultiTarget is set for a start or restart of several containers:
+	// Target is only the first.
+	MultiTarget bool
+	// ComposeEnvFile is a compose call's --env-file, which Compose reads
+	// instead of the project's .env.
+	ComposeEnvFile string
 	// ComposeDir is a compose call's project directory as given:
 	// --project-directory, else the first -f file's directory; "" for the
 	// working directory. Compose labels each container with it (#33).
@@ -125,6 +131,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	}
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
+		c.MultiTarget = (c.Op == "start" || c.Op == "restart") && len(pos) > 1
 	}
 	return c.named(append(words, c.Op)), at
 }
@@ -147,7 +154,7 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
-	var project, projectDir, file string
+	var project, projectDir, file, envFile string
 	dryRun, noUp := false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
@@ -155,6 +162,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 			project = v
 		case "--project-directory":
 			projectDir = v
+		case "--env-file":
+			envFile = v
 		case "-f", "--file":
 			if file == "" {
 				file = v // the first file's directory is the project's
@@ -180,6 +189,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 		switch f {
 		case "--project-directory":
 			projectDir = v
+		case "--env-file":
+			envFile = v
 		case "--file":
 			if file == "" {
 				file = v
@@ -206,7 +217,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if projectDir == "" && file != "" && file != "-" {
 		projectDir = filepath.Dir(file)
 	}
-	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, Endpoint: endpoint}
+	c := Call{Kind: "compose", Op: op, Target: project, ComposeDir: projectDir, ComposeEnvFile: envFile, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

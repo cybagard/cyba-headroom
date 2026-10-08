@@ -75,6 +75,8 @@ type CheckRequest struct {
 	// reads (no --context, -H, DOCKER_HOST or DOCKER_CONTEXT): only then
 	// does the daemon look a start's container up there.
 	DefaultEngine bool `json:"default_engine,omitempty"`
+	// MultiTarget is set for a start or restart of several containers.
+	MultiTarget bool `json:"multi_target,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

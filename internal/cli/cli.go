@@ -454,55 +454,16 @@ func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
 // Inspector resolves a container name or ID to its full ID and labels:
 // the Docker source.
 type Inspector interface {
-	Inspect(ctx context.Context, ref string) (id string, labels map[string]string, err error)
+	Inspect(ctx context.Context, ref string) (id string, labels map[string]string, running bool, err error)
 }
 
 // inspectTimeout bounds the Docker lookup a start's check makes: well within
 // the shim's daemon timeout.
 const inspectTimeout = 200 * time.Millisecond
 
-// inspectCache keeps Docker's answers for a moment: a BUDGET_WAIT call
-// asks again every few seconds, and need not ask Docker each time.
-type inspectCache struct {
-	mu sync.Mutex
-	at map[string]inspected
-}
-
-type inspected struct {
-	id     string
-	labels map[string]string
-	ok     bool
-	when   time.Time
-}
-
-const inspectTTL = 2 * time.Second
-
-func (c *inspectCache) get(docker Inspector, ref string) (string, map[string]string, bool) {
-	c.mu.Lock()
-	if v, hit := c.at[ref]; hit && time.Since(v.when) < inspectTTL {
-		c.mu.Unlock()
-		return v.id, v.labels, v.ok
-	}
-	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
-	defer cancel()
-	id, labels, err := docker.Inspect(ctx, ref)
-	v := inspected{id: id, labels: labels, ok: err == nil, when: time.Now()}
-	c.mu.Lock()
-	for k, old := range c.at {
-		if time.Since(old.when) >= inspectTTL {
-			delete(c.at, k)
-		}
-	}
-	c.at[ref] = v
-	c.mu.Unlock()
-	return v.id, v.labels, v.ok
-}
-
 // gateCheck answers a check: it finds the calling worktree (#28), then
 // decides with the lease book.
 func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.CheckFunc {
-	looked := &inspectCache{at: map[string]inspected{}}
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
@@ -518,9 +479,14 @@ func gateCheck(book *lease.Book, pol policy.Config, docker Inspector) daemon.Che
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.DefaultEngine && r.Target != "" && docker != nil {
 			// The container exists: its ID is the lease's key, and a lease
 			// label on it names the run or create this start takes over.
-			if cid, labels, ok := looked.get(docker, r.Target); ok {
-				req.ContainerID, req.TakesOver = cid, labels[protocol.LeaseLabel]
+			// Asked afresh every check: whether it runs changes by the
+			// second (docker stop && docker start).
+			ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+			if cid, labels, running, err := docker.Inspect(ctx, r.Target); err == nil {
+				req.ContainerID, req.TakesOver, req.Running = cid, labels[protocol.LeaseLabel], running
+				req.MultiTarget = r.MultiTarget
 			}
+			cancel()
 		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by

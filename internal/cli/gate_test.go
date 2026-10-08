@@ -131,12 +131,12 @@ type fakeInspector map[string]struct {
 	labels map[string]string
 }
 
-func (f fakeInspector) Inspect(_ context.Context, ref string) (string, map[string]string, error) {
+func (f fakeInspector) Inspect(_ context.Context, ref string) (string, map[string]string, bool, error) {
 	c, ok := f[ref]
 	if !ok {
-		return "", nil, errors.New("no such container")
+		return "", nil, false, errors.New("no such container")
 	}
-	return c.id, c.labels, nil
+	return c.id, c.labels, false, nil
 }
 
 // A start's lease is keyed by the container Docker resolves, and takes over
@@ -173,5 +173,30 @@ func TestGateLooksUpOnlyDockerStarts(t *testing.T) {
 	gateCheck(book, pol, insp)(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "podman start db", Target: "db"}, s)
 	if len(book.List()) != 2 {
 		t.Fatalf("podman's start took over docker's create: %+v", book.List())
+	}
+}
+
+type flipInspector struct{ running *bool }
+
+func (f flipInspector) Inspect(context.Context, string) (string, map[string]string, bool, error) {
+	return "C", nil, *f.running, nil
+}
+
+// docker restart db, docker stop db, docker start db within a moment: each
+// check asks Docker afresh, so the start sees db stopped and takes a lease.
+func TestGateAsksDockerEveryCheck(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	pol := config.Defaults("/x").PolicyConfig()
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	running := true
+	check := gateCheck(book, pol, flipInspector{&running})
+	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "restart", Command: "docker restart db", Target: "db", DefaultEngine: true}, s); d.LeaseID != "" {
+		t.Fatalf("restart of a running container leased: %+v", d)
+	}
+	running = false // docker stop db
+	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", DefaultEngine: true}, s); d.LeaseID == "" {
+		t.Fatalf("start of a stopped container took no lease: %+v", d)
 	}
 }

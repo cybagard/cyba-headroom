@@ -90,6 +90,9 @@ type Request struct {
 	// TakesOver the lease of the run or create that made it (its label),
 	// which this call's lease replaces (#33).
 	ContainerID, TakesOver string
+	// Running is Docker's word that a start's container already runs, and
+	// MultiTarget that the start names others too.
+	Running, MultiTarget bool
 	// ComposeDirs is a compose call's project directory, as given and with
 	// symlinks resolved: its lease's key when it names no project (#33).
 	ComposeDirs []string

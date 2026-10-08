@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -105,7 +108,8 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	req.DefaultEngine = name == "docker" && c.Endpoint == "" && getenv("DOCKER_HOST") == "" && getenv("DOCKER_CONTEXT") == ""
+	req.DefaultEngine = name == "docker" && c.Endpoint == "" && defaultEngine(getenv, cfg.Docker.Socket)
+	req.MultiTarget = c.MultiTarget
 	if c.Kind == "compose" {
 		req.Target, req.ComposeDir = composeKey(c, getenv, h.getwd)
 		if req.Target != "" {
@@ -231,14 +235,26 @@ func composeKey(c shim.Call, getenv func(string) string, getwd func() (string, e
 		return project, "" // no working directory to resolve against
 	}
 	if dir == "" && file == "" {
+		// The project's .env (or --env-file instead) may name the project
+		// and its compose file, whose directory is then the project's.
 		dir = findComposeDir(cwd)
-		env := dotEnv(filepath.Join(dir, ".env"))
+		envFile := filepath.Join(dir, ".env")
+		if c.ComposeEnvFile != "" {
+			envFile = c.ComposeEnvFile
+			if !filepath.IsAbs(envFile) {
+				envFile = filepath.Join(cwd, envFile)
+			}
+		}
+		env := dotEnv(envFile)
 		if project == "" {
 			project = env["COMPOSE_PROJECT_NAME"]
 		}
-		file = env["COMPOSE_FILE"]
-		if file != "" && !filepath.IsAbs(file) {
-			file = filepath.Join(dir, file)
+		if f := env["COMPOSE_FILE"]; f != "" {
+			f, _, _ = strings.Cut(f, string(filepath.ListSeparator))
+			if !filepath.IsAbs(f) {
+				f = filepath.Join(dir, f)
+			}
+			dir = filepath.Dir(f)
 		}
 	}
 	if dir == "" {
@@ -271,8 +287,9 @@ func findComposeDir(dir string) string {
 	}
 }
 
-// dotEnv reads the COMPOSE_ settings of a .env file: KEY=VALUE lines,
-// optionally quoted. A missing file is empty.
+// dotEnv reads the COMPOSE_ settings of a .env file as Compose does:
+// KEY=VALUE lines, an optional "export ", a quoted value as is, an
+// unquoted one up to an inline " #" comment. A missing file is empty.
 func dotEnv(path string) map[string]string {
 	out := map[string]string{}
 	b, err := os.ReadFile(path)
@@ -280,13 +297,79 @@ func dotEnv(path string) map[string]string {
 		return out
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		line = strings.TrimPrefix(strings.TrimSpace(line), "export ")
+		k, v, ok := strings.Cut(line, "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		if !ok || !strings.HasPrefix(k, "COMPOSE_") {
 			continue
 		}
-		out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+		switch {
+		case len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && strings.IndexByte(v[1:], v[0]) >= 0:
+			v = v[1 : 1+strings.IndexByte(v[1:], v[0])]
+		default:
+			if i := strings.Index(v, " #"); i >= 0 {
+				v = strings.TrimSpace(v[:i])
+			}
+		}
+		out[k] = v
 	}
 	return out
+}
+
+// defaultEngine reports whether docker talks to the engine the daemon
+// reads, at socket: DOCKER_HOST, else the context (DOCKER_CONTEXT, else
+// the config's currentContext, as docker context use sets it) must point
+// there. Docker Desktop's context, desktop-linux, does; colima's does not.
+func defaultEngine(getenv func(string) string, socket string) bool {
+	if h := getenv("DOCKER_HOST"); h != "" {
+		return sameSocket(h, socket)
+	}
+	dir := getenv("DOCKER_CONFIG")
+	if dir == "" {
+		dir = filepath.Join(getenv("HOME"), ".docker")
+	}
+	if !filepath.IsAbs(dir) {
+		return false // cannot tell
+	}
+	name := getenv("DOCKER_CONTEXT")
+	if name == "" {
+		var cfg struct {
+			CurrentContext string `json:"currentContext"`
+		}
+		if b, err := os.ReadFile(filepath.Join(dir, "config.json")); err == nil && json.Unmarshal(b, &cfg) != nil {
+			return false
+		}
+		name = cfg.CurrentContext
+	}
+	if name == "" || name == "default" {
+		return true // the built-in context: DOCKER_HOST or the default socket
+	}
+	sum := sha256.Sum256([]byte(name))
+	b, err := os.ReadFile(filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]), "meta.json"))
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Endpoints map[string]struct{ Host string }
+	}
+	if json.Unmarshal(b, &meta) != nil {
+		return false
+	}
+	return sameSocket(meta.Endpoints["docker"].Host, socket)
+}
+
+// sameSocket reports whether a Docker endpoint (unix://path) is socket.
+func sameSocket(endpoint, socket string) bool {
+	p, ok := strings.CutPrefix(endpoint, "unix://")
+	if !ok || socket == "" {
+		return false
+	}
+	if filepath.Clean(p) == filepath.Clean(socket) {
+		return true
+	}
+	a, err1 := filepath.EvalSymlinks(p)
+	b, err2 := filepath.EvalSymlinks(socket)
+	return err1 == nil && err2 == nil && a == b
 }
 
 // notGated warns, in one line, that a call runs without a check (R7).

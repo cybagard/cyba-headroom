@@ -110,7 +110,10 @@ type entry struct {
 	// it, or a tart run's VM. composeDir: a compose call's project
 	// directories, when it names no project: as given and with symlinks
 	// resolved, both cleaned, so matching a label needs no filesystem call.
-	labelled    bool
+	labelled bool
+	// took are the leases this one took over at its check: a release
+	// (its call did not start) gives them back.
+	took        []*entry
 	containerID string
 	name        string
 	target      string
@@ -127,9 +130,10 @@ const (
 type verdict struct {
 	how     int
 	u       protocol.Ungated // for ungated: what the snapshot lists
-	project string           // a compose container's project
-	last    time.Time        // last in a reading
-	present bool             // in the latest reading (or a failed read kept it)
+	project string           // a compose container's project, and its directory
+	dir     string
+	last    time.Time // last in a reading
+	present bool      // in the latest reading (or a failed read kept it)
 }
 
 // reserved is what the lease still holds back: its cost less what its
@@ -209,9 +213,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// for or holds (compose stop, then up): this call's lease takes that
 		// one over, with its containers, and keeps the larger cost.
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
-			if o.Kind != "compose" || !e.sameKey(o) {
-				return false
+			if o.Kind != "compose" || !e.sameKey(o) || r.Worktree == "" && o.Worktree != "" {
+				return false // a manual call reserves nothing: it takes no worktree's lease
 			}
+			e.took = append(e.took, o)
 			e.cost, e.used = max(e.cost, o.cost), o.used
 			for k := range o.bound {
 				e.bound[k] = true
@@ -220,9 +225,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			return true
 		})
 	}
-	if r.ContainerID != "" && s != nil && slices.ContainsFunc(resources(s), func(x resource) bool { return x.id == r.ContainerID }) {
-		// A start or restart of a container that runs: it starts nothing
-		// new, and the container already counts. No lease.
+	if r.ContainerID != "" && r.Running && !r.MultiTarget {
+		// A start or restart of a container Docker says runs: it starts
+		// nothing new, and the container already counts. No lease.
 		return d
 	}
 	if r.TakesOver != "" {
@@ -230,11 +235,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// yet: that lease ends here, and this one keeps the larger cost.
 		for _, list := range []*[]*entry{&b.open, &b.lapsed} {
 			*list = slices.DeleteFunc(*list, func(o *entry) bool {
-				if o.ID != r.TakesOver || !o.labelled || len(o.bound) > 0 {
+				if o.ID != r.TakesOver || !o.labelled || len(o.bound) > 0 || r.Worktree == "" && o.Worktree != "" {
 					return false
 				}
 				if list == &b.open {
 					e.cost = max(e.cost, o.cost)
+					e.took = append(e.took, o)
 				}
 				b.log.Debug("lease ended: its container was started by a later call", "lease", o.ID, "by", e.ID)
 				return true
@@ -350,9 +356,23 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	dockerSettling := !b.dockerUp.IsZero() && now.Sub(b.dockerUp) < dockerSettle
 	present := map[string]uint64{}
-	var fresh []resource // new this tick, and bound to no lease yet
 	for _, r := range res {
 		present[r.key] = r.bytes
+	}
+	// A start keyed by its container's ID binds it whenever it is there,
+	// new or not: docker stop && docker start within a tick never leaves
+	// the snapshot. The key is exact, so nothing is guessed.
+	for _, e := range b.open {
+		if e.containerID == "" || len(e.bound) > 0 {
+			continue
+		}
+		if i := slices.IndexFunc(res, func(r resource) bool { return r.id == e.containerID && !b.boundAnywhere(r.key) }); i >= 0 {
+			e.bind(res[i])
+			b.judge(res[i], gated, now)
+		}
+	}
+	var fresh []resource // new this tick, and bound to no lease yet
+	for _, r := range res {
 		if !b.prev[r.key] && !b.boundAnywhere(r.key) {
 			fresh = append(fresh, r)
 		}
@@ -371,10 +391,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	// Compose projects running containers whose call was checked: a later
 	// service (depends_on, a slow healthcheck) belongs to the same call.
+	// A project is its name and its directory: another stack may share
+	// the name.
 	gatedProject := map[string]bool{}
 	for _, r := range res {
 		if v := b.verdicts[r.key]; r.kind == "compose" && v != nil && v.how == gated {
-			gatedProject[r.project] = true
+			gatedProject[r.project+"\x00"+r.dir] = true
 		}
 	}
 	for _, r := range unbound {
@@ -385,7 +407,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			// A VM run again is a new run.
 		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
 			b.judge(r, baseline, now) // it may have been there before
-		case r.kind == "compose" && gatedProject[r.project] || b.lapsedFor(r):
+		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r):
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
@@ -611,7 +633,7 @@ func (e *entry) sameKey(o *entry) bool {
 
 // judge records how r started.
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
-	v := &verdict{how: how, project: r.project, last: now, present: true,
+	v := &verdict{how: how, project: r.project, dir: r.dir, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
 	b.verdicts[r.key] = v
 	return v
@@ -656,11 +678,16 @@ func (b *Book) Ungated() []protocol.Ungated {
 func (b *Book) Release(id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	n := len(b.open)
-	b.open = slices.DeleteFunc(b.open, func(e *entry) bool { return e.ID == id })
-	if len(b.open) == n {
+	i := slices.IndexFunc(b.open, func(e *entry) bool { return e.ID == id })
+	if i < 0 {
 		return false
 	}
+	e := b.open[i]
+	b.open = slices.Delete(b.open, i, i+1)
+	// The leases it took over at its check are theirs again: this call
+	// started nothing.
+	b.open = append(b.open, e.took...)
+	slices.SortStableFunc(b.open, func(a, b *entry) int { return a.Created.Compare(b.Created) })
 	b.log.Debug("lease released: its call did not start", "lease", id)
 	return true
 }

@@ -39,7 +39,10 @@ func TestEndpoint(t *testing.T) {
 		{"", "https://ollama.example.com", "", false},
 		{"", "ftp://127.0.0.1", "", false},
 		{"", "http://someone@127.0.0.1", "", false},
-		{"", "127.0.0.1:notaport", "", false},
+		// An empty or invalid port is Ollama's default, as Ollama reads it.
+		{"", "localhost:", "http://localhost:11434", true},
+		{"", "127.0.0.1:notaport", "http://127.0.0.1:11434", true},
+		{"", "127.0.0.1:99999", "http://127.0.0.1:11434", true},
 		{"", "127.0.0.1:0", "", false},
 	} {
 		got, ok := ollama.Endpoint(tc.configured, tc.env)
@@ -80,6 +83,16 @@ func TestHTTPFailures(t *testing.T) {
 				t.Fatal("want error")
 			}
 		})
+	}
+}
+
+func TestHTTPLiteralDoesNotPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer srv.Close()
+	if _, err := (&ollama.HTTP{Base: srv.URL}).PS(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

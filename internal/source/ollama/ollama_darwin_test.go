@@ -19,7 +19,7 @@ func TestRealOllama(t *testing.T) {
 	}
 	api := ollama.NewHTTP(base)
 	installed := ollama.Installed("", os.Getenv, ollama.Locations)
-	got := collect(t, ollama.New(api, vmproc.Host{}, installed))
+	got := collect(t, ollama.New(api, vmproc.Host{}, func() bool { return installed }))
 	if !got.Running {
 		if !installed {
 			t.Skip("Ollama not installed")

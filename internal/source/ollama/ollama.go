@@ -34,12 +34,12 @@ type Procs interface {
 type Source struct {
 	api       API
 	procs     Procs
-	installed bool
+	installed func() bool
 }
 
-// New returns a source. A nil api means the configured endpoint is not on
-// this Mac, so the model list stays unknown.
-func New(api API, procs Procs, installed bool) *Source {
+// New returns a source. installed is asked each tick, so an install while
+// the daemon runs shows up.
+func New(api API, procs Procs, installed func() bool) *Source {
 	return &Source{api: api, procs: procs, installed: installed}
 }
 
@@ -48,59 +48,80 @@ func (s *Source) Name() string { return "ollama" }
 
 // Collect implements daemon.Source.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
-	o := protocol.Ollama{Installed: s.installed, Models: []protocol.OllamaModel{}}
-	tree, err := s.server()
+	o := protocol.Ollama{Installed: s.installed(), Models: []protocol.OllamaModel{}}
+	pids, err := s.servers()
 	if err != nil {
 		return nil, fmt.Errorf("ollama processes: %w", err)
 	}
-	if tree == nil {
+	if len(pids) == 0 {
 		return reading{o}, nil
 	}
 	o.Installed, o.Running = true, true
 
-	// The whole tree under the server: one runner per loaded model.
-	pids := make([]int, len(tree))
-	for i, p := range tree {
-		pids[i] = p.PID
-	}
 	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
 		o.FootprintError = err.Error()
 	} else {
 		o.FootprintBytes = &fp
 	}
-
-	if s.api == nil {
-		o.Models = nil
-		o.ModelsError = "the Ollama endpoint is not on this Mac"
-		return reading{o}, nil
-	}
-	out, err := s.api.PS(ctx)
+	// Without the model list the footprint still counts: the budget reserves
+	// it, so a server on a port headroom was not told about is not free.
+	models, err := s.models(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("ollama /api/ps: %w", err)
-	}
-	var ps struct{ Models []apiModel }
-	if err := json.Unmarshal(out, &ps); err != nil {
-		return nil, fmt.Errorf("ollama /api/ps: %w", err)
-	}
-	now := time.Now()
-	for _, m := range ps.Models {
-		o.Models = append(o.Models, m.toProtocol(now))
+		o.Models, o.ModelsError = nil, err.Error()
+	} else {
+		o.Models = models
 	}
 	return reading{o}, nil
 }
 
-// server returns the process tree of the running `ollama serve`, or nil.
-func (s *Source) server() ([]vmproc.Process, error) {
+func (s *Source) models(ctx context.Context) ([]protocol.OllamaModel, error) {
+	out, err := s.api.PS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("/api/ps: %w", err)
+	}
+	var ps struct{ Models []apiModel }
+	if err := json.Unmarshal(out, &ps); err != nil {
+		return nil, fmt.Errorf("/api/ps: %w", err)
+	}
+	now := time.Now()
+	models := []protocol.OllamaModel{}
+	for _, m := range ps.Models {
+		models = append(models, m.toProtocol(now))
+	}
+	return models, nil
+}
+
+// servers returns the pids of every running `ollama serve` and the
+// processes under it: one runner per loaded model. A server that exits
+// before its tree is read is not running.
+func (s *Source) servers() ([]int, error) {
 	procs, err := s.procs.ProcessesNamed("ollama")
 	if err != nil {
 		return nil, err
 	}
+	var pids []int
 	for _, p := range procs {
-		if len(p.Args) > 1 && p.Args[1] == "serve" {
-			return s.procs.Tree(p.PID)
+		if len(p.Args) < 2 || p.Args[1] != "serve" {
+			continue
+		}
+		tree, err := s.procs.Tree(p.PID)
+		if err != nil {
+			continue
+		}
+		for _, q := range tree {
+			pids = append(pids, q.PID)
 		}
 	}
-	return nil, nil
+	return pids, nil
+}
+
+// NotLocal is the API of an Ollama host that is not on this Mac: its
+// models do not use this Mac's memory, so it is never asked.
+type NotLocal struct{ Host string }
+
+// PS implements API.
+func (n NotLocal) PS(context.Context) ([]byte, error) {
+	return nil, fmt.Errorf("ollama host %q is not a loopback address; headroom does not ask it (set [ollama] host)", n.Host)
 }
 
 // apiModel is the part of an /api/ps entry headroom reads.

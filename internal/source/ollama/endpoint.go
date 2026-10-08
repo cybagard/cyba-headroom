@@ -84,8 +84,11 @@ func Endpoint(configured, ollamaHost string) (base string, ok bool) {
 	} else {
 		host = strings.Trim(host, "[]")
 	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return "", false
+	// Ollama falls back to its default for a port it cannot read.
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		port = defaultPort
+	} else if n == 0 {
+		return "", false // a random port: nothing to ask
 	}
 	switch ip := net.ParseIP(host); {
 	case host == "":
@@ -107,37 +110,36 @@ func Endpoint(configured, ollamaHost string) (base string, ok bool) {
 // maxPS caps the /api/ps response: a few models' entries are a few KB.
 const maxPS = 1 << 20
 
-// HTTP reads /api/ps from Ollama's API at Base.
+// client uses no proxy and follows no redirect: the API is on this Mac.
+var client = &http.Client{
+	Transport: &http.Transport{Proxy: nil},
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// HTTP reads /api/ps from Ollama's API at Base. A zero Timeout means 2 s.
 type HTTP struct {
 	Base    string
 	Timeout time.Duration
-	client  *http.Client
 }
 
-// NewHTTP returns a client for the API at base, as Endpoint returns it. It
-// uses no proxy and follows no redirect: the API is on this Mac.
-func NewHTTP(base string) *HTTP {
-	return &HTTP{
-		Base:    base,
-		Timeout: 2 * time.Second,
-		client: &http.Client{
-			Transport: &http.Transport{Proxy: nil},
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-	}
-}
+// NewHTTP returns a client for the API at base, as Endpoint returns it.
+func NewHTTP(base string) *HTTP { return &HTTP{Base: base, Timeout: 2 * time.Second} }
 
 // PS implements API.
 func (h *HTTP) PS(ctx context.Context) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, h.Timeout)
+	timeout := h.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.Base+"/api/ps", nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := h.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

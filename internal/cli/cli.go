@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -208,9 +209,8 @@ func runDaemon(e Env) int {
 	if p := lmstudio.Locate(cfg.LMStudio.Path, e.Getenv); p != "" {
 		lmsCLI = lmstudio.Exec{Path: p}
 	}
-	// A nil API leaves the models unknown: an endpoint that is not on this
-	// Mac is never contacted.
-	var ollamaAPI ollama.API
+	// An endpoint that is not on this Mac is never contacted.
+	var ollamaAPI ollama.API = ollama.NotLocal{Host: cmp.Or(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST"))}
 	if base, ok := ollama.Endpoint(cfg.Ollama.Host, e.Getenv("OLLAMA_HOST")); ok {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
@@ -220,7 +220,7 @@ func runDaemon(e Env) int {
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 		orca.New(orcaCLI),
 		lmstudio.New(lmsCLI, vmproc.Host{}, e.Getenv("HOME")),
-		ollama.New(ollamaAPI, vmproc.Host{}, ollama.Installed(cfg.Ollama.Path, e.Getenv, ollama.Locations)),
+		ollama.New(ollamaAPI, vmproc.Host{}, func() bool { return ollama.Installed(cfg.Ollama.Path, e.Getenv, ollama.Locations) }),
 	}
 	d, err := daemon.New(sources, cfg.Daemon.SourceTimeout.Duration, log)
 	if err != nil {

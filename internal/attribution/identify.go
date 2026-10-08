@@ -24,7 +24,7 @@ type Caller struct {
 // "" means a manual call. by says which of those decided.
 func Identify(s *protocol.Snapshot, c Caller) (id, by string) {
 	if c.Worktree != "" {
-		return c.Worktree, protocol.IdentifiedByEnv
+		return c.Worktree, protocol.IdentifiedByCaller
 	}
 	if s == nil || s.Orca == nil {
 		return "", ""

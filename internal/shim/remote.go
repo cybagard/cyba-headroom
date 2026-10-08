@@ -27,10 +27,24 @@ func Remote(name, endpoint string, getenv func(string) string) bool {
 	return !thisMac(u.Hostname())
 }
 
+// ownAddress reports whether ip is one of this machine's interface addresses.
+func ownAddress(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // thisMac reports whether host names this machine.
 func thisMac(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
+		return ip.IsLoopback() || ip.IsUnspecified() || ownAddress(ip)
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".local")
 	if host == "localhost" || host == "host.docker.internal" {

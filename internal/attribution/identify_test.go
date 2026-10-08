@@ -17,7 +17,7 @@ func TestIdentify(t *testing.T) {
 		in     Caller
 		id, by string
 	}{
-		{"env wins", Caller{Worktree: "repo::/elsewhere", Cwd: "/Users/dev/src/project-a"}, "repo::/elsewhere", protocol.IdentifiedByEnv},
+		{"env wins", Caller{Worktree: "repo::/elsewhere", Cwd: "/Users/dev/src/project-a"}, "repo::/elsewhere", protocol.IdentifiedByCaller},
 		{"cwd in a worktree", Caller{Cwd: "/Users/dev/src/project-a/cmd"}, "repo::/Users/dev/src/project-a", protocol.IdentifiedByCwd},
 		{"deepest worktree", Caller{Cwd: "/Users/dev/src/project-a/nested/x"}, "repo::/Users/dev/src/project-a/nested", protocol.IdentifiedByCwd},
 		{"private alias", Caller{Cwd: "/private/tmp/project-b"}, "repo::/tmp/project-b", protocol.IdentifiedByCwd},
@@ -39,7 +39,7 @@ func TestIdentify(t *testing.T) {
 	if id, by := Identify(&protocol.Snapshot{}, Caller{Cwd: "/tmp/project-b", Ancestors: []int{300}}); id != "" || by != "" {
 		t.Errorf("no Orca: %q by %q", id, by)
 	}
-	if id, by := Identify(nil, Caller{Worktree: "w"}); id != "w" || by != protocol.IdentifiedByEnv {
+	if id, by := Identify(nil, Caller{Worktree: "w"}); id != "w" || by != protocol.IdentifiedByCaller {
 		t.Errorf("nil snapshot, env: %q by %q", id, by)
 	}
 }

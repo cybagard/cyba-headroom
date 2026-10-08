@@ -53,7 +53,7 @@ type CheckRequest struct {
 
 // How a check's worktree was found (Decision.IdentifiedBy).
 const (
-	IdentifiedByEnv     = "env"     // HEADROOM_WORKTREE or ORCA_WORKTREE_ID
+	IdentifiedByCaller  = "caller"  // named by the caller: HEADROOM_WORKTREE, ORCA_WORKTREE_ID or --worktree
 	IdentifiedByCwd     = "cwd"     // the working directory is in the worktree
 	IdentifiedByProcess = "process" // the caller descends from its terminal
 )

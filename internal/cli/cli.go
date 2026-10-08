@@ -70,7 +70,7 @@ type Env struct {
 	release    func(config.Config, string) error                                      // releaseLease
 	ancestors  func() []int                                                           // shim.Ancestors
 	now        func() time.Time                                                       // time.Now
-	wait       func(time.Duration) os.Signal                                          // signalWait.sleep
+	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
 	fallbacks  map[string][]string                                                    // shim.Fallbacks
 	watchEvery time.Duration                                                          // poll interval (1s)
@@ -329,7 +329,7 @@ func runShim(e Env, name string) int {
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
-	h := e.hooks()
+	h := e.withDefaults()
 	g := gate(e, name, c, getenv)
 	if g.signal != nil {
 		// Die of it, as the real binary would have, so a shell loop

@@ -335,7 +335,7 @@ func TestAnExpiredLeaseDoesNotTakeALiveLeasesContainer(t *testing.T) {
 	if len(b.List()) != 0 {
 		t.Fatalf("open leases = %+v", b.List())
 	}
-	if !strings.Contains(log.String(), "never appeared") || !strings.Contains(log.String(), "lease-1") {
+	if !strings.Contains(log.String(), "never appeared") || !strings.Contains(log.String(), "-1 worktree=w1") { // the first lease
 		t.Fatalf("the expired lease was not logged: %s", log)
 	}
 }
@@ -501,5 +501,16 @@ func TestReleaseEndsALease(t *testing.T) {
 	}
 	if d = b.Check(req("w2", 8*gib), snap(), cfg); !d.Allow {
 		t.Fatalf("the released cost still counts: %+v", d)
+	}
+}
+
+// Lease IDs differ between daemon runs, so a release meant for a lease of
+// an earlier run cannot end one of this run.
+func TestLeaseIDsDifferBetweenBooks(t *testing.T) {
+	a, _, _ := book(t)
+	b, _, _ := book(t)
+	da, db := a.Check(req("w1", gib), snap(), cfg), b.Check(req("w1", gib), snap(), cfg)
+	if da.LeaseID == db.LeaseID || b.Release(da.LeaseID) {
+		t.Fatalf("ids %q and %q", da.LeaseID, db.LeaseID)
 	}
 }

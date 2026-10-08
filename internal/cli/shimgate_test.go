@@ -38,6 +38,7 @@ type shimRig struct {
 	execErr  error         // what exec returns
 	released []string
 	raised   os.Signal
+	pending  os.Signal // a signal that came during an ask
 }
 
 func newShimRig(t *testing.T) *shimRig {
@@ -77,7 +78,10 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 		},
 		ancestors: func() []int { return []int{4321, 1} },
 		now:       func() time.Time { return r.now },
-		wait: func(time.Duration) os.Signal {
+		wait: func(d time.Duration) os.Signal {
+			if d == 0 { // is a signal pending?
+				return r.pending
+			}
 			r.sleeps++
 			r.now = r.now.Add(r.sleepFor)
 			if r.stop {
@@ -359,5 +363,23 @@ func TestShimGateReleaseAgainstTheDaemon(t *testing.T) {
 	d.Tick(context.Background())
 	if s := d.Snapshot(); code != 127 || len(s.Leases) != 0 {
 		t.Fatalf("exit %d, leases %+v", code, s.Leases)
+	}
+}
+
+// A Ctrl-C during the ask that finds room still cancels the call.
+func TestShimGateWaitCancelledDuringTheAsk(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "BUDGET_WAIT=1")
+	n := 0
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		if n++; n == 1 {
+			return &protocol.Decision{Retry: true, Message: "headroom: not starting it"}, nil
+		}
+		r.pending = syscall.SIGINT
+		return allow(protocol.CheckRequest{})
+	}
+	code, _ := r.run("docker", "run", "alpine")
+	if code != 130 || r.execed != "" || r.raised != syscall.SIGINT || !slices.Equal(r.released, []string{"lease-7"}) {
+		t.Fatalf("exit %d, exec %q, raised %v, released %q", code, r.execed, r.raised, r.released)
 	}
 }

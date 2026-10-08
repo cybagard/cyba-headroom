@@ -40,39 +40,27 @@ type gated struct {
 	cfg     config.Config
 }
 
-// shimHooks are the shim's dealings with the world; tests replace them.
-type shimHooks struct {
-	exec      func(path string, argv, env []string) error
-	ask       func(config.Config, protocol.CheckRequest) (*protocol.Decision, error)
-	release   func(config.Config, string) error
-	ancestors func() []int
-	now       func() time.Time
-	wait      func(time.Duration) os.Signal // nil: register for signals when a wait starts
-	raise     func(os.Signal)
-}
-
-// hooks resolves e's test hooks, defaulting each to the real thing.
-func (e Env) hooks() shimHooks {
-	h := shimHooks{exec: e.exec, ask: e.ask, release: e.release, ancestors: e.ancestors, now: e.now, wait: e.wait, raise: e.raise}
-	if h.exec == nil {
-		h.exec = syscall.Exec
+// withDefaults is e with each unset test hook set to the real thing.
+func (e Env) withDefaults() Env {
+	if e.exec == nil {
+		e.exec = syscall.Exec
 	}
-	if h.ask == nil {
-		h.ask = askDaemon
+	if e.ask == nil {
+		e.ask = askDaemon
 	}
-	if h.release == nil {
-		h.release = releaseLease
+	if e.release == nil {
+		e.release = releaseLease
 	}
-	if h.ancestors == nil {
-		h.ancestors = shim.Ancestors
+	if e.ancestors == nil {
+		e.ancestors = shim.Ancestors
 	}
-	if h.now == nil {
-		h.now = time.Now
+	if e.now == nil {
+		e.now = time.Now
 	}
-	if h.raise == nil {
-		h.raise = reraise
+	if e.raise == nil {
+		e.raise = reraise
 	}
-	return h
+	return e // wait stays nil until a wait starts: see gate
 }
 
 // gate asks the daemon whether call c may start (R5, #28). Calls that start
@@ -89,13 +77,22 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		fmt.Fprintf(e.Stderr, "headroom: %v; `%s` not gated\n", err, c.Command)
 		return gated{proceed: true}
 	}
-	h := e.hooks()
+	h := e.withDefaults()
 	req := callerRequest(getenv, h.ancestors)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
 	for {
 		d, err := h.ask(cfg, req)
+		if h.wait != nil {
+			// A Ctrl-C during the ask cancels the call, even one now allowed.
+			if sig := h.wait(0); sig != nil {
+				if err == nil && d.Allow && d.LeaseID != "" {
+					_ = h.release(cfg, d.LeaseID)
+				}
+				return interrupted(sig)
+			}
+		}
 		switch {
 		case errors.Is(err, errCannotCheck):
 			fmt.Fprintf(e.Stderr, "headroom: %v; restart it with this build: headroom install. `%s` not gated\n", err, c.Command)
@@ -134,13 +131,18 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 			return gated{code: exitDenied}
 		}
 		if sig := h.wait(waitPoll); sig != nil {
-			code := 128
-			if n, ok := sig.(syscall.Signal); ok {
-				code += int(n)
-			}
-			return gated{code: code, signal: sig}
+			return interrupted(sig)
 		}
 	}
+}
+
+// interrupted is a wait ended by sig: exit as the shell reports it.
+func interrupted(sig os.Signal) gated {
+	code := 128
+	if n, ok := sig.(syscall.Signal); ok {
+		code += int(n)
+	}
+	return gated{code: code, signal: sig}
 }
 
 // callerRequest is a check request carrying who is calling: the worktree
@@ -201,8 +203,17 @@ func newSignalWait() *signalWait {
 
 func (w *signalWait) stop() { signal.Stop(w.ch) }
 
-// sleep waits d; it returns the signal that cut it short, or nil.
+// sleep waits d; it returns the signal that cut it short, or nil. With d
+// 0 it only reports a signal already pending.
 func (w *signalWait) sleep(d time.Duration) os.Signal {
+	if d == 0 {
+		select {
+		case s := <-w.ch:
+			return s
+		default:
+			return nil
+		}
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

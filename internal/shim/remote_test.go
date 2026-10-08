@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -8,6 +9,14 @@ import (
 
 func TestRemote(t *testing.T) {
 	host, _ := os.Hostname()
+	lan := ""
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && ipn.IP.To4() != nil {
+				lan = ipn.IP.String()
+			}
+		}
+	}
 	host = strings.TrimSuffix(host, ".local")
 	for _, c := range []struct {
 		name, endpoint, dockerHost, containerHost string
@@ -32,6 +41,8 @@ func TestRemote(t *testing.T) {
 		{"podman", "", "ssh://dev@build-box", "", false},
 		{"docker", "unix:///x.sock", "ssh://dev@build-box", "", false}, // the flag wins
 		{"docker", "ssh://", "", "", false},
+		{"docker", "tcp://" + lan + ":2375", "", "", false}, // this Mac's own address
+
 		{"docker", "10.0.0.5:2375", "", "", true}, // docker reads host:port as tcp://
 		{"docker", "", "build-box:2375", "", true},
 		{"docker", "localhost:2375", "", "", false},

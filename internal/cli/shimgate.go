@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -283,6 +284,12 @@ func composePlain(bin string, args []string, ask func(bin string, args []string)
 	for i, a := range args {
 		if a == "--build" || a == "--pull=always" || a == "--pull" && i+1 < len(args) && args[i+1] == "always" {
 			return false
+		}
+		// --build=true, =1, =T: a build. Only a false one builds nothing.
+		if v, ok := strings.CutPrefix(a, "--build="); ok {
+			if build, err := strconv.ParseBool(v); err != nil || build {
+				return false
+			}
 		}
 	}
 	cargs, ok := shim.ComposeConfig(args, true)

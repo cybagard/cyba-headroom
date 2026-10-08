@@ -1073,6 +1073,22 @@ func TestASecondStartOfTheSameContainerTakesNoLease(t *testing.T) {
 	}
 }
 
+// A manual docker start db that failed (a port conflict) leaves a lease
+// waiting on db that reserves nothing: it does not cover a worktree's start,
+// which takes its own lease and meets the pressure guard.
+func TestAManualStartDoesNotCoverAWorktreesStart(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}, snap(), cfg)
+	critical := snap()
+	critical.Host.Pressure = "critical"
+	b.Observe(critical)
+	r := policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}
+	if d := b.Check(r, critical, cfg); d.Allow {
+		t.Fatalf("allowed under critical pressure: %+v", d)
+	}
+}
+
 // Compose said the up starts nothing: it reserves nothing. Otherwise its
 // estimate.
 func TestAnUpComposeSaysIsIdleReservesNothing(t *testing.T) {

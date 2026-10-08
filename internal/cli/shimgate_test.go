@@ -877,6 +877,10 @@ func TestAPullOrBuildIsNotDryRun(t *testing.T) {
 		{"up -d --pull always", `{"name":"x"}`},
 		{"up -d --pull=always", `{"name":"x"}`},
 		{"up -d --build", `{"name":"x"}`},
+		{"up -d --build=true", `{"name":"x"}`},
+		{"up -d --build=1", `{"name":"x"}`},
+		{"up -d --build=T", `{"name":"x"}`},
+		{"up -d --build=yes", `{"name":"x"}`}, // Compose rejects it: unsure
 		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"always"}}}`},
 		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"daily"}}}`},
 		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"build"}}}`},
@@ -890,6 +894,18 @@ func TestAPullOrBuildIsNotDryRun(t *testing.T) {
 		if dry != 0 || r.asked[0].Idle {
 			t.Errorf("%s %s: dry run %d times, idle %v", tc.args, tc.cfg, dry, r.asked[0].Idle)
 		}
+	}
+}
+
+// --build=false builds nothing: the dry run tells.
+func TestBuildFalseIsDryRun(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { return []byte(" Container x-a-1 Running \n"), nil }
+	r.run("docker", "compose", "up", "-d", "--build=false")
+	if !r.asked[0].Idle {
+		t.Fatalf("%+v", r.asked[0])
 	}
 }
 

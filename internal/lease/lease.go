@@ -229,11 +229,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
-	// The containers this start starts: not those that run, nor those an
-	// open lease holds (docker stop && docker start): that lease still
-	// covers them, and its worktree is charged for them.
+	// The containers this start starts: not those that run, nor those a
+	// worktree's open lease holds or waits for (docker stop && docker
+	// start): that lease still covers them, and its worktree is charged for
+	// them. A manual call's lease is charged nothing, so it covers nothing.
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
-		return t.Running || b.boundAnywhere("container:"+t.ID) || b.awaited(t.ID)
+		return t.Running || b.covered(t.ID)
 	})
 	if known && len(starts) == 0 {
 		// Allowed, and no new lease. Not when others went unresolved:
@@ -860,10 +861,12 @@ func kindOf(key string) string {
 	return "container"
 }
 
-// awaited reports whether an open lease waits for container id: two
-// docker start db at once, the first's lease covers it.
-func (b *Book) awaited(id string) bool {
-	return slices.ContainsFunc(b.open, func(e *entry) bool { return slices.Contains(e.containerIDs, id) })
+// covered reports whether a worktree's open lease holds container id, or
+// waits for it: two docker start db at once, the first's lease covers it.
+func (b *Book) covered(id string) bool {
+	return slices.ContainsFunc(b.open, func(e *entry) bool {
+		return e.Worktree != "" && (e.bound["container:"+id] || slices.Contains(e.containerIDs, id))
+	})
 }
 
 func (b *Book) boundAnywhere(key string) bool {

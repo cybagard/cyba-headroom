@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/launchd"
@@ -52,6 +53,11 @@ type installer struct {
 	getenv func(string) string
 	out    io.Writer
 	errw   io.Writer
+
+	// shimDir gets the docker, podman and tart links (#31); lookPath says
+	// whether an agent CLI is on PATH, for the Orca settings to print.
+	shimDir  string
+	lookPath func(name string) bool
 	// How long install waits for the daemon to answer, and how often it asks.
 	wait, poll time.Duration
 }
@@ -130,7 +136,38 @@ func (in *installer) install(ctx context.Context) int {
 	}
 	fmt.Fprintf(in.out, "headroom daemon running under launchd (%s)\n  binary  %s\n  agent   %s\n  log     %s (headroom logs)\n",
 		agentLabel, bin, in.plistPath(), logPath)
+	in.installShims(bin)
 	return 0
+}
+
+// orcaAgents are the agent CLIs whose Orca launch command install prints.
+var orcaAgents = []string{"claude", "codex", "kilo", "opencode", "gemini", "goose", "amp"}
+
+// installShims links the shims to bin and says how to launch Orca's agents
+// through them (R9, #31). A failure is reported, not fatal: the daemon runs.
+func (in *installer) installShims(bin string) {
+	if in.shimDir == "" {
+		return
+	}
+	notes, err := linkShims(in.shimDir, bin)
+	for _, n := range notes {
+		fmt.Fprintln(in.errw, "headroom:", n)
+	}
+	if err != nil {
+		fmt.Fprintf(in.errw, "headroom: linking the shims in %s: %v\n", in.shimDir, err)
+		return
+	}
+	fmt.Fprintf(in.out, "  shims   %s (docker, podman, tart)\n", in.shimDir)
+	var lines []string
+	for _, a := range orcaAgents {
+		if in.lookPath != nil && in.lookPath(a) {
+			lines = append(lines, fmt.Sprintf("  %s: %s run -- %s", a, bin, a))
+		}
+	}
+	if len(lines) > 0 {
+		fmt.Fprintf(in.out, "\nTo gate the agents Orca launches, set each one's command in Orca → Settings → Agents:\n%s\n"+
+			"Agents already running keep their old PATH until restarted.\n", strings.Join(lines, "\n"))
+	}
 }
 
 // waitUp waits until the launchd daemon itself answers on the socket.
@@ -169,6 +206,15 @@ func (in *installer) uninstall(ctx context.Context) int {
 	}
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
+	}
+	if in.shimDir != "" {
+		bin := in.bin
+		if len(remove) > 1 {
+			bin = remove[1]
+		}
+		if err := unlinkShims(in.shimDir, bin); err != nil {
+			return in.fail(fmt.Errorf("removing the shims: %w", err))
+		}
 	}
 	for _, p := range remove {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -321,6 +367,8 @@ func newInstaller(e Env, bin string) (*installer, error) {
 		},
 		getenv: e.Getenv, out: e.Stdout, errw: e.Stderr,
 		wait: 10 * time.Second, poll: 200 * time.Millisecond,
+		shimDir:  cfg.ShimDir,
+		lookPath: func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
 	}, nil
 }
 

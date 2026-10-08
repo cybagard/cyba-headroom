@@ -79,8 +79,37 @@ func newInstallFixture(t *testing.T) *installFixture {
 			return map[string]string{"HEADROOM_CONFIG_DIR": "/Users/dev/cfg", "HOME": home}[k]
 		},
 		out: &f.out, errw: &f.errb, wait: 200 * time.Millisecond, poll: 5 * time.Millisecond,
+		shimDir:  filepath.Join(home, "shims"),
+		lookPath: func(name string) bool { return name == "claude" || name == "kilo" },
 	}
 	return f
+}
+
+// Install links the shims to the installed binary and says how to launch
+// Orca's agents through them; uninstall removes the links (#31).
+func TestInstallLinksTheShims(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if target, err := os.Readlink(filepath.Join(f.in.shimDir, "docker")); err != nil || target != f.in.bin {
+		t.Fatalf("docker -> %q, %v", target, err)
+	}
+	out := f.out.String()
+	for _, want := range []string{"claude: " + f.in.bin + " run -- claude", "kilo: " + f.in.bin + " run -- kilo", "Orca"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "codex:") {
+		t.Errorf("an agent not on PATH is listed:\n%s", out)
+	}
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: %d %s", code, f.errb.String())
+	}
+	if _, err := os.Stat(f.in.shimDir); !os.IsNotExist(err) {
+		t.Fatalf("shims stayed: %v", err)
+	}
 }
 
 func (f *installFixture) plistPath() string {

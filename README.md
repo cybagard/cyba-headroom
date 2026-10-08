@@ -2,7 +2,7 @@
 
 Admission control for a fleet of parallel coding agents on one Mac. `headroom` shows what each agent costs across Docker/Podman, Tart and LM Studio, and lets agents ask before they spawn more. Display alone is not the product; the gate is.
 
-**Status:** Phase 1 spikes done ([docs/spikes](docs/spikes)); Phase 2 scaffold in place. Nothing is enforced yet.
+**Status:** observe view, daemon and gate shim work; the gate takes effect for agents launched through `headroom run` (below).
 
 ## Docs
 
@@ -57,5 +57,25 @@ The daemon records each tick to `samples/YYYY-MM-DD.jsonl` in the config directo
 enabled = true
 retention = "720h"   # 30 days; at least 24h
 ```
+
+## Gate
+
+`headroom install` also links `docker`, `podman` and `tart` in `~/.config/headroom/shims` to the headroom binary. With that directory first on PATH, every container or VM an agent starts goes through the gate:
+- **Allowed:** the call runs as usual.
+- **Denied:** it exits 75, with a message for the agent naming the headroom, the cost, and what its worktree could reuse or stop.
+- **Waiting:** with `BUDGET_WAIT=1` the call waits for room instead.
+
+Calls that start nothing pass straight through. If the daemon is down, every call runs, with a one-line warning.
+
+`headroom run -- <agent>` launches an agent with the shims first on PATH. Agents' tool shells keep the PATH their agent started with ([spike](docs/spikes/tool-shell-path.md)), so the gate reaches however deeply the agent nests its calls.
+
+**Gate the agents Orca launches.** In Orca → Settings → Agents, set each agent's command to run through headroom. `headroom install` prints these lines with the full path, for the agents it finds on PATH:
+
+```
+claude: ~/.local/bin/headroom run -- claude
+kilo:   ~/.local/bin/headroom run -- kilo
+```
+
+Agents that are already running keep their old PATH until they are restarted. The worktree is known from Orca's `ORCA_WORKTREE_ID`; set `HEADROOM_WORKTREE` to override it for agents launched outside Orca. `HEADROOM_SHIM_DEBUG=1` shows each call's verdict.
 
 License: AGPL-3.0-only

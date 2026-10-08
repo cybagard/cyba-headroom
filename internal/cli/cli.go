@@ -129,7 +129,7 @@ func Run(e Env) int {
 	case "check":
 		return runCheck(e)
 	case "run":
-		return notYet(e, "run", 31)
+		return runRun(e)
 	case "doctor":
 		return notYet(e, "doctor", 32)
 	default:

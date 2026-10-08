@@ -32,7 +32,7 @@ func TestShimDispatchOnArgv0NotFound(t *testing.T) {
 	for _, name := range []string{"docker", "/Users/x/.config/headroom/shims/podman", "tart"} {
 		var errb strings.Builder
 		code := Run(Env{Args: []string{name, "run", "alpine"}, Stdout: io.Discard, Stderr: &errb,
-			Getenv:    func(k string) string { return map[string]string{"PATH": empty}[k] },
+			Getenv: func(string) string { return "" }, Environ: func() []string { return []string{"PATH=" + empty} },
 			fallbacks: map[string][]string{}})
 		if code != 127 || !strings.Contains(errb.String(), "not found on PATH") {
 			t.Errorf("%s: code=%d stderr=%q", name, code, errb.String())

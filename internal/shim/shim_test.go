@@ -12,7 +12,7 @@ import (
 
 // fixture is a fake headroom binary and a few PATH dirs.
 type fixture struct {
-	t    *testing.T
+	t    testing.TB
 	root string
 	self string
 }
@@ -64,7 +64,7 @@ func (f *fixture) env(path ...string) func(string) string {
 }
 
 func (f *fixture) resolve(name string, path ...string) (shim.Target, error) {
-	return shim.Resolve(name, f.self, f.env(path...), nil)
+	return shim.Resolve(name, []string{f.self}, f.env(path...), nil)
 }
 
 func TestFindsTheRealBinaryAfterTheShim(t *testing.T) {
@@ -73,7 +73,7 @@ func TestFindsTheRealBinaryAfterTheShim(t *testing.T) {
 	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
 	f.file("later/docker", "#!later\n", 0o755)
 	got, err := f.resolve("docker", f.dir("shims"), f.dir("usr/bin"), f.dir("later"))
-	if err != nil || got.Path != realBin || got.Engine != "docker" {
+	if err != nil || got.Path != realBin || shim.Engine("docker", got.Path) != "docker" {
 		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }
@@ -111,8 +111,8 @@ func TestSkipsUnsafeAndUnusableEntries(t *testing.T) {
 func TestFallsBackToUsualLocations(t *testing.T) {
 	f := newFixture(t)
 	tart := f.file("home/.local/bin/tart", "#!tart\n", 0o755)
-	got, err := shim.Resolve("tart", f.self, f.env(f.dir("empty")), []string{"~/.local/bin/tart"})
-	if err != nil || got.Path != tart || got.Engine != "tart" {
+	got, err := shim.Resolve("tart", []string{f.self}, f.env(f.dir("empty")), []string{"~/.local/bin/tart"})
+	if err != nil || got.Path != tart || shim.Engine("tart", got.Path) != "tart" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
@@ -133,25 +133,53 @@ func TestDockerThatIsPodman(t *testing.T) {
 	f.file("viaScript/docker", "#!/bin/sh\n[ -e /etc/containers/nodocker ] || echo emulate\nexec /opt/podman/bin/podman \"$@\"\n", 0o755)
 	for _, dir := range []string{"viaLink", "viaScript"} {
 		got, err := f.resolve("docker", f.dir(dir))
-		if err != nil || got.Engine != "podman" {
+		if err != nil || shim.Engine("docker", got.Path) != "podman" {
 			t.Errorf("%s: got %+v, %v; want engine podman", dir, got, err)
 		}
 	}
-	if got, _ := f.resolve("podman", f.dir("opt/podman/bin")); got.Engine != "podman" {
+	if got, _ := f.resolve("podman", f.dir("opt/podman/bin")); shim.Engine("podman", got.Path) != "podman" {
 		t.Errorf("podman itself: %+v", got)
+	}
+	// A wrapper that only mentions podman is docker.
+	w := f.file("wrap/docker", "#!/bin/sh\n# not podman: force the desktop context\nexec /usr/local/bin/docker.real \"$@\"\n", 0o755)
+	if e := shim.Engine("docker", w); e != "docker" {
+		t.Errorf("wrapper mentioning podman: engine %s", e)
 	}
 }
 
 func BenchmarkResolve(b *testing.B) {
-	t := &testing.T{}
-	f := &fixture{t: t, root: b.TempDir()}
+	f := &fixture{t: b, root: b.TempDir()}
 	f.self = f.file("bin/headroom", "#!headroom\n", 0o755)
 	f.link("shims/docker", f.self)
 	f.file("usr/bin/docker", "#!real\n", 0o755)
 	env := f.env(f.dir("shims"), f.dir("a"), f.dir("b"), f.dir("usr/bin"))
 	for b.Loop() {
-		if _, err := shim.Resolve("docker", f.self, env, nil); err != nil {
+		if _, err := shim.Resolve("docker", []string{f.self}, env, nil); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestSkipsEveryHeadroomOnTheWay(t *testing.T) {
+	// Two headroom builds, each with a shim dir on PATH: B, exec'd by A's
+	// shim, must not exec A back.
+	f := newFixture(t)
+	other := f.file("other/headroom", "#!another headroom build\n", 0o755)
+	f.link("shimsA/docker", f.self)
+	f.link("shimsB/docker", other)
+	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
+	got, err := shim.Resolve("docker", []string{other, f.self}, f.env(f.dir("shimsA"), f.dir("shimsB"), f.dir("usr/bin")), nil)
+	if err != nil || got.Path != realBin {
+		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
+	}
+}
+
+func TestSkipsWhatThisUserCannotRun(t *testing.T) {
+	f := newFixture(t)
+	f.file("others/docker", "#!only for group and others\n", 0o011)
+	realBin := f.file("usr/bin/docker", "#!real\n", 0o755)
+	got, err := f.resolve("docker", f.dir("others"), f.dir("usr/bin"))
+	if err != nil || got.Path != realBin {
+		t.Fatalf("got %+v, %v; want %s", got, err, realBin)
 	}
 }

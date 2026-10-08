@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -263,37 +264,63 @@ func runStatus(e Env) int {
 	return 0
 }
 
-// runShim is the gate shim placeholder; the real passthrough lands in #26.
+// shimSelvesVar lists the headroom binaries a shim call has passed through,
+// so a later shim on the way (another headroom build's shim dir also on PATH)
+// skips them all rather than exec back into one.
+const shimSelvesVar = "HEADROOM_SHIM_SELVES"
+
 // runShim replaces this process with the real docker, podman or tart (R5,
 // #26). It passes every call through for now: #27 and #28 add the gate.
 func runShim(e Env, name string) int {
+	environ := e.Environ
+	if environ == nil {
+		environ = os.Environ
+	}
+	env := environ()
+	// One source for the shim's view of the environment and the child's.
+	getenv := func(k string) string {
+		for i := len(env) - 1; i >= 0; i-- {
+			if v, ok := strings.CutPrefix(env[i], k+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
 	self, err := os.Executable()
+	if err == nil {
+		_, err = os.Stat(self)
+	}
 	if err != nil {
-		fmt.Fprintf(e.Stderr, "headroom: %s: cannot find headroom's own binary: %v\n", name, err)
-		return 127
+		fmt.Fprintf(e.Stderr, "headroom: %s: headroom's own binary is gone (%v); was it upgraded? Run `headroom install` again\n", name, err)
+		return 126
+	}
+	selves := []string{self}
+	for _, s := range filepath.SplitList(getenv(shimSelvesVar)) {
+		if s != "" && s != self {
+			selves = append(selves, s)
+		}
 	}
 	fallbacks := e.fallbacks
 	if fallbacks == nil {
 		fallbacks = shim.Fallbacks
 	}
-	t, err := shim.Resolve(name, self, e.Getenv, fallbacks[name])
+	t, err := shim.Resolve(name, selves, getenv, fallbacks[name])
 	if err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
 		return 127 // as the shell says for a missing command
 	}
-	if e.Getenv("HEADROOM_SHIM_DEBUG") != "" {
-		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, t.Path, t.Engine)
+	if getenv("HEADROOM_SHIM_DEBUG") != "" {
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s)\n", name, t.Path, shim.Engine(name, t.Path))
 	}
-	environ, exec := e.Environ, e.exec
-	if environ == nil {
-		environ = os.Environ
-	}
+	env = append(env, shimSelvesVar+"="+strings.Join(selves, string(filepath.ListSeparator)))
+	exec := e.exec
 	if exec == nil {
 		exec = syscall.Exec
 	}
 	// On success this never returns: the real binary takes over the
-	// process, with its PID, terminal, signals and exit code.
-	if err := exec(t.Path, e.Args, environ()); err != nil {
+	// process, with its PID, terminal, signals and exit code. argv[0] stays
+	// as invoked, as the shell would pass it.
+	if err := exec(t.Path, e.Args, env); err != nil {
 		fmt.Fprintf(e.Stderr, "headroom: running %s: %v\n", t.Path, err)
 		return 126 // found but not runnable
 	}

@@ -316,8 +316,11 @@ func runShim(e Env, name string) int {
 		gate := "pass"
 		if c := shim.Parse(name, e.Args[1:]); c.Kind != "" {
 			gate = "gate: " + c.Command
-			if c.MemoryBytes > 0 {
+			switch {
+			case c.MemoryBytes >= 1<<30:
 				gate += ", " + units.GB(c.MemoryBytes) + " GB"
+			case c.MemoryBytes > 0:
+				gate += fmt.Sprintf(", %d MB", c.MemoryBytes>>20)
 			}
 		}
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)

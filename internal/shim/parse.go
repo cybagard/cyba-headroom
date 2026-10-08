@@ -14,7 +14,7 @@ type Call struct {
 	// Kind is container, compose or tart (protocol.CheckRequest.Kind); ""
 	// means the call starts nothing and passes through.
 	Kind string
-	// Op is run, create, start, up or clone.
+	// Op is run, create, start, restart, up or clone.
 	Op string
 	// Command names the call without its flags or arguments, which may hold
 	// secrets: "docker run postgres:17", "docker compose up", "tart run ci-vm".
@@ -24,6 +24,10 @@ type Call struct {
 	Target string
 	// MemoryBytes is the memory limit given with -m/--memory; 0 if none.
 	MemoryBytes uint64
+	// Endpoint is the engine chosen with --context, -H/--host,
+	// -c/--connection or --url; "" for the default. A remote engine's
+	// memory is not this Mac's. It is raw: it may hold a user name.
+	Endpoint string
 }
 
 // Parse tells what the call name args (argv[1:]) would start. It is pure and
@@ -39,92 +43,156 @@ func Parse(name string, args []string) Call {
 }
 
 func parseEngine(name string, args []string) Call {
-	version := false
-	rest, ok := scan(args, engineGlobal, func(f, _ string) { version = version || f == "-v" || f == "--version" })
-	// An unknown global flag may take a value: what follows is a guess, so
-	// the call passes through.
-	if !ok || version || len(rest) == 0 {
-		return Call{}
-	}
-	words := []string{name}
-	if rest[0] == "container" {
-		words, rest = append(words, "container"), rest[1:]
-		if len(rest) == 0 || rest[0] == "compose" {
-			return Call{}
-		}
-	}
-	switch op := rest[0]; op {
-	case "run", "create":
-		var mem string
-		c := Call{Kind: "container", Op: op}
-		pos, ok := scan(rest[1:], containerRun, func(f, v string) {
-			if f == "-m" || f == "--memory" {
-				mem = v
+	var c Call
+	for {
+		rest, res := scan(args, engineGlobal, func(f, v string) {
+			switch f {
+			case "--context", "-H", "--host", "-c", "--connection", "--url":
+				c.Endpoint = v
 			}
 		})
-		if pos == nil && !ok {
-			return Call{} // --help
-		}
-		c.MemoryBytes = parseBytes(mem)
-		if ok && len(pos) > 0 {
-			c.Target = pos[0]
-		}
-		return c.named(append(words, op))
-	case "start":
-		c := Call{Kind: "container", Op: op}
-		pos, ok := scan(rest[1:], containerStart, nil)
-		if pos == nil && !ok {
+		if res == askedHelp || len(rest) == 0 {
 			return Call{}
 		}
-		if ok && len(pos) > 0 {
-			c.Target = pos[0]
+		if res != unknownFlag {
+			args = rest
+			break
 		}
-		return c.named(append(words, op))
-	case "compose":
-		return parseCompose(append(words, op), rest[1:])
+		// A global flag newer than the tables: it takes a value unless a
+		// subcommand follows it. Gating too much beats letting a call by.
+		switch {
+		case len(rest) > 1 && engineCommand(rest[1]):
+			args = rest[1:]
+		case len(rest) > 2:
+			args = rest[2:]
+		default:
+			return Call{}
+		}
 	}
-	return Call{}
-}
-
-func parseCompose(words, args []string) Call {
-	var project string
-	rest, ok := scan(args, composeGlobal, func(f, v string) {
-		if f == "-p" || f == "--project-name" {
-			project = v
+	words := []string{name}
+	if args[0] == "container" {
+		words, args = append(words, "container"), args[1:]
+		if len(args) == 0 || args[0] == "compose" {
+			return Call{}
+		}
+	}
+	c.Op = args[0]
+	var flags flagSet
+	switch c.Op {
+	case "run", "create":
+		flags = containerRun
+	case "start", "restart":
+		flags = containerStart
+	case "compose":
+		if len(words) > 1 {
+			return Call{}
+		}
+		return parseCompose(c.Endpoint, append(words, "compose"), args[1:])
+	default:
+		return Call{}
+	}
+	var mem string
+	pos, res := scan(args[1:], flags, func(f, v string) {
+		if f == "-m" || f == "--memory" {
+			mem = v
 		}
 	})
-	if !ok || len(rest) == 0 {
+	if res == askedHelp {
 		return Call{}
 	}
-	flags := map[string]flagSet{"up": composeUp, "run": composeRun}[rest[0]]
-	if flags == nil {
+	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
+	if res != unknownFlag && len(pos) > 0 {
+		c.Target = pos[0]
+	}
+	return c.named(append(words, c.Op))
+}
+
+// engineCommand reports whether w is a docker or podman command Parse looks
+// for.
+func engineCommand(w string) bool {
+	switch w {
+	case "run", "create", "start", "restart", "compose", "container":
+		return true
+	}
+	return false
+}
+
+func parseCompose(endpoint string, words, args []string) Call {
+	var project string
+	dryRun := false
+	seen := func(f, v string) {
+		switch f {
+		case "-p", "--project-name":
+			project = v
+		case "--dry-run":
+			dryRun = v != "false"
+		}
+	}
+	rest, res := scan(args, composeGlobal, seen)
+	if res != scanned || len(rest) == 0 {
 		return Call{}
 	}
-	if pos, ok := scan(rest[1:], flags, nil); pos == nil && !ok {
+	op := rest[0]
+	var flags flagSet
+	switch op {
+	case "up":
+		flags = composeUp
+	case "run":
+		flags = composeRun
+	case "start":
+		flags = composeStart
+	case "restart":
+		flags = composeRestart
+	case "create":
+		flags = composeCreate
+	default:
 		return Call{}
 	}
-	c := Call{Kind: "compose", Op: rest[0], Target: project}
-	return c.named(append(words, rest[0]))
+	if _, res := scan(rest[1:], flags, seen); res == askedHelp || dryRun {
+		return Call{} // starts nothing
+	}
+	c := Call{Kind: "compose", Op: op, Target: project, Endpoint: endpoint}
+	return c.named(append(words, op))
 }
 
 func parseTart(args []string) Call {
 	if len(args) == 0 {
 		return Call{}
 	}
-	flags := map[string]flagSet{"run": tartRun, "clone": tartClone}[args[0]]
-	if flags == nil {
-		return Call{}
-	}
 	c := Call{Kind: "tart", Op: args[0]}
-	pos, ok := scan(args[1:], flags, nil)
-	if pos == nil && !ok {
+	var flags flagSet
+	n := 0 // which positional names the VM this call makes
+	switch c.Op {
+	case "run":
+		flags = tartRun
+	case "clone":
+		flags, n = tartClone, 1 // clone <source> <new-name>
+	default:
 		return Call{}
 	}
-	if ok {
-		// run <vm>; clone <source> <new-name>: the VM this call makes.
-		if i := map[string]int{"run": 0, "clone": 1}[c.Op]; len(pos) > i {
-			c.Target = pos[i]
+	// swift-argument-parser takes options before, between and after the
+	// positionals.
+	var pos []string
+	for args = args[1:]; ; {
+		rest, res := scan(args, flags, nil)
+		if res == askedHelp {
+			return Call{}
 		}
+		if res == unknownFlag {
+			pos = nil // what follows may be its value
+			break
+		}
+		if res == endOfFlags {
+			pos = append(pos, rest...)
+			break
+		}
+		if len(rest) == 0 {
+			break
+		}
+		pos, args = append(pos, rest[0]), rest[1:]
+	}
+	if len(pos) > n {
+		c.Target = pos[n]
 	}
 	return c.named([]string{"tart", c.Op})
 }
@@ -152,12 +220,20 @@ func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsCont
 // a value. The tables below are checked against the CLIs' help text.
 type flagSet map[string]bool
 
+// scanResult is how scan stopped.
+type scanResult int
+
+const (
+	scanned     scanResult = iota // at the first positional argument, or the end
+	endOfFlags                    // after "--": all of rest is positional
+	unknownFlag                   // at a flag not in the table; rest starts with it
+	askedHelp                     // --help, --version, or -h where it is no flag of its own
+)
+
 // scan reads the flags in args up to the first positional argument, calling
-// seen for each (with its value, or "" for a boolean), and returns the
-// arguments from there on. ok is false at an unknown flag, which may or may
-// not take a value; rest is then nil. Help (--help, --version, and -h where
-// it is not a flag of its own) returns nil and false too.
-func scan(args []string, flags flagSet, seen func(flag, value string)) (rest []string, ok bool) {
+// seen (if set) for each with its value, or "" for a boolean, and returns the
+// arguments from there on.
+func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string, scanResult) {
 	if seen == nil {
 		seen = func(string, string) {}
 	}
@@ -165,45 +241,48 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) (rest []s
 		a := args[i]
 		switch {
 		case a == "--":
-			return args[i+1:], true
-		case a == "--help" || a == "--version":
-			return nil, false
+			return args[i+1:], endOfFlags
 		case strings.HasPrefix(a, "--"):
 			f, v, hasValue := strings.Cut(a, "=")
-			takes, known := flags[f]
-			if !known {
-				if hasValue {
-					continue // --flag=value: unknown, but whole
-				}
-				return []string{}, false
+			if (f == "--help" || f == "--version") && v != "false" {
+				return nil, askedHelp
 			}
-			if takes && !hasValue {
+			takes, known := flags[f]
+			switch {
+			case !known && hasValue:
+				continue // --flag=value: unknown, but whole
+			case !known:
+				return args[i:], unknownFlag
+			case takes && !hasValue:
 				if i+1 == len(args) {
-					return []string{}, true
+					return nil, scanned
 				}
 				i++
 				v = args[i]
 			}
 			seen(f, v)
 		case len(a) > 1 && a[0] == '-':
-			// A cluster of short flags: -it, -dm2g, -p 80:80.
+			// A cluster of short flags: -it, -dm2g, -m=2g, -p 80:80.
 			for j := 1; j < len(a); j++ {
 				f := "-" + a[j:j+1]
 				takes, known := flags[f]
 				if f == "-h" && !takes {
-					return nil, false
+					return nil, askedHelp
 				}
 				if !known {
-					return []string{}, false
+					return args[i:], unknownFlag
 				}
 				if !takes {
 					seen(f, "")
 					continue
 				}
-				v := strings.TrimPrefix(a[j+1:], "=")
-				if v == "" {
+				v, explicit := a[j+1:], false
+				if strings.HasPrefix(v, "=") {
+					v, explicit = v[1:], true // -m= is an empty value
+				}
+				if v == "" && !explicit {
 					if i+1 == len(args) {
-						return []string{}, true
+						return nil, scanned
 					}
 					i++
 					v = args[i]
@@ -212,10 +291,10 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) (rest []s
 				break
 			}
 		default:
-			return args[i:], true
+			return args[i:], scanned
 		}
 	}
-	return []string{}, true
+	return nil, scanned
 }
 
 // byteSize is docker's memory syntax: a number, an optional unit (b, k, m, g,
@@ -280,8 +359,10 @@ var (
 		"--detach --disable-content-trust --help --http-proxy --init --interactive --no-healthcheck --no-hostname "+
 			"--no-hosts --oom-kill-disable --passwd --privileged --publish-all --quiet --read-only --read-only-tmpfs "+
 			"--replace --rm --rmi --rootfs --sig-proxy --tls-verify --tty --unsetenv-all --use-api-socket -P -d -i -q -t")
-	containerStart = flags("--detach-keys --filter -f", "--all --attach --interactive -a -i")
-	composeGlobal  = flags(
+	containerStart = flags( // start and restart
+		"--detach-keys --filter --signal --time --timeout -f -s -t",
+		"--all --attach --interactive --running -a -i")
+	composeGlobal = flags(
 		"--ansi --env-file --file --parallel --profile --progress --project-directory --project-name -f -p",
 		"--all-resources --compatibility --dry-run")
 	composeUp = flags(
@@ -295,6 +376,10 @@ var (
 			"-e -l -p -u -v -w",
 		"--build --detach --dry-run --interactive --no-deps --no-tty --quiet --quiet-build --quiet-pull --remove-orphans "+
 			"--rm --service-ports --use-aliases -P -T -d -i -q")
+	composeStart   = flags("--wait-timeout", "--dry-run --wait")
+	composeRestart = flags("--timeout -t", "--dry-run --no-deps")
+	composeCreate  = flags("--pull --scale",
+		"--build --dry-run --force-recreate --no-build --no-recreate --quiet-pull --remove-orphans --yes -y")
 	tartRun = flags(
 		"--dir --disk --net-bridged --net-softnet-allow --net-softnet-block --net-softnet-control-fd --net-softnet-expose "+
 			"--provisioning-opts --root-disk-opts --rosetta --serial-path",

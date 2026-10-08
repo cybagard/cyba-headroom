@@ -90,7 +90,7 @@ func TestShimDebugLineNamesAGatedCall(t *testing.T) {
 		Getenv:  func(string) string { return "" },
 		Environ: func() []string { return []string{"PATH=" + dir, "HEADROOM_SHIM_DEBUG=1"} },
 		exec:    func(string, []string, []string) error { return nil }})
-	if want := "(docker; gate: docker run alpine, 0.5 GB)"; !strings.Contains(errb.String(), want) {
+	if want := "(docker; gate: docker run alpine, 512 MB)"; !strings.Contains(errb.String(), want) {
 		t.Fatalf("stderr = %q, want %q", errb.String(), want)
 	}
 }

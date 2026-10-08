@@ -77,12 +77,7 @@ func (e Env) withDefaults() Env {
 		env, _ := e.envOf()
 		e.composeAsk = func(bin string, args []string) (string, error) { return askCompose(bin, args, env, "") }
 	}
-	if e.ping == nil {
-		e.ping = func(cfg config.Config) error {
-			_, err := client.Ping(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
-			return err
-		}
-	}
+
 	if e.fallbacks == nil {
 		e.fallbacks = shim.Fallbacks
 	}
@@ -123,14 +118,11 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir)
 	}
 	req.MultiTarget = c.MultiTarget
-	if c.Kind == "compose" && h.ping(cfg) == nil {
-		// Asked only when the daemon answers: down, the call runs ungated
-		// at once (R7), with no wait on Compose.
-		ask := h.composeAsk
-		if name != "docker" {
-			ask = func(string, []string) (string, error) { return "", errors.New("only docker compose is asked") }
-		}
-		req.Target = composeProject(bin, c, ask)
+	if c.Kind == "compose" && c.Target == "" && name == "docker" {
+		// Compose names the project (-p needs no asking; podman compose is
+		// not asked). Bounded by composeTimeout, also when the daemon
+		// turns out to be down (R7).
+		req.Target = composeProject(bin, c, h.composeAsk)
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -264,9 +256,10 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	return name
 }
 
-// composeTimeout bounds docker compose config: it reads the compose files,
-// as the call itself is about to.
-const composeTimeout = 5 * time.Second
+// composeTimeout bounds docker compose config (30-40 ms on a plain stack):
+// it reads the compose files, as the call itself is about to, and delays a
+// call that fails open by at most this much.
+const composeTimeout = 2 * time.Second
 
 // askCompose runs docker compose config (args) at bin in env and dir ("":
 // this process's) and returns the project's name.

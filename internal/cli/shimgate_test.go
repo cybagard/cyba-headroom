@@ -43,10 +43,8 @@ type shimRig struct {
 	released []string
 	raised   os.Signal
 	pending  os.Signal // a signal that came during an ask
-	// composeAsk stands in for docker compose config; daemonDown makes the
-	// ping before it fail.
+	// composeAsk stands in for docker compose config.
 	composeAsk func(string, []string) (string, error)
-	daemonDown bool
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -103,12 +101,6 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 				return r.composeAsk(bin, args)
 			}
 			return "", errors.New("no compose here")
-		},
-		ping: func(config.Config) error {
-			if r.daemonDown {
-				return errors.New("connection refused")
-			}
-			return nil
 		},
 	})
 	return code, errb.String()
@@ -713,16 +705,19 @@ func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	}
 }
 
-// With the daemon down, the shim does not wait on Compose: it fails open at
-// once.
-func TestComposeIsNotAskedWithTheDaemonDown(t *testing.T) {
+// Compose is asked only when it must name the project: not for -p, not
+// for podman.
+func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r := newShimRig(t)
-	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) { return nil, errors.New("connection refused") }
-	asked := false
-	r.composeAsk = func(string, []string) (string, error) { asked = true; return "x", nil }
-	r.daemonDown = true
+	r.ask = allow
+	asked := 0
+	r.composeAsk = func(string, []string) (string, error) { asked++; return "x", nil }
+	r.run("docker", "compose", "-p", "shop", "up", "-d")
+	if asked != 0 || r.asked[0].Target != "shop" {
+		t.Fatalf("asked %d, target %q", asked, r.asked[0].Target)
+	}
 	r.run("docker", "compose", "up", "-d")
-	if asked {
-		t.Fatal("asked Compose with the daemon down")
+	if asked != 1 || r.asked[1].Target != "x" {
+		t.Fatalf("asked %d, target %q", asked, r.asked[1].Target)
 	}
 }

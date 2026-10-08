@@ -74,7 +74,6 @@ type Env struct {
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	composeAsk func(bin string, args []string) (string, error)                        // askCompose
-	ping       func(config.Config) error                                              // client.Ping
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise

@@ -487,3 +487,104 @@ func TestTheSameProjectInTwoWorktrees(t *testing.T) {
 		}
 	}
 }
+
+func oneoff(id, project, wt string) func(*protocol.Snapshot) *protocol.Snapshot {
+	return func(s *protocol.Snapshot) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4,
+			Labels: map[string]string{"com.docker.compose.project": project, "com.docker.compose.oneoff": "True"}}, wt)
+	}
+}
+
+func service(id, project, wt string) func(*protocol.Snapshot) *protocol.Snapshot {
+	return func(s *protocol.Snapshot) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4,
+			Labels: map[string]string{"com.docker.compose.project": project}}, wt)
+	}
+}
+
+func run(wt, project string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "run", Command: "docker compose run", CostBytes: gib, Target: project}
+}
+
+// Two compose runs in a row: each lease binds its own one-off container.
+func TestEachComposeRunBindsItsOwnContainer(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(oneoff("r1", "p", "w1")(snap()))
+	c.t = c.t.Add(time.Second)
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(oneoff("r2", "p", "w1")(oneoff("r1", "p", "w1")(snap())))
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(oneoff("r2", "p", "w1")(oneoff("r1", "p", "w1")(snap())))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("a run's lease never bound: %s", log)
+	}
+}
+
+// compose run starts its depends_on services first: the run's lease takes
+// them, so they are not ungated; an open up lease of the project still wins
+// them.
+func TestComposeRunBindsItsDependencies(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(service("db", "p", "w1")(snap()))
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+	b2, _, _ := book(t)
+	b2.Observe(snap())
+	b2.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "p"}, snap(), cfg)
+	b2.Check(run("w1", "p"), snap(), cfg)
+	b2.Observe(service("web", "p", "w1")(snap()))
+	for _, l := range b2.List() {
+		if l.Command == "docker compose up" && l.Bytes != gib-gib/4 {
+			t.Fatalf("the up's lease lost its service to the run's: %+v", b2.List())
+		}
+	}
+}
+
+// compose run --rm: the run's lease ends when its container is gone.
+func TestAComposeRunLeaseEndsWithItsContainer(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(oneoff("r1", "p", "w1")(snap()))
+	b.Observe(snap()) // exited, removed
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v", l)
+	}
+}
+
+// An unattributed container binds a worktree's lease before a manual one.
+func TestAManualLeaseDoesNotWinAnUnattributedContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "shop"}
+	b.Check(up, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	up.Worktree = ""
+	b.Check(up, snap(), cfg)
+	b.Observe(service("s1", "shop", "")(snap()))
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want w1's bound", l)
+	}
+}
+
+// compose up again does not extend the lease it takes over: the merged
+// lease keeps the earliest expiry, so a loop of ups cannot hold one
+// reservation past its timeout.
+func TestATakeoverKeepsTheEarliestExpiry(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app"}
+	s := service("web", "app", "w1")(snap())
+	b.Check(up, snap(), cfg)
+	b.Observe(s)
+	c.t = c.t.Add(time.Minute)
+	b.Check(up, s, cfg)
+	if l := b.List(); len(l) != 1 || !l[0].Expires.Equal(t0.Add(2*time.Minute)) {
+		t.Fatalf("leases = %+v, want the first lease's expiry", l)
+	}
+}

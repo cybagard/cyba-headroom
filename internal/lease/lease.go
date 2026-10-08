@@ -108,9 +108,10 @@ type entry struct {
 	// target: a start's container as given, when Docker could not resolve
 	// it, or a tart run's VM. composeDir: a compose call's project
 	labelled bool
-	// oneoff is set for a compose run's lease: it binds the one-off
-	// container Compose labels as such, not the project's services.
-	oneoff bool
+	// oneoff is set for a compose run's lease: it binds the one one-off
+	// container Compose labels as such (hasOneoff once it has), and the
+	// services it starts first (depends_on) when no up lease takes them.
+	oneoff, hasOneoff bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
 	took, tookLapsed []*entry
@@ -229,6 +230,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 			e.took = append(e.took, o)
 			reserved, used = reserved+o.reserved(), used+o.used
+			if o.Expires.Before(e.Expires) {
+				e.Expires = o.Expires // compose up in a loop must not hold forever
+			}
 			for k := range o.bound {
 				e.bound[k] = true
 			}
@@ -511,7 +515,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			return true
 		case len(e.bound) > 0 && e.used >= e.cost:
 			return true // its resources use the cost
-		case len(e.bound) > 0 && !alive && e.Kind != "compose":
+		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff):
 			// Its container or VM is gone. A compose project's first
 			// container may be a one-shot; the services come after it.
 			return true
@@ -601,10 +605,10 @@ func keyed(es []*entry, r resource, based bool) *entry {
 		switch {
 		case e.labelled:
 			return 0
-		case e.containerID != "", e.Kind == "compose":
+		case e.containerID != "", e.Kind == "compose" && (!e.oneoff || r.oneoff):
 			return 1
 		}
-		return 2
+		return 2 // a name; or a compose run's lease for a service, after any up's
 	}
 	// Among equal keys, the lease of the worktree r is attributed to: two
 	// worktrees may bring up one project.
@@ -612,7 +616,12 @@ func keyed(es []*entry, r resource, based bool) *entry {
 		if rank(e) != rank(best) {
 			return rank(e) < rank(best)
 		}
-		return e.Worktree == r.worktree && best.Worktree != r.worktree
+		if r.worktree != "" {
+			return e.Worktree == r.worktree && best.Worktree != r.worktree
+		}
+		// Unattributed: a worktree's lease, which reserves, before a
+		// manual one, which does not.
+		return e.Worktree != "" && best.Worktree == ""
 	}
 	var best *entry
 	for _, e := range es {
@@ -638,7 +647,13 @@ func (e *entry) key(r resource, based bool) bool {
 		// have labelled it a project's too (a --label on run).
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
-		return based && e.project != "" && e.project == r.project && e.oneoff == r.oneoff
+		switch {
+		case !based || e.project == "" || e.project != r.project:
+			return false
+		case r.oneoff:
+			return e.oneoff && !e.hasOneoff // a compose run's own, one each
+		}
+		return true // a service: an up's, or a compose run's dependency
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.containerID != "":
@@ -678,6 +693,9 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 // bind makes r one of e's resources.
 func (e *entry) bind(r resource) {
 	e.bound[r.key] = true
+	if r.oneoff {
+		e.hasOneoff = true
+	}
 	if e.Kind == "compose" && e.project == "" {
 		e.project = r.project
 	}

@@ -656,11 +656,11 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 		asked = append(asked, append([]string{bin}, args...))
 		return "shop", nil
 	}
-	c := shim.Call{ComposeFiles: []string{"a.yml", "-"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
+	c := shim.Call{ComposeFiles: []string{"a.yml", "b.yml"}, ComposeProjectDir: "/srv", ComposeEnvFiles: []string{"x.env"}}
 	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
-	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "-", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
+	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
@@ -719,5 +719,28 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r.run("docker", "compose", "up", "-d")
 	if asked != 1 || r.asked[1].Target != "x" {
 		t.Fatalf("asked %d, target %q", asked, r.asked[1].Target)
+	}
+}
+
+// compose -f - reads its file from stdin, which the shim must not consume:
+// the project is what Compose names it then, COMPOSE_PROJECT_NAME or the
+// project directory's name (the working directory's).
+func TestComposeProjectOfStdin(t *testing.T) {
+	wd := func() (string, error) { return "/Users/dev/src/My_App", nil }
+	none := func(string) string { return "" }
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, none, wd); got != "my_app" {
+		t.Fatalf("project = %q, want my_app", got)
+	}
+	env := func(k string) string {
+		if k == "COMPOSE_PROJECT_NAME" {
+			return "Piped"
+		}
+		return ""
+	}
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, env, wd); got != "piped" {
+		t.Fatalf("project = %q, want piped", got)
+	}
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}, ComposeProjectDir: "/srv/_api"}, none, wd); got != "api" {
+		t.Fatalf("project = %q, want api", got)
 	}
 }

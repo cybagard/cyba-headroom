@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -122,7 +123,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// Compose names the project (-p needs no asking; podman compose is
 		// not asked). Bounded by composeTimeout, also when the daemon
 		// turns out to be down (R7).
-		req.Target = composeProject(bin, c, h.composeAsk)
+		if slices.Contains(c.ComposeFiles, "-") {
+			// Its file is on stdin, which the call needs: not asked.
+			req.Target = composeStdinProject(c, getenv, h.getwd)
+		} else {
+			req.Target = composeProject(bin, c, h.composeAsk)
+		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
@@ -254,6 +260,44 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 		return ""
 	}
 	return name
+}
+
+// composeStdinProject names the project of compose -f - as Compose does
+// when its file is on stdin: -p, else COMPOSE_PROJECT_NAME, else the
+// project directory's name (--project-directory, else the working
+// directory). A name: in the piped file is not seen: that lease then does
+// not bind, and holds its cost (failing closed).
+func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (string, error)) string {
+	switch {
+	case c.Target != "":
+		return c.Target
+	case getenv("COMPOSE_PROJECT_NAME") != "":
+		return normalProject(getenv("COMPOSE_PROJECT_NAME"))
+	case filepath.IsAbs(c.ComposeProjectDir):
+		return normalProject(filepath.Base(c.ComposeProjectDir))
+	}
+	cwd, err := getwd()
+	if err != nil {
+		return ""
+	}
+	if c.ComposeProjectDir != "" {
+		cwd = filepath.Join(cwd, c.ComposeProjectDir)
+	}
+	return normalProject(filepath.Base(cwd))
+}
+
+// normalProject is a project name as Compose normalises it: lower case,
+// only letters, digits, - and _, and no leading - or _.
+func normalProject(s string) string {
+	return strings.TrimLeft(strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+			return c
+		case c >= 'A' && c <= 'Z':
+			return c + 'a' - 'A'
+		}
+		return -1
+	}, s), "_-")
 }
 
 // composeTimeout bounds docker compose config (30-40 ms on a plain stack):

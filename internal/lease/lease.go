@@ -434,7 +434,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// a container ID) binds: anything else may have been there already.
 	var unbound []resource
 	for _, r := range fresh {
-		if e := keyed(b.open, r, b.based[source(r.kind)]); e != nil {
+		e := keyed(b.open, r, b.based[source(r.kind)])
+		if e != nil && e.oneoff && !r.oneoff && b.verdicts[r.key] != nil {
+			// A service back after a tick away (a crash loop) is no new
+			// dependency of a compose run: it keeps its verdict.
+			e = nil
+		}
+		if e != nil {
 			e.bind(r)
 			b.judge(r, gated, now)
 		} else {

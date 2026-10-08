@@ -650,3 +650,19 @@ func TestADependencyInTheOneOffsTick(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+// A service that crash-loops (out of a reading, then back) while a compose
+// run waits for its one-off is not the run's dependency: it keeps its
+// verdict, and the run's lease keeps its reservation.
+func TestARestartingServiceDoesNotBindARunsLease(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(service("api", "p", "w1")(snap())) // running before
+	c.t = c.t.Add(5 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Observe(snap()) // api crashed
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(service("api", "p", "w1")(snap())) // its restart policy
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d, want the run's whole 1 GiB", r)
+	}
+}

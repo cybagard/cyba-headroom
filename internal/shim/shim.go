@@ -45,13 +45,17 @@ func Resolve(name string, selves []string, getenv func(string) string, fallbacks
 			return true
 		}
 		target, err := filepath.EvalSymlinks(p)
-		return err == nil && filepath.Base(target) == "headroom"
+		return err == nil && HeadroomName(target)
 	})
 	if p == "" {
 		return "", ErrNotFound
 	}
 	return p, nil
 }
+
+// HeadroomName reports whether the binary at p is named as headroom is
+// installed: the one way to tell another headroom build from a real tool.
+func HeadroomName(p string) bool { return filepath.Base(p) == "headroom" }
 
 // podmanExec matches a wrapper script line that runs podman.
 var podmanExec = regexp.MustCompile(`(?m)^\s*exec\s+(\S*/)?podman(\s|$)`)

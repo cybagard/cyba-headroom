@@ -158,10 +158,19 @@ func (in *installer) installShims(bin string) {
 		return
 	}
 	fmt.Fprintf(in.out, "  shims   %s (docker, podman, tart)\n", in.shimDir)
+	// A config dir other than the default must reach the agents' shims too.
+	prefix := ""
+	if in.getenv("HEADROOM_CONFIG_DIR") != "" || in.getenv("XDG_CONFIG_HOME") != "" {
+		if dir, err := config.Dir(in.getenv); err == nil {
+			if abs, err := filepath.Abs(dir); err == nil {
+				prefix = "env HEADROOM_CONFIG_DIR=" + shellWord(abs) + " "
+			}
+		}
+	}
 	var lines []string
 	for _, a := range orcaAgents {
 		if in.lookPath != nil && in.lookPath(a) {
-			lines = append(lines, fmt.Sprintf("  %s: %s run -- %s", a, shellWord(bin), a))
+			lines = append(lines, fmt.Sprintf("  %s: %s%s run -- %s", a, prefix, shellWord(bin), a))
 		}
 	}
 	if len(lines) > 0 {
@@ -197,20 +206,24 @@ func (in *installer) uninstall(ctx context.Context) int {
 	// The binary to remove is the one the installed agent runs, unless --bin
 	// names it; with neither, no binary is ours to delete.
 	remove := []string{in.plistPath()}
+	owned := "" // the binary the shims lead to, as install linked it
 	if in.binGiven {
-		remove = append(remove, in.bin)
+		owned, _ = filepath.Abs(in.bin)
 	} else if p, err := os.ReadFile(in.plistPath()); err == nil {
 		if bin, err := launchd.ProgramPath(p); err == nil && filepath.IsAbs(bin) {
-			remove = append(remove, bin)
+			owned = bin
 		}
+	}
+	if owned != "" {
+		remove = append(remove, owned)
 	}
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
 	}
 	if in.shimDir != "" {
-		bin := in.bin
-		if len(remove) > 1 {
-			bin = remove[1]
+		bin := owned
+		if bin == "" {
+			bin, _ = filepath.Abs(in.bin)
 		}
 		// Best effort: the agent is already stopped, so finish the rest.
 		if err := unlinkShims(in.shimDir, bin); err != nil {

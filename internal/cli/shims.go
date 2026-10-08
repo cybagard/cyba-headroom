@@ -4,21 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/cybagard/cyba-headroom/internal/shim"
 )
 
 // shimList is ShimNames in a stable order.
-func shimList() []string {
-	var names []string
-	for n := range ShimNames {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	return names
-}
+func shimList() []string { return slices.Sorted(maps.Keys(ShimNames)) }
 
 // linkShims makes dir/docker, podman and tart symlinks to bin (R9, #31). A
 // link that is already right stays; one to another headroom build is
@@ -33,7 +29,7 @@ func linkShims(dir, bin string) (notes []string, err error) {
 		switch {
 		case err == nil && target == bin:
 			continue
-		case err == nil && ownLink(p, target):
+		case err == nil && ownLink(p, target, bin):
 			if err := os.Remove(p); err != nil {
 				return notes, err
 			}
@@ -57,7 +53,7 @@ func linkShims(dir, bin string) (notes []string, err error) {
 func unlinkShims(dir, bin string) error {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
-		if target, err := os.Readlink(p); err == nil && (target == bin || ownLink(p, target)) {
+		if target, err := os.Readlink(p); err == nil && ownLink(p, target, bin) {
 			if err := os.Remove(p); err != nil {
 				return err
 			}
@@ -70,26 +66,46 @@ func unlinkShims(dir, bin string) error {
 }
 
 // ownLink reports whether the link at p, to target, is headroom's to
-// replace or remove: it leads to a binary named headroom, or to nothing
-// (a link whose binary is gone gates nothing).
-func ownLink(p, target string) bool {
-	if filepath.Base(target) == "headroom" {
+// replace or remove: it leads to bin or another headroom binary, or to
+// nothing (a link whose binary is gone gates nothing).
+func ownLink(p, target, bin string) bool {
+	if target == bin || isHeadroom(p, target, bin) {
 		return true
 	}
 	_, err := os.Stat(p) // follows the link
 	return errors.Is(err, fs.ErrNotExist)
 }
 
+// isHeadroom reports whether the link at p, to target, leads to a headroom
+// binary: one named headroom, or the same file as one of known (the
+// installed or the running binary, whatever their names).
+func isHeadroom(p, target string, known ...string) bool {
+	if shim.HeadroomName(target) {
+		return true
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	for _, k := range known {
+		if ki, err := os.Stat(k); err == nil && os.SameFile(fi, ki) {
+			return true
+		}
+	}
+	return false
+}
+
 // hasShims reports whether dir holds a shim that leads to a headroom
 // binary that exists: then putting dir first on PATH gates something.
 func hasShims(dir string) bool {
+	self, _ := os.Executable()
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
 		target, err := os.Readlink(p)
-		if err != nil || filepath.Base(target) != "headroom" {
+		if err != nil {
 			continue
 		}
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil && isHeadroom(p, target, self) {
 			return true
 		}
 	}

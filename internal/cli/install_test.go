@@ -96,7 +96,7 @@ func TestInstallLinksTheShims(t *testing.T) {
 		t.Fatalf("docker -> %q, %v", target, err)
 	}
 	out := f.out.String()
-	for _, want := range []string{"claude: " + f.in.bin + " run -- claude", "kilo: " + f.in.bin + " run -- kilo", "Orca"} {
+	for _, want := range []string{f.in.bin + " run -- claude", f.in.bin + " run -- kilo", "Orca"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -347,5 +347,32 @@ func TestUninstallGoesOnWhenAShimStays(t *testing.T) {
 	code := f.in.uninstall(context.Background())
 	if _, err := os.Stat(f.plistPath()); code != 0 || !os.IsNotExist(err) || !strings.Contains(f.errb.String(), "shims") {
 		t.Fatalf("exit %d, plist %v, stderr %q", code, err, f.errb.String())
+	}
+}
+
+// A config dir set for install is carried into the printed Orca commands,
+// so the agents' shims find the same config and socket.
+func TestInstallPrintsTheConfigDir(t *testing.T) {
+	f := newInstallFixture(t)
+	f.in.install(context.Background())
+	if !strings.Contains(f.out.String(), "claude: env HEADROOM_CONFIG_DIR=/Users/dev/cfg "+f.in.bin+" run -- claude") {
+		t.Fatalf("output:\n%s", f.out.String())
+	}
+}
+
+// --bin with a relative path and another name: uninstall still removes the
+// links install made.
+func TestUninstallRemovesLinksToARelativeBin(t *testing.T) {
+	f := newInstallFixture(t)
+	t.Chdir(f.home)
+	f.in.bin, f.in.binGiven = filepath.Join("tools", "hr"), true
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: %s", f.errb.String())
+	}
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: %s", f.errb.String())
+	}
+	if _, err := os.Stat(f.in.shimDir); !os.IsNotExist(err) {
+		t.Fatalf("shims stayed: %v", err)
 	}
 }

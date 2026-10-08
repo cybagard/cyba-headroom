@@ -67,7 +67,7 @@ retention = "720h"   # 30 days; at least 24h
 
 Calls that start nothing pass straight through. If the daemon is down, every call runs, with a one-line warning.
 
-`headroom run -- <agent>` launches an agent with the shims first on PATH. Agents' tool shells keep the PATH their agent started with ([spike](docs/spikes/tool-shell-path.md)), so the gate reaches however deeply the agent nests its calls.
+`headroom run -- <agent>` launches an agent with the shims first on PATH. Claude's and Kilo's tool shells keep the PATH their agent started with ([spike](docs/spikes/tool-shell-path.md)), so calls from scripts and tools they run are gated too. One exception is a login shell (`zsh -l`, `bash -l`), which rebuilds PATH through `path_helper` and puts the real `docker` first. Detecting those calls is #33.
 
 **Gate the agents Orca launches.** In Orca → Settings → Agents, set each agent's command to run through headroom. `headroom install` prints these lines with the full path, for the agents it finds on PATH:
 

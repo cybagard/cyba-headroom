@@ -32,6 +32,9 @@ type Call struct {
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
+	// ComposeDetached is set for an up that detaches (-d, --wait): only its
+	// dry run shows what it starts.
+	ComposeDetached bool
 	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
 	// --project-directory, as given: the shim finds the project's name
 	// from them as Compose does (#33).
@@ -187,7 +190,7 @@ func DryRun(args []string) (out []string, ok bool) {
 func parseCompose(endpoint string, words, args []string) Call {
 	var project, projectDir string
 	var files, envFiles []string
-	dryRun, noUp := false, false
+	dryRun, noUp, detached := false, false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
@@ -231,6 +234,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 			dryRun = IsTrue(v)
 		case "--no-up":
 			noUp = IsTrue(v)
+		case "-d", "--detach", "--wait":
+			detached = detached || op == "up" && IsTrue(v)
 		}
 	}
 	if op == "run" {
@@ -243,7 +248,7 @@ func parseCompose(endpoint string, words, args []string) Call {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, ComposeDetached: detached, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

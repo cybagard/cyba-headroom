@@ -668,7 +668,7 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 	if got := composeProject("/usr/local/bin/docker", c, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
-	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
+	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "--profile", "*", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
@@ -832,6 +832,23 @@ func TestComposeWithProvidersIsNotDryRun(t *testing.T) {
 		r.run("docker", "compose", "-p", "x", "up", "-d")
 		if dry != 0 || r.asked[0].Idle || r.asked[0].Target != "x" {
 			t.Errorf("%s: dry run %d times, %+v", cfg, dry, r.asked[0])
+		}
+	}
+}
+
+// An attached up's dry run stops before Compose would start anything
+// ("interactive run is not supported in dry-run mode"): only a detached up,
+// or a restart, is dry-run.
+func TestAnAttachedUpIsNotDryRun(t *testing.T) {
+	for args, want := range map[string]int{"up": 0, "up --abort-on-container-exit": 0, "up -d": 1, "up --wait": 1, "restart": 1} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run(append([]string{"docker", "compose"}, strings.Fields(args)...)...)
+		if dry != want {
+			t.Errorf("%s: dry run %d times, want %d", args, dry, want)
 		}
 	}
 }

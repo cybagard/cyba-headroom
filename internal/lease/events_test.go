@@ -191,7 +191,7 @@ func TestAKillThenUpWithinATickBinds(t *testing.T) {
 	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, "w1")
 	b.Observe(s)
 	b.Observe(s)
-	b.ContainerEvent("kill", "db", "db", lbl)
+	b.ContainerEvent("kill", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db", "signal": "9"})
 	b.ContainerEvent("die", "db", "db", lbl)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
 	b.ContainerEvent("start", "db", "db", lbl)
@@ -199,5 +199,21 @@ func TestAKillThenUpWithinATickBinds(t *testing.T) {
 	b.Observe(s)
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("log: %s", log)
+	}
+}
+
+// docker kill -s HUP web reloads it: it still runs, so a start lease
+// holding web and api does not end when api exits.
+func TestAKillThatStopsNothingIsNoStop(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start web", Target: "web", ContainerID: "web",
+		Others: []policy.Start{{ID: "api"}}}, snap(), cfg)
+	b.ContainerEvent("start", "web", "web", nil)
+	b.ContainerEvent("start", "api", "api", nil)
+	b.ContainerEvent("kill", "web", "web", map[string]string{"signal": "1"})
+	b.ContainerEvent("die", "api", "api", nil)
+	if len(b.List()) != 1 {
+		t.Fatal("the lease ended while web still runs")
 	}
 }

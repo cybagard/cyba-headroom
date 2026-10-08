@@ -740,8 +740,16 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	r := containerResource(id, name, labels)
 	now := b.now()
 	switch action {
-	case "stop", "kill":
+	case "stop":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: true}
+	case "kill":
+		if sig := labels["signal"]; sig == "9" || sig == "15" {
+			// SIGKILL or SIGTERM: it stops (its die says it is gone). Any
+			// other signal (HUP: a reload) leaves it running.
+			v := b.seen[r.key]
+			v.at, v.stopped = now, true
+			b.seen[r.key] = v
+		}
 	case "start":
 		stopped := b.seen[r.key].stopped
 		b.seen[r.key] = seen{at: now}

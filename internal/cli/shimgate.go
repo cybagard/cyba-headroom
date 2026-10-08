@@ -137,10 +137,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
 		case c.Op == "up" || c.Op == "restart":
-			// Config also says whether the project may be dry-run.
+			// Config also says whether the project may be dry-run. An
+			// attached up's dry run stops before Compose would start
+			// anything ("interactive run is not supported").
 			name, plain := composeConfig(bin, c, h.composeAsk)
 			req.Target = cmp.Or(c.Target, name)
-			if plain {
+			if plain && (c.Op == "restart" || c.ComposeDetached) {
 				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
 			}
 		default:
@@ -267,7 +269,8 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 }
 
 // composeConfig asks docker compose config, as composeProject says, for
-// the project's name, and whether it is plain: no model providers. A
+// the project's name, and whether it is plain: no model providers, in any
+// profile. A
 // provider (a service's provider or models, or top-level models) runs for
 // real even in a dry run, so only a plain project is dry-run. Config
 // itself runs none.
@@ -286,7 +289,8 @@ func composeConfig(bin string, c shim.Call, ask func(bin string, args []string) 
 	for _, f := range c.ComposeEnvFiles {
 		args = append(args, "--env-file", f)
 	}
-	out, err := ask(bin, append(args, "config", "--format", "json"))
+	// Every profile's services: the call may name one, or its profile.
+	out, err := ask(bin, append(args, "--profile", "*", "config", "--format", "json"))
 	var cfg struct {
 		Name     string          `json:"name"`
 		Models   json.RawMessage `json:"models"`

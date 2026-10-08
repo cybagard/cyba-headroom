@@ -53,6 +53,12 @@ func TestParse(t *testing.T) {
 		{"podman -r --log-level=debug run -m 16g img", Call{Kind: "container", Op: "run", Command: "podman run img", Target: "img", MemoryBytes: 16 * g}},
 		{"docker --unknown value run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker --unknown", Call{}},
+		{"podman --syslog network create n1", Call{}},
+		{"docker --newbool volume create v", Call{}},
+		{"docker -v=false run -m 32g img", Call{Kind: "container", Op: "run", Command: "docker run img", Target: "img", MemoryBytes: 32 * g}},
+		{"docker start db --help", Call{}},
+		{"docker restart db -t 5", Call{Kind: "container", Op: "restart", Command: "docker restart db", Target: "db"}},
+		{"docker run img\u202egnp", Call{Kind: "container", Op: "run", Command: "docker run", Target: "img\u202egnp"}},
 		{"podman --remote -c conn run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Endpoint: "conn"}},
 		{"docker --newbool -H unix:///x run img", Call{Kind: "container", Op: "run", Command: "docker run img", Target: "img", Endpoint: "unix:///x"}},
 		{"docker run --newflag x alpine stress -m 64g", Call{Kind: "container", Op: "run", Command: "docker run"}},
@@ -83,6 +89,9 @@ func TestParse(t *testing.T) {
 		{"docker compose scale web=5", Call{Kind: "compose", Op: "scale", Command: "docker compose scale"}},
 		{"docker compose watch", Call{Kind: "compose", Op: "watch", Command: "docker compose watch"}},
 		{"docker compose watch --no-up", Call{}},
+		{"docker compose up -p proj -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
+		{"docker compose up --project-name=proj -f a.yml web", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
+		{"docker compose up -f a.yml web --dry-run", Call{}},
 		{"docker compose --verbose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
 		{"docker compose up web --dry-run", Call{}},
 		{"docker compose watch web --no-up", Call{}},
@@ -251,7 +260,7 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("Command %q does not start with %q", c.Command, argv[0])
 		}
 		for _, w := range words {
-			if w == "" || strings.HasPrefix(w, "-") || strings.ContainsAny(w, "=@") || strings.ContainsFunc(w, isSpaceOrControl) {
+			if w == "" || strings.HasPrefix(w, "-") || strings.ContainsAny(w, "=@") || strings.ContainsFunc(w, hidden) {
 				t.Fatalf("Command %q holds an unsafe word %q", c.Command, w)
 			}
 		}
@@ -263,4 +272,60 @@ func BenchmarkParse(b *testing.B) {
 	for b.Loop() {
 		Parse(argv[0], argv[1:])
 	}
+}
+
+// TestCommandListsMatchTheCLIs checks the command lists, which tell an
+// unknown flag's value from a command, against the CLIs' help text.
+func TestCommandListsMatchTheCLIs(t *testing.T) {
+	for _, c := range []struct {
+		list func(string) bool
+		help []string
+	}{
+		{isEngineCommand, []string{"docker", "podman"}},
+		{isComposeCommand, []string{"docker-compose"}},
+	} {
+		want := map[string]bool{}
+		for _, h := range c.help {
+			for _, cmd := range helpCommands(t, h) {
+				want[cmd] = true
+				if !c.list(cmd) {
+					t.Errorf("%s: %q is not in the list", h, cmd)
+				}
+			}
+		}
+		if c.list("no-such-command") {
+			t.Errorf("%v: the list takes any word", c.help)
+		}
+	}
+}
+
+var (
+	commandsHeading = regexp.MustCompile(`^([A-Z][\w ]* )?Commands:$`)
+	commandLine     = regexp.MustCompile(`^  ([a-z][a-z0-9-]*)\*?\s+\S`)
+)
+
+func helpCommands(t *testing.T, name string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name+".help"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	in := false
+	for _, l := range strings.Split(string(b), "\n") {
+		switch {
+		case commandsHeading.MatchString(l):
+			in = true
+		case l != "" && !strings.HasPrefix(l, " "):
+			in = false
+		case in:
+			if m := commandLine.FindStringSubmatch(l); m != nil {
+				out = append(out, m[1])
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s: no commands found", name)
+	}
+	return out
 }

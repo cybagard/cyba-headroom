@@ -44,12 +44,12 @@ func Parse(name string, args []string) Call {
 func parseEngine(name string, args []string) Call {
 	var c Call
 	version := false
-	args, res, _ := scanPast(args, engineGlobal, engineCommand, func(f, v string) {
+	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
 		case "--context", "-H", "--host", "-c", "--connection", "--url":
 			c.Endpoint = v
 		case "-v":
-			version = true // docker -v and podman -v print the version
+			version = isTrue(v) // docker -v and podman -v print the version
 		}
 	})
 	if res == askedHelp || version || len(args) == 0 {
@@ -78,12 +78,19 @@ func parseEngine(name string, args []string) Call {
 		return Call{}
 	}
 	var mem string
-	// Flags after the image are its command's: scan stops there.
-	pos, res, guessed := scanPast(args[1:], flags, nil, func(f, v string) {
+	seen := func(f, v string) {
 		if f == "-m" || f == "--memory" {
 			mem = v
 		}
-	})
+	}
+	var pos []string
+	var guessed bool
+	if c.Op == "run" || c.Op == "create" {
+		// Flags after the image are its command's: scan stops there.
+		pos, res, guessed = scanPast(args[1:], flags, nil, seen)
+	} else {
+		pos, res, guessed = scanAll(args[1:], flags, seen) // start db --help
+	}
 	if res == askedHelp {
 		return Call{}
 	}
@@ -92,16 +99,6 @@ func parseEngine(name string, args []string) Call {
 		c.Target = pos[0] // past a guess, it may be a flag's value
 	}
 	return c.named(append(words, c.Op))
-}
-
-// engineCommand reports whether w is a docker or podman command Parse looks
-// for.
-func engineCommand(w string) bool {
-	switch w {
-	case "run", "create", "start", "restart", "compose", "container":
-		return true
-	}
-	return false
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
@@ -123,8 +120,12 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if flags == nil {
 		return Call{}
 	}
-	// The command's own flags: -p is --publish here, not the project.
+	// The command's flags include compose's global ones, but run's own -p
+	// is --publish, not the project.
 	seen := func(f, v string) {
+		if f == "--project-name" || (f == "-p" && op != "run") {
+			project = v
+		}
 		switch f {
 		case "--dry-run":
 			dryRun = isTrue(v)
@@ -145,26 +146,31 @@ func parseCompose(endpoint string, words, args []string) Call {
 	return c.named(append(words, op))
 }
 
-func isComposeCommand(w string) bool { return composeFlags(w) != nil }
+// isComposeCommand reports whether w is a compose command; it tells an
+// unknown global flag's value from the command after it.
+func isComposeCommand(w string) bool { return composeCommands[w] }
+
+// isEngineCommand reports whether w is a docker or podman command.
+func isEngineCommand(w string) bool { return engineCommands[w] }
 
 // composeFlags is the flag table of a compose command that starts
 // containers; nil for the others.
 func composeFlags(op string) flagSet {
 	switch op {
 	case "up":
-		return composeUp
+		return composeUpAll
 	case "run":
-		return composeRun
+		return composeRunAll
 	case "start":
-		return composeStart
+		return composeStartAll
 	case "restart":
-		return composeRestart
+		return composeRestartAll
 	case "create":
-		return composeCreate
+		return composeCreateAll
 	case "scale":
-		return composeScale
+		return composeScaleAll
 	case "watch":
-		return composeWatch // builds and starts the services first
+		return composeWatchAll // builds and starts the services first
 	}
 	return nil
 }
@@ -216,13 +222,17 @@ func (c Call) named(words []string) Call {
 }
 
 // safeWord reports whether w may be shown: no flag, nothing that could hold
-// a value or credentials (= or @), no spaces or control characters.
+// a value or credentials (= or @), nothing hidden.
 func safeWord(w string) bool {
 	return w != "" && len(w) <= 128 && !strings.HasPrefix(w, "-") && !strings.ContainsAny(w, "=@") &&
-		!strings.ContainsFunc(w, isSpaceOrControl)
+		!strings.ContainsFunc(w, hidden)
 }
 
-func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
+// hidden reports whether r would not show as itself: spaces, control
+// characters, and format characters such as bidi overrides.
+func hidden(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
+}
 
 // flagSet maps the flags of a command ("-m", "--memory") to whether they take
 // a value. The tables below are checked against the CLIs' help text.
@@ -287,6 +297,10 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 					return args[i:], unknownFlag
 				}
 				if !takes {
+					if strings.HasPrefix(a[j+1:], "=") {
+						seen(f, a[j+2:]) // -v=false
+						break
+					}
 					seen(f, "true")
 					continue
 				}
@@ -373,6 +387,27 @@ func parseBytes(s string) uint64 {
 	return uint64(n * mult)
 }
 
+// withGlobals is t plus compose's global flags it does not shadow.
+func withGlobals(t flagSet) flagSet {
+	s := flagSet{}
+	for f, v := range composeGlobal {
+		s[f] = v
+	}
+	for f, v := range t {
+		s[f] = v
+	}
+	return s
+}
+
+// words builds a set of space-separated words.
+func words(list string) map[string]bool {
+	s := map[string]bool{}
+	for _, w := range strings.Fields(list) {
+		s[w] = true
+	}
+	return s
+}
+
 // flags builds a flagSet from space-separated flags that take a value and
 // ones that do not.
 func flags(value, boolean string) flagSet {
@@ -435,7 +470,26 @@ var (
 		"--build --dry-run --force-recreate --no-build --no-recreate --quiet-pull --remove-orphans --yes -y")
 	composeScale = flags("", "--dry-run --no-deps")
 	composeWatch = flags("", "--dry-run --no-up --prune --quiet")
-	tartRun      = flags(
+	// Compose takes its global flags after the command too.
+	composeUpAll      = withGlobals(composeUp)
+	composeRunAll     = withGlobals(composeRun)
+	composeStartAll   = withGlobals(composeStart)
+	composeRestartAll = withGlobals(composeRestart)
+	composeCreateAll  = withGlobals(composeCreate)
+	composeScaleAll   = withGlobals(composeScale)
+	composeWatchAll   = withGlobals(composeWatch)
+
+	// The commands, from the help text, that tell an unknown flag's value
+	// from the command after it.
+	engineCommands = words("agent ai artifact attach bake build builder buildx commit compose container context cp " +
+		"create debug desktop dhi diff events exec export extension farm generate healthcheck help history image images " +
+		"import info init inspect kill kube load login logout logs machine manifest mcp model network offload pass pause " +
+		"plugin pod port ps pull push quadlet rename restart rm rmi run save scout search secret start stats stop swarm " +
+		"system tag top unpause untag update version volume wait")
+	composeCommands = words("attach bridge build commit config cp create down events exec export images kill logs ls " +
+		"pause port ps publish pull push restart rm run scale start stats stop top unpause up version volumes wait watch")
+
+	tartRun = flags(
 		"--dir --disk --net-bridged --net-softnet-allow --net-softnet-block --net-softnet-control-fd --net-softnet-expose "+
 			"--provisioning-opts --root-disk-opts --rosetta --serial-path",
 		"--capture-system-keys --help --nested --net-host --net-softnet --no-audio --no-clipboard --no-graphics "+

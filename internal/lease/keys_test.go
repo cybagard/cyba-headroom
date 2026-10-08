@@ -1107,23 +1107,28 @@ func TestAnIdleUpTakingAnIdleUpOverEndsQuietly(t *testing.T) {
 	}
 }
 
-// A compose up waiting for its containers, then two idle ups: the second
-// still waits for what the first took over.
-func TestIdleUpsKeepWaitingForWhatTheyTookOver(t *testing.T) {
+// compose up waits for web; web comes, held by a run's lease;
+// compose up again is idle: what the first waited for came, so no "never
+// appeared".
+func TestAnIdleUpTakingAWaitingUpOverEndsQuietly(t *testing.T) {
 	b, c, log := book(t)
 	b.Observe(snap())
+	svc := func(s *protocol.Snapshot, id string) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: id, Name: id,
+			Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": id}}, "w1")
+	}
 	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db"}, snap(), cfg)
-	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
-		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
-	b.Observe(s)
+	b.Observe(svc(snap(), "db"))
 	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true, Services: []string{"db", "web"}}
-	b.Check(up, s, cfg) // web not running: it waits for web
-	up.Services = []string{"db"}
-	b.Check(up, s, cfg) // idle
-	b.Check(up, s, cfg) // idle
+	b.Check(up, svc(snap(), "db"), cfg)                           // waits for web
+	run := b.Check(labelled("w1", "web"), svc(snap(), "db"), cfg) // web comes as a run's, its label outranking the up's project
+	both := addContainer(svc(snap(), "db"), protocol.Container{ID: "web", Name: "web",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "web", protocol.LeaseLabel: run.LeaseID}}, "w1")
+	b.Observe(both)
+	b.Check(up, both, cfg) // idle
 	c.t = c.t.Add(3 * time.Minute)
-	b.Observe(s)
-	if !strings.Contains(log.String(), "never appeared") {
-		t.Fatal("web never came, and nothing said so")
+	b.Observe(both)
+	if strings.Contains(log.String(), `never appeared" lease=lease-`) && strings.Contains(log.String(), `command="docker compose up"`) {
+		t.Fatalf("log: %s", log)
 	}
 }

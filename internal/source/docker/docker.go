@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -268,4 +269,47 @@ func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]st
 		return "", nil, false, err
 	}
 	return c.ID, c.Config.Labels, c.State.Running, nil
+}
+
+// EventsPath streams container starts and exits (#67).
+var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","die"],"type":["container"]}`}}.Encode()
+
+// Events streams Docker's container start and die events to fn, with the
+// container's ID and attributes (its labels, and name), until ctx ends or
+// the stream drops: it always returns an error, and the caller reconnects.
+// Events are what a 5 s reading misses: a container that lives between
+// two readings.
+func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error {
+	if s.socket == "" {
+		return errors.New("docker: socket unknown")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+EventsPath, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("docker: GET /events: %s", resp.Status)
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev struct {
+			Type   string
+			Action string
+			Actor  struct {
+				ID         string
+				Attributes map[string]string
+			}
+		}
+		if err := dec.Decode(&ev); err != nil {
+			return fmt.Errorf("docker: events: %w", err)
+		}
+		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "die") {
+			fn(ev.Action, ev.Actor.ID, ev.Actor.Attributes)
+		}
+	}
 }

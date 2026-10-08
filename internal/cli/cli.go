@@ -232,7 +232,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	wireGate(d, cfg, log, dockerSrc)
+	book := wireGate(d, cfg, log, dockerSrc)
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
@@ -248,6 +248,7 @@ func runDaemon(e Env) int {
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
+	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEvent, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()
@@ -430,11 +431,51 @@ func usage(w io.Writer) {
 // leases (#25) to d. Every tick derives the budget and attribution, settles
 // or expires leases against that snapshot, and lists the open ones in it.
 // Checks decide against the latest snapshot and the open leases.
-func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) {
+func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) *lease.Book {
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
 	d.SetDerive(derive(book, cfg.Budget.Params()))
 	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
+	return book
+}
+
+// Eventer streams Docker's container starts and exits: the Docker source.
+type Eventer interface {
+	Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error
+}
+
+// followEvents feeds Docker's container events to fn until ctx ends (#67).
+// A stream that drops (Docker quit or restarting) is opened again after a
+// wait that doubles up to maxWait, and starts at a second again once a
+// stream delivered: meanwhile leases bind from readings alone.
+func followEvents(ctx context.Context, src Eventer, fn func(action, id, name string, labels map[string]string), wait func(context.Context, time.Duration)) {
+	const maxWait = 30 * time.Second
+	backoff := time.Second
+	for ctx.Err() == nil {
+		delivered := false
+		_ = src.Events(ctx, func(action, id string, attrs map[string]string) {
+			delivered = true
+			fn(action, id, attrs["name"], attrs)
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if delivered {
+			backoff = time.Second
+		}
+		wait(ctx, backoff)
+		backoff = min(2*backoff, maxWait)
+	}
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // derive fills in what each tick computes from the sources: the budget,

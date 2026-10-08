@@ -71,6 +71,9 @@ type Book struct {
 	// of: until then, every resource of that source may have been there
 	// already.
 	based map[string]bool
+	// gone are the containers Docker's events said exited since the last
+	// reading (#67).
+	gone map[string]bool
 	// verdicts say, for each resource seen within the lease timeout, how it
 	// started (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
@@ -146,7 +149,7 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
 	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
-		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}}
+		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, gone: map[string]bool{}}
 }
 
 // dockerSettle is how long after the Docker engine comes back its
@@ -391,6 +394,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	defer b.mu.Unlock()
 	now := b.now()
 	res := resources(s)
+	clear(b.gone) // the reading is the word on what runs now
 	// The Docker engine back after a fresh reading showed it down restarts
 	// containers itself: those appearing soon after are a baseline.
 	if d := s.Docker; d != nil && readable(s, "container") {
@@ -551,15 +555,66 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			return true
 		case len(e.bound) > 0 && e.used >= e.cost:
 			return true // its resources use the cost
-		case len(e.bound) > 0 && !alive && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= len(e.containerIDs):
-			// Its container or VM is gone. A compose project's first
-			// container may be a one-shot; the services come after it, as
-			// may a start's other containers.
+		case !alive && e.over():
 			return true
 		}
 		return false
 	})
 	b.expire(now)
+}
+
+// over reports whether e ends once its containers or VM are gone: not a
+// compose project's, whose first container may be a one-shot with the
+// services after it, nor a start's before each of its containers came.
+func (e *entry) over() bool {
+	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= len(e.containerIDs)
+}
+
+// ContainerEvent takes Docker's word that a container started or exited
+// (#67): one that lives between two readings still binds the lease its
+// call took, and its exit ends that lease at once. An event only binds:
+// whether an unbound container was gated is the next reading's to judge.
+func (b *Book) ContainerEvent(action, id, name string, labels map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r := resource{key: "container:" + id, id: id, name: name, kind: "container", lease: labels[protocol.LeaseLabel]}
+	if p := labels[protocol.ComposeProjectLabel]; p != "" {
+		r.kind, r.project, r.dir = "compose", p, labels[protocol.ComposeWorkingDirLabel]
+		r.oneoff = labels["com.docker.compose.oneoff"] == "True"
+	}
+	now := b.now()
+	switch action {
+	case "start":
+		delete(b.gone, r.key)
+		if b.boundAnywhere(r.key) {
+			return
+		}
+		e := keyed(b.open, r, b.based[source(r.kind)])
+		switch {
+		case e == nil:
+			return
+		case b.prev[r.key] && !e.labelled && !slices.Contains(e.containerIDs, id):
+			return // a container already seen (a restart policy's restart) is no name's
+		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
+			return // a crash-looping service is no new dependency of a compose run
+		}
+		e.bind(r)
+		b.judge(r, gated, now)
+	case "die":
+		b.gone[r.key] = true
+		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
+			if !e.bound[r.key] || !e.over() {
+				return false
+			}
+			for k := range e.bound {
+				if !b.gone[k] {
+					return false
+				}
+			}
+			b.log.Debug("lease ended: its container exited", "lease", e.ID, "worktree", e.Worktree)
+			return true
+		})
+	}
 }
 
 // expire drops leases past their timeout: quietly if they bound their

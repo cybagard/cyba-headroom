@@ -320,3 +320,21 @@ func TestInspectResolvesAContainer(t *testing.T) {
 		}
 	}
 }
+
+func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		docker.EventsPath: `{"Type":"container","Action":"start","Actor":{"ID":"abc","Attributes":{"name":"quick","dev.headroom.lease":"lease-1-2"}}}
+{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"name":"quick","exitCode":"0"}}}
+`,
+	})
+	var got []string
+	err := docker.New(sock, nil).Events(context.Background(), func(action, id string, attrs map[string]string) {
+		got = append(got, action+" "+id+" "+attrs["name"]+" "+attrs["dev.headroom.lease"])
+	})
+	if want := []string{"start abc quick lease-1-2", "die abc quick "}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+	if err == nil {
+		t.Fatal("a stream that ends must say so: the caller reconnects")
+	}
+}

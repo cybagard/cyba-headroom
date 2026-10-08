@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -263,5 +264,38 @@ func TestGateLooksUpEveryTarget(t *testing.T) {
 		Target: "a", Targets: []string{"a", "b", "c"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
 	if d.LeaseID == "" || len(book.List()) != 1 || book.List()[0].Bytes != 2*pol.DefaultContainerBytes {
 		t.Fatalf("decision %+v, leases %+v: want b and c reserved", d, book.List())
+	}
+}
+
+type fakeEvents struct {
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (f *fakeEvents) Events(_ context.Context, fn func(action, id string, attrs map[string]string)) error {
+	f.calls++
+	if f.calls == 1 {
+		fn("start", "Q", map[string]string{"name": "quick"})
+	}
+	if f.calls == 3 {
+		f.cancel()
+	}
+	return errors.New("stream dropped")
+}
+
+// The daemon follows Docker's events, and reconnects with a growing wait
+// when the stream drops, back to the shortest once one delivered.
+func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeEvents{cancel: cancel}
+	var waits []time.Duration
+	var got []string
+	followEvents(ctx, f, func(action, id, name string, _ map[string]string) { got = append(got, action+" "+id+" "+name) },
+		func(_ context.Context, d time.Duration) { waits = append(waits, d) })
+	if fmt.Sprint(got) != "[start Q quick]" || f.calls != 3 {
+		t.Fatalf("events %v, calls %d", got, f.calls)
+	}
+	if len(waits) != 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
+		t.Fatalf("waits = %v", waits)
 	}
 }

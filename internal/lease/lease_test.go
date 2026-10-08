@@ -612,3 +612,41 @@ func TestATartLeaseBindsTheVMItsProcessRuns(t *testing.T) {
 		t.Fatalf("the slot is counted twice: %+v", d)
 	}
 }
+
+// A macOS lease is settled by a VM of unknown OS (counted as macOS), and a
+// lease binds the VM its process runs whatever its OS (#29).
+func TestTartLeasesBindUnknownAndOwnVMs(t *testing.T) {
+	b, _, _ := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true}
+	c := cfg
+	c.MaxMacOSVMs = 2
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}, s, c)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run x", CostBytes: gib, MacOS: true, VMUnknown: true, PID: 30}, s, c)
+	s.Tart.VMs = []protocol.TartVM{{Name: "m"}, {Name: "x", OS: "linux", RunPID: 30}}
+	s.Tart.MacOSRunning = 1
+	b.Observe(s)
+	// Both leases are bound: nothing is starting, one macOS VM runs.
+	if d := b.Check(policy.Request{Worktree: "w2", Kind: "tart", Command: "tart run n", CostBytes: gib, MacOS: true}, s, c); !d.Allow {
+		t.Fatalf("a bound lease still counts as starting: %+v", d)
+	}
+}
+
+// A tart behind a wrapper that forks has another PID than the lease; its
+// VM still settles the lease.
+func TestATartLeaseBindsAVMRunByAWrapper(t *testing.T) {
+	b, _, _ := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true}
+	c := cfg
+	c.MaxMacOSVMs = 2
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, PID: 40}, s, c)
+	s.Tart.VMs = []protocol.TartVM{{Name: "m", OS: "darwin", RunPID: 41}}
+	s.Tart.MacOSRunning = 1
+	b.Observe(s)
+	if d := b.Check(policy.Request{Worktree: "w2", Kind: "tart", Command: "tart run n", CostBytes: gib, MacOS: true}, s, c); !d.Allow {
+		t.Fatalf("the wrapped VM did not settle its lease: %+v", d)
+	}
+}

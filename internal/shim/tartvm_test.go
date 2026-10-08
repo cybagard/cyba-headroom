@@ -12,6 +12,7 @@ func TestTartVM(t *testing.T) {
 		"mac-ci":   `{"os":"darwin","memorySize":17179869184,"cpuCount":8}`,
 		"linux-ci": `{"os":"linux","memorySize":4294967296}`,
 		"broken":   `{"os":`,
+		"old-mac":  `{"memorySize":8589934592}`, // before Linux support: macOS
 	} {
 		if err := os.MkdirAll(filepath.Join(home, "vms", name), 0o755); err != nil {
 			t.Fatal(err)
@@ -39,6 +40,7 @@ func TestTartVM(t *testing.T) {
 		{"mac-ci", true, 16 << 30, true},
 		{"linux-ci", false, 4 << 30, true},
 		{"broken", false, 0, false},
+		{"old-mac", true, 8 << 30, true},
 		{"missing", false, 0, false},
 		{"ghcr.io/cirruslabs/macos-sequoia-base:latest", true, 8 << 30, true}, // a cached OCI image
 		{"ghcr.io/cirruslabs/macos-sequoia-base", true, 8 << 30, true},        // :latest

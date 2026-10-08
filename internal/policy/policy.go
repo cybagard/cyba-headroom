@@ -163,7 +163,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 }
 
 // slots is the macOS VM slot rule: running plus starting macOS VMs must
-// leave one free. Without a fresh Tart reading the count is unknown, and
+// stay below the slot count for one more to start. Without a fresh Tart reading the count is unknown, and
 // the call is decided on memory alone (R7).
 func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 	if !r.MacOS || s.Tart == nil || s.Sources["tart"].Stale {
@@ -228,9 +228,11 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, stop string)
 		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, w.Name, state)}
 		if !working {
 			h.rank, h.idle = 0, since
-			// Offered for stopping only as the idle-holder rule calls
-			// it idle, and only under a plain name.
-			h.offer = idle(s, w.ID, c) && shown == vm.Name
+			// Offered for stopping only when the idle-holder rule calls
+			// it idle and how long is known, and only under a plain name
+			// that cannot read as a flag.
+			h.offer = idle(s, w.ID, c) && (since > 0 || state == "no agents") &&
+				shown == vm.Name && !strings.HasPrefix(vm.Name, "-")
 		}
 		hs = append(hs, h)
 	}
@@ -360,7 +362,7 @@ func idle(s *protocol.Snapshot, id string, c Config) bool {
 			continue
 		}
 		for _, a := range w.Agents {
-			if a.State == "working" || a.StateSince.IsZero() || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
+			if a.State == "working" || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
 				return false
 			}
 		}

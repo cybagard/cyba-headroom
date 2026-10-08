@@ -225,10 +225,11 @@ func TestPolicyConfig(t *testing.T) {
 		d.IdleGrace.Duration != 2*time.Minute {
 		t.Fatalf("defaults = %+v", d)
 	}
-	p := Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5,
-		DefaultTartGB: 8, IdleGrace: Duration{time.Minute}}.Config()
+	p := Config{Policy: Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5,
+		DefaultTartGB: 8, IdleGrace: Duration{time.Minute}}, Budget: Budget{MaxMacOSVMs: 2}}.PolicyConfig()
 	if p.MinHeadroomBytes != 6<<30 || p.PerWorktreeCapBytes != 12<<30 || p.PressureGuard != "warn" ||
-		p.GuardRising || p.DefaultContainerBytes != 1<<29 || p.DefaultTartBytes != 8<<30 || p.IdleGrace != time.Minute || p.Now == nil {
+		p.GuardRising || p.DefaultContainerBytes != 1<<29 || p.DefaultTartBytes != 8<<30 || p.IdleGrace != time.Minute || p.Now == nil ||
+		p.MaxMacOSVMs != 2 {
 		t.Fatalf("policy config = %+v", p)
 	}
 	dir := shortTempDir(t)

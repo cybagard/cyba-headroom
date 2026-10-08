@@ -202,8 +202,8 @@ func (e *entry) takes(r resource) bool {
 	if e.Kind == "compose" {
 		return e.project == "" || e.project == r.project
 	}
-	if e.macOS && r.os != "darwin" {
-		return false // a macOS lease's slot is freed by a macOS VM only
+	if e.macOS && r.os != "darwin" && r.os != "" {
+		return false // a macOS lease's slot is freed by a macOS VM only ("": unknown, counted as one)
 	}
 	return len(e.bound) == 0
 }
@@ -331,8 +331,8 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 	// shim became tart run, keeping its PID.
 	if r.runPID > 0 {
 		for _, e := range b.open {
-			if e.pid == r.runPID && e.waitsFor() == r.kind && e.takes(r) {
-				return e
+			if e.pid == r.runPID && e.waitsFor() == r.kind && len(e.bound) == 0 {
+				return e // its own VM, whatever the shim guessed its OS to be
 			}
 		}
 	}
@@ -341,9 +341,6 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 		for _, e := range b.open {
 			if now.Before(e.Expires) != live || e.waitsFor() != r.kind || !e.takes(r) {
 				continue
-			}
-			if e.pid > 0 && r.runPID > 0 {
-				continue // both processes known, and they differ
 			}
 			if r.worktree != "" && e.Worktree == r.worktree {
 				return e

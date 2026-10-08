@@ -116,8 +116,16 @@ type Policy struct {
 	IdleGrace Duration `toml:"idle_grace"`
 }
 
-// Config converts the settings to the policy engine's.
-func (p Policy) Config() policy.Config {
+// PolicyConfig is the policy engine's settings: the [policy] table and the
+// macOS VM slot count from [budget].
+func (c Config) PolicyConfig() policy.Config {
+	p := c.Policy.config()
+	p.MaxMacOSVMs = c.Budget.MaxMacOSVMs
+	return p
+}
+
+// config converts the [policy] settings to the policy engine's.
+func (p Policy) config() policy.Config {
 	return policy.Config{
 		MinHeadroomBytes:      GiB(p.MinHeadroomGB),
 		PerWorktreeCapBytes:   GiB(p.PerWorktreeCapGB),

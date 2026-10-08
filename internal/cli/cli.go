@@ -421,15 +421,8 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
 		book.Observe(s)
 		s.Leases = book.List()
 	})
-	d.SetCheck(gateCheck(book, gatePolicy(cfg)))
+	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
 	d.SetRelease(book.Release)
-}
-
-// gatePolicy is the policy's settings from the config.
-func gatePolicy(cfg config.Config) policy.Config {
-	p := cfg.Policy.Config()
-	p.MaxMacOSVMs = cfg.Budget.MaxMacOSVMs
-	return p
 }
 
 // gateCheck answers a check: it finds the calling worktree (#28), then

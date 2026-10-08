@@ -49,7 +49,8 @@ func TartVM(name string, getenv func(string) string) (macOS bool, memoryBytes ui
 	if json.Unmarshal(b, &cfg) != nil {
 		return false, 0, false
 	}
-	return cfg.OS == "darwin", cfg.MemorySize, true
+	// Configs from before tart supported Linux have no os: they are macOS.
+	return cfg.OS == "darwin" || cfg.OS == "", cfg.MemorySize, true
 }
 
 // ociDir is where Tart caches an OCI reference: its repository path, then

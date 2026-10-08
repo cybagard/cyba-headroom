@@ -45,7 +45,7 @@ func TestGateLeasesAcrossChecks(t *testing.T) {
 // The daemon resolves who is calling before deciding (#28).
 func TestGateIdentifiesTheCaller(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	check := gateCheck(book, config.Defaults("/x").Policy.Config())
+	check := gateCheck(book, config.Defaults("/x").PolicyConfig())
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},
@@ -78,7 +78,7 @@ func TestGateIdentifiesTheCaller(t *testing.T) {
 func TestGateCountsMacOSSlots(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
 	cfg := config.Defaults("/x")
-	check := gateCheck(book, gatePolicy(cfg))
+	check := gateCheck(book, cfg.PolicyConfig())
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{
 		Budget: &protocol.Budget{HeadroomBytes: &headroom},

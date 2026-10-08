@@ -186,16 +186,18 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.ContainerID == "" && r.Target != "" && (len(r.Others) > 0 || r.Unresolved > 0) {
 		unresolved++
 	}
-	if r.Missing > 0 && r.ContainerID == "" && r.Target == "" && len(r.Others) == 0 && r.Unresolved == 0 {
-		// docker start nope: no container it names exists, so it starts
-		// nothing (Docker says so). Allowed, and no lease.
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (no such container)", Summary(r.Command))}
-	}
-	if r.ContainerID != "" && unresolved == 0 && !r.MultiTarget && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
-		// A start or restart of containers Docker says run: it starts
-		// nothing new, and they already count. Allowed, whatever the
-		// pressure, and no lease.
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
+	// Docker said what each target is: one it resolved, or one that does
+	// not exist (it starts nothing).
+	known := (r.ContainerID != "" || r.FirstMissing) && unresolved == 0 && !r.MultiTarget
+	if known && !slices.ContainsFunc(starts, func(t policy.Start) bool { return !t.Running }) {
+		// A start or restart of containers Docker says run, or that do not
+		// exist: it starts nothing new, and they already count. Allowed,
+		// whatever the pressure, and no lease.
+		why := "it already runs"
+		if len(starts) == 0 {
+			why = "no such container"
+		}
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (%s)", Summary(r.Command), why)}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -211,7 +213,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
 		return t.Running || b.boundAnywhere("container:"+t.ID)
 	})
-	if r.ContainerID != "" && len(starts) == 0 && unresolved == 0 && !r.MultiTarget {
+	if known && len(starts) == 0 {
 		// Allowed, and no new lease. Not when others went unresolved:
 		// they are no lease's.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
@@ -259,11 +261,15 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			idle = idle && running[sv] > 0
 			running[sv]--
 		}
-		if idle {
-			r.CostBytes = 1 // 0 means the default
-		}
 	}
-	d := policy.Decide(r, s, c)
+	var d protocol.Decision
+	if idle {
+		// It starts nothing: allowed whatever the pressure, as a start of
+		// a running container. Its lease binds the stack.
+		d = protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its stack runs)", Summary(r.Command))}
+	} else {
+		d = policy.Decide(r, s, c)
+	}
 	d.LeasedBytes = r.LeasedBytes
 	if !d.Allow {
 		return d
@@ -326,7 +332,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// what the check reserved stays reserved. Only those held by no
 		// lease.
 		for _, x := range stack {
-			if !e.oneoff && !e.bound[x.key] && !b.boundAnywhere(x.key) {
+			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
 				e.cost, e.used = e.cost+x.bytes, e.used+x.bytes
 			}

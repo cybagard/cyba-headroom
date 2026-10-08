@@ -910,3 +910,25 @@ func TestAnIdleUpEndsQuietly(t *testing.T) {
 		t.Fatalf("log: %s", log)
 	}
 }
+
+// docker start nope b, b running: it starts nothing, in either order.
+func TestAStartOfAMissingAndARunningTakesNoLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start nope", FirstMissing: true,
+		Others: []policy.Start{{ID: "B", Running: true}}}, snap(), cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("decision %+v", d)
+	}
+}
+
+// An up that starts nothing is allowed whatever the pressure.
+func TestAnIdleUpIsAllowedUnderPressure(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "db", Name: "db",
+		Labels: map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}}, "w1")
+	s.Host.Pressure = "critical"
+	b.Observe(s)
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Services: []string{"db"}}, s, cfg); !d.Allow {
+		t.Fatalf("decision %+v", d)
+	}
+}

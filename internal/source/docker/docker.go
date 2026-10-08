@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -234,7 +235,11 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/containers/") {
-		return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
+		// Docker's own answer, not any proxy's 404.
+		var e struct{ Message string }
+		if json.NewDecoder(resp.Body).Decode(&e) == nil && strings.HasPrefix(e.Message, "No such container") {
+			return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET %s: %s", path, resp.Status)
@@ -256,12 +261,19 @@ func (r reading) Apply(s *protocol.Snapshot) {
 // start of it starts nothing.
 var ErrNoSuchContainer = errors.New("no such container")
 
+// containerRef is a container name or ID as Docker forms them: only such a
+// reference that Docker does not find is known missing.
+var containerRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
 // Inspect resolves a container name, ID or ID prefix to its full ID, its
 // labels and whether it runs, as Docker resolves the target of a docker
 // start (#33).
 func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
-	if ref == "" || strings.ContainsAny(ref, "/?#%") {
-		return "", nil, false, fmt.Errorf("docker: not a container reference: %q: %w", ref, ErrNoSuchContainer)
+	ref = strings.TrimSpace(ref) // as the docker CLI does
+	if !containerRef.MatchString(ref) {
+		// Unknown, not missing: Docker may read it otherwise, and a start
+		// of it costs.
+		return "", nil, false, fmt.Errorf("docker: not a container reference: %q", ref)
 	}
 	var c struct {
 		ID     string `json:"Id"`

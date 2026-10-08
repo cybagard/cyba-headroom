@@ -60,7 +60,11 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 		body, ok := routes[r.URL.RequestURI()]
 		mu.Unlock()
 		if !ok {
-			http.Error(w, `{"message":"no route"}`, http.StatusNotFound)
+			msg := `{"message":"no route"}`
+			if strings.HasPrefix(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/json") {
+				msg = `{"message":"No such container: x"}` // as Docker answers
+			}
+			http.Error(w, msg, http.StatusNotFound)
 			return
 		}
 		if code, ok := strings.CutPrefix(body, "!"); ok { // "!409": reply with that status
@@ -344,12 +348,35 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 func TestInspectSaysNoSuchContainer(t *testing.T) {
 	sock, _ := engine(t, map[string]string{})
 	s := docker.New(sock, nil)
-	for _, ref := range []string{"gone", "x%"} {
-		if _, _, _, err := s.Inspect(context.Background(), ref); !errors.Is(err, docker.ErrNoSuchContainer) {
-			t.Errorf("Inspect(%q) = %v, want ErrNoSuchContainer", ref, err)
+	if _, _, _, err := s.Inspect(context.Background(), "gone"); !errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Errorf("Inspect(gone) = %v, want ErrNoSuchContainer", err)
+	}
+	// Only a well-formed name or ID is known missing: anything Docker
+	// might read otherwise is unknown, and costs.
+	for _, ref := range []string{"x%", "a/b", "/db", "a b", "-x"} {
+		if _, _, _, err := s.Inspect(context.Background(), ref); err == nil || errors.Is(err, docker.ErrNoSuchContainer) {
+			t.Errorf("Inspect(%q) = %v, want an error that is not ErrNoSuchContainer", ref, err)
 		}
 	}
 	if _, _, _, err := docker.New(filepath.Join(shortDir(t), "none.sock"), nil).Inspect(context.Background(), "db"); errors.Is(err, docker.ErrNoSuchContainer) {
 		t.Fatal("no engine is not no such container")
+	}
+}
+
+// The docker CLI trims a start's target: so does the lookup.
+func TestInspectTrimsAsDockerDoes(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		"/containers/db/json": `{"Id":"abc123","Config":{"Labels":{}},"State":{"Running":false}}`,
+	})
+	if id, _, _, err := docker.New(sock, nil).Inspect(context.Background(), " db "); err != nil || id != "abc123" {
+		t.Fatalf("Inspect(\" db \") = %q, %v", id, err)
+	}
+}
+
+// A 404 that is not Docker's "No such container" (a proxy's) is unknown.
+func TestInspectTrustsOnlyDockersNotFound(t *testing.T) {
+	sock, _ := engine(t, map[string]string{"/containers/db/json": "!404"})
+	if _, _, _, err := docker.New(sock, nil).Inspect(context.Background(), "db"); err == nil || errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Fatalf("err = %v", err)
 	}
 }

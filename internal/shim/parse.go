@@ -35,6 +35,8 @@ type Call struct {
 	// services; ComposeScaled is set for an up or create with --scale.
 	ComposeProfiles []string
 	ComposeScaled   bool
+	// ComposeNamed is set for an up that names services.
+	ComposeNamed bool
 	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
 	// --project-directory, as given: the shim finds the project's name
 	// from them as Compose does (#33).
@@ -169,7 +171,7 @@ func Labelled(name string, args []string, key, value string) (out []string, ok b
 func parseCompose(endpoint string, words, args []string) Call {
 	var project, projectDir string
 	var files, envFiles, profiles []string
-	dryRun, noUp, scaled := false, false, false
+	dryRun, noUp, scaled, named := false, false, false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
@@ -225,13 +227,15 @@ func parseCompose(endpoint string, words, args []string) Call {
 		// Flags after the service are its command's.
 		_, res, _ = scanPast(args[1:], flags, nil, seen)
 	} else {
-		_, res, _ = scanAll(args[1:], flags, seen) // flags may follow services
+		var pos []string
+		pos, res, _ = scanAll(args[1:], flags, seen) // flags may follow services
+		named = op == "up" && len(pos) > 0
 	}
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeScaled: scaled, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, ComposeProfiles: profiles, ComposeScaled: scaled, ComposeNamed: named, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

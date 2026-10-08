@@ -275,31 +275,31 @@ func composeProject(bin string, c shim.Call, ask func(bin string, args []string)
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
 		return c.Target, nil
 	}
-	if c.ComposeScaled {
-		return cmp.Or(c.Target, cfg.Name), nil // --scale: not what Compose lists
+	name := cmp.Or(c.Target, cfg.Name)
+	if c.ComposeScaled || c.ComposeNamed {
+		// --scale, or services named (which turns their profiles on):
+		// not what Compose lists.
+		return name, nil
 	}
 	// An up's services, a name per replica: those already running start
 	// nothing new.
 	var services []string
-	for _, name := range slices.Sorted(maps.Keys(cfg.Services)) {
-		sv := cfg.Services[name]
-		n := cmp.Or(sv.Deploy.Replicas, sv.Scale)
+	for _, sv := range slices.Sorted(maps.Keys(cfg.Services)) {
 		replicas := 1
-		if n != nil {
-			replicas = min(max(*n, 0), maxReplicas)
+		if n := cmp.Or(cfg.Services[sv].Deploy.Replicas, cfg.Services[sv].Scale); n != nil {
+			replicas = max(*n, 0)
+		}
+		if replicas > maxReplicas {
+			return name, nil // too many to list: the up keeps its estimate
 		}
 		for range replicas {
-			services = append(services, name)
+			services = append(services, sv)
 		}
 	}
-	if len(services) == 0 {
-		return cmp.Or(c.Target, cfg.Name), nil
-	}
-	return cmp.Or(c.Target, cfg.Name), services
+	return name, services
 }
 
-// maxReplicas bounds the replicas a service is listed with: past it, the
-// up's share per replica only shrinks.
+// maxReplicas bounds the replicas a service is listed with.
 const maxReplicas = 64
 
 // composeStdinProject names the project of compose -f - as Compose does

@@ -485,14 +485,14 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
 	case got[0].missing:
 		req.Target = "" // no such container: Docker starts it not, and no name of it comes
-		req.Missing++
+		req.FirstMissing = true
+		req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
 	}
 	for _, f := range got[1:] {
 		switch {
 		case f.ok:
 			req.Others = append(req.Others, f.Start)
-		case f.missing:
-			req.Missing++
+		case f.missing: // starts nothing
 		default:
 			req.Unresolved++
 		}

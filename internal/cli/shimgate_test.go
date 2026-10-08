@@ -771,8 +771,17 @@ func TestComposeProjectListsProfilesAndReplicas(t *testing.T) {
 	if i := slices.Index(asked, "--profile"); i < 0 || asked[i+1] != "heavy" || i > slices.Index(asked, "config") {
 		t.Fatalf("asked %q, want --profile heavy before config", asked)
 	}
-	// --scale overrides what Compose would list: the up reserves its estimate.
-	if _, services := composeProject("/d", shim.Call{Op: "up", ComposeScaled: true}, ask); services != nil {
-		t.Fatalf("scaled: services = %q, want none", services)
+	// --scale, or named services (their profiles on), are not what
+	// Compose lists: the up reserves its estimate.
+	for _, c := range []shim.Call{{Op: "up", ComposeScaled: true}, {Op: "up", ComposeNamed: true}} {
+		if _, services := composeProject("/d", c, ask); services != nil {
+			t.Fatalf("%+v: services = %q, want none", c, services)
+		}
+	}
+	many := func(string, []string) ([]byte, error) {
+		return []byte(`{"name":"x","services":{"web":{"deploy":{"replicas":100}}}}`), nil
+	}
+	if _, services := composeProject("/d", shim.Call{Op: "up"}, many); services != nil {
+		t.Fatalf("100 replicas: %d listed, want none", len(services))
 	}
 }

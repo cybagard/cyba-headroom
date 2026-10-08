@@ -310,19 +310,26 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// worktree. Without a baseline (a lease taken before the first
 	// reading), any resource may have been there already: only one of the
 	// lease's own worktree is taken as its call's.
-	// A container that carries its lease's ID went through the shim: it
-	// binds that lease, or, when the lease is gone (it ended, or was an
-	// earlier daemon run's), is gated all the same.
+	// A container that carries the ID of an open lease of a labelled call
+	// went through the shim: it binds that lease. Any other label value
+	// counts for nothing: forged, inherited from a committed image, or of
+	// a lease long gone (the container is matched as any other).
 	var unbound []resource
 	for _, r := range fresh {
-		if r.lease == "" {
-			unbound = append(unbound, r)
+		if e := b.labelledLease(r); e != nil {
+			// A docker start of a created container: the start's lease
+			// takes it, and the create's ends, having started nothing.
+			if st := b.startNaming(r); st != nil {
+				st.bind(r)
+				b.open = slices.DeleteFunc(b.open, func(o *entry) bool { return o == e })
+				b.log.Debug("lease ended: its container was started by a later call", "lease", e.ID, "command", e.Command)
+			} else {
+				e.bind(r)
+			}
+			b.judge(r, gated, now)
 			continue
 		}
-		if i := slices.IndexFunc(b.open, func(e *entry) bool { return e.ID == r.lease }); i >= 0 {
-			b.open[i].bind(r)
-		}
-		b.judge(r, gated, now)
+		unbound = append(unbound, r)
 	}
 	for _, find := range []func(resource, time.Time, bool) *entry{b.named, b.match} {
 		var left []resource
@@ -536,6 +543,32 @@ func (b *Book) match(r resource, now time.Time, ownOnly bool) *entry {
 		}
 	}
 	return nil
+}
+
+// labelledLease is the open lease r's label names, if it is a labelled
+// call's that waits for r's kind and has bound nothing yet.
+func (b *Book) labelledLease(r resource) *entry {
+	if r.lease == "" {
+		return nil
+	}
+	i := slices.IndexFunc(b.open, func(e *entry) bool {
+		return e.ID == r.lease && e.labelled && e.waitsFor() == r.kind && len(e.bound) == 0
+	})
+	if i < 0 {
+		return nil
+	}
+	return b.open[i]
+}
+
+// startNaming is an open docker start or restart lease that names r.
+func (b *Book) startNaming(r resource) *entry {
+	i := slices.IndexFunc(b.open, func(e *entry) bool {
+		return !e.labelled && isStart(e.Command) && e.waitsFor() == r.kind && e.takes(r) && e.names(r)
+	})
+	if i < 0 {
+		return nil
+	}
+	return b.open[i]
 }
 
 // lapsedFor reports whether a lapsed lease is r's, and spends it: one its

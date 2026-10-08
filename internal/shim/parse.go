@@ -46,8 +46,9 @@ func Parse(name string, args []string) Call {
 	return Call{}
 }
 
-// parseEngine parses a docker or podman call. at is the index in args of
-// its subcommand (run, create, ...), or -1.
+// parseEngine parses a docker or podman call. at is where a run or create
+// takes one more option last: before its image (and a "--" ahead of it), or
+// right after the subcommand when the image is not known; -1 otherwise.
 func parseEngine(name string, all []string) (c Call, at int) {
 	args := all
 	version := false
@@ -69,7 +70,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 			return Call{}, -1
 		}
 	}
-	at = len(all) - len(args) // args is what is left of all
+	opAt := len(all) - len(args) // args is what is left of all
 	c.Op = args[0]
 	var flags flagSet
 	switch c.Op {
@@ -106,8 +107,16 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		return Call{}, -1
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
+	at = -1
 	if c.Op == "run" || c.Op == "create" {
 		c.Name = cname
+		at = opAt + 1
+		if !guessed && len(pos) > 0 {
+			at = len(all) - len(pos) // pos is what is left: the image on
+			if all[at-1] == "--" {
+				at--
+			}
+		}
 	}
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
@@ -116,20 +125,20 @@ func parseEngine(name string, all []string) (c Call, at int) {
 }
 
 // Labelled returns a docker or podman run or create call's args with a
-// --label key=value added after its subcommand, so the container it
-// creates carries it. ok is false for any other call, which creates no
+// --label key=value added as its last option, so the container it creates
+// carries it: Docker keeps the last --label of a key, after --label-file. ok is false for any other call, which creates no
 // container (start, compose, tart) or none at all; args is not changed.
 func Labelled(name string, args []string, key, value string) (out []string, ok bool) {
 	if name != "docker" && name != "podman" {
 		return nil, false
 	}
 	c, at := parseEngine(name, args)
-	if c.Kind != "container" || (c.Op != "run" && c.Op != "create") || at < 0 {
+	if c.Kind != "container" || at < 0 {
 		return nil, false
 	}
-	out = append(out, args[:at+1]...)
+	out = append(out, args[:at]...)
 	out = append(out, "--label", key+"="+value)
-	return append(out, args[at+1:]...), true
+	return append(out, args[at:]...), true
 }
 
 func parseCompose(endpoint string, words, args []string) Call {

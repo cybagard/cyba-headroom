@@ -11,10 +11,14 @@ func TestLabelled(t *testing.T) {
 	for _, tc := range []struct {
 		name, args, want string
 	}{
-		{"docker", "run --rm alpine true", "run --label " + l + " --rm alpine true"},
-		{"docker", "--context default run -d alpine", "--context default run --label " + l + " -d alpine"},
-		{"docker", "container create --name db postgres", "container create --label " + l + " --name db postgres"},
+		// Last before the image: Docker keeps the last --label of a key,
+		// and applies --label-file before --label.
+		{"docker", "run --rm alpine true", "run --rm --label " + l + " alpine true"},
+		{"docker", "--context default run -d alpine", "--context default run -d --label " + l + " alpine"},
+		{"docker", "container create --name db postgres", "container create --name db --label " + l + " postgres"},
 		{"podman", "run alpine", "run --label " + l + " alpine"},
+		{"docker", "run --label dev.headroom.lease=forged --label-file f alpine", "run --label dev.headroom.lease=forged --label-file f --label " + l + " alpine"},
+		{"docker", "run -e X=1 -- alpine", "run -e X=1 --label " + l + " -- alpine"},
 		// Nothing to label: the container exists, or compose and tart
 		// start their own.
 		{"docker", "start db", ""},

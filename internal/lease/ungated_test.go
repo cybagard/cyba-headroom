@@ -558,16 +558,6 @@ func TestTheLabelSaysWhichContainerIsGated(t *testing.T) {
 	}
 }
 
-func TestALabelledContainerWhoseLeaseIsGoneIsGated(t *testing.T) {
-	b, _, _ := book(t)
-	b.Observe(snap())
-	// From an earlier daemon run, or long after its lease ended.
-	b.Observe(withLabel(snap(), "x", "alpine", "lease-0ld-1", ""))
-	if got := ungatedKeys(b); len(got) != 0 {
-		t.Fatalf("ungated = %v", got)
-	}
-}
-
 func TestALabelledLeaseBindsOnlyItsLabel(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(snap())
@@ -581,6 +571,58 @@ func TestALabelledLeaseBindsOnlyItsLabel(t *testing.T) {
 	b.Observe(withLabel(snap(), "direct", "alpine", "", "w1"))
 	b.Observe(withLabel(withLabel(snap(), "direct", "alpine", "", "w1"), "late", "alpine", "", "w1"))
 	if got := ungatedKeys(b); len(got) != 2 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestALabelWhoseLeaseIsNotOpenCountsForNothing(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	// Forged, or inherited from an image committed from a gated container.
+	b.Observe(withLabel(snap(), "x", "alpine", "lease-0ld-1", ""))
+	if got := ungatedKeys(b); len(got) != 1 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestAStartLeaseTakesALabelledContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	// docker create, then docker start: the container runs at the start.
+	created := b.Check(labelled("w1", "postgres"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
+	s := addContainer(snap(), protocol.Container{ID: "db1", Name: "db", Image: "postgres", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.LeaseLabel: created.LeaseID}}, "w1")
+	b.Observe(s)
+	ls := b.List()
+	if len(ls) != 1 || ls[0].Command != "docker start db" || ls[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want only the start's, bound", ls)
+	}
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+func TestALabelledContainerStartedAgainLaterUsesItsStartLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	// Created through the shim long ago: its lease is gone.
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib, Target: "db"}, snap(), cfg)
+	b.Observe(withLabel(snap(), "db", "postgres", "lease-0ld-1", "w1"))
+	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
+		t.Fatalf("leases = %+v, want the start's bound", l)
+	}
+}
+
+func TestALabelBindsOnlyAnUnboundContainerLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(labelled("w1", "alpine"), snap(), cfg)
+	b.Observe(withLabel(snap(), "one", "alpine", d.LeaseID, ""))
+	// A copy with the same labels: the lease already has its container.
+	b.Observe(withLabel(withLabel(snap(), "one", "alpine", d.LeaseID, ""), "copy", "alpine", d.LeaseID, ""))
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "container:copy" {
 		t.Fatalf("ungated = %v", got)
 	}
 }

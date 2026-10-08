@@ -533,7 +533,7 @@ func TestShimLabelsAllowedRuns(t *testing.T) {
 	if code, stderr := r.run("docker", "run", "--rm", "alpine", "true"); code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
-	want := []string{"docker", "run", "--label", protocol.LeaseLabel + "=lease-7", "--rm", "alpine", "true"}
+	want := []string{"docker", "run", "--rm", "--label", protocol.LeaseLabel + "=lease-7", "alpine", "true"}
 	if !slices.Equal(r.execArgv, want) {
 		t.Fatalf("argv = %q, want %q", r.execArgv, want)
 	}

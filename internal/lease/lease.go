@@ -176,8 +176,9 @@ type verdict struct {
 	// event says nothing of whose a container is (#89).
 	owner string
 	lease string // the worktree of the lease it last bound
-	// crashed is set when it died without a stop, until a reading shows
-	// it again.
+	// crashed is set when it died without a stop, until a reading begun
+	// after its last event shows it again: one begun before the die may
+	// list it still. Until then its restart binds as bindsAfterCrash says.
 	crashed bool
 	last    time.Time // last in a reading
 	present bool      // in the latest reading (or a failed read kept it)
@@ -708,7 +709,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		v.last, v.present = now, true
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)
-		v.crashed = false
+		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
 	}
 	for k, v := range b.verdicts {
 		if !v.present && now.Sub(v.last) >= b.timeout {

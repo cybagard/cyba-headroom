@@ -2,6 +2,7 @@ package lease_test
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -1341,5 +1342,101 @@ func TestARestartAfterACrashOfARunStartedByIDFromAnotherWorktreeBindsNoLeaseOfTh
 	b.Observe(read(dressed(), c.t))
 	if got := reserved(b); got != 2*gib {
 		t.Fatalf("reserved = %d MiB, want w1's 2048 MiB: %+v", got>>20, b.List())
+	}
+}
+
+// A crash is remembered from the die until a reading begun after it shows
+// the container again, whatever readings come between (#89): one begun
+// before the die still lists the container, and the readings of a restart
+// backoff do not. Then the restart,
+// by its start event or by the reading that shows it back, binds a
+// project's up only in its owner's worktree: w2's up keeps its
+// reservation, and w1's binds.
+func TestACrashLastsUntilAReadingShowsTheRestart(t *testing.T) {
+	type row struct {
+		span    bool   // a reading begun before the die ends after it, listing the container
+		backoff int    // readings without the container, 5 s apart, before the restart
+		event   bool   // the restart's start event arrives; else only a reading shows it
+		up      string // the worktree that checks an up of the project before the restart
+	}
+	var rows []row
+	for _, span := range []bool{false, true} {
+		for _, backoff := range []int{0, 1, 3} {
+			for _, event := range []bool{true, false} {
+				for _, up := range []string{"w1", "w2"} {
+					if backoff == 0 && !event {
+						continue // back within a tick and no event: nothing shows it went
+					}
+					rows = append(rows, row{span, backoff, event, up})
+				}
+			}
+		}
+	}
+	for _, x := range rows {
+		t.Run(fmt.Sprintf("span=%v/backoff=%d/event=%v/up=%s", x.span, x.backoff, x.event, x.up), func(t *testing.T) {
+			b, c, log := book(t)
+			a1 := func() *protocol.Snapshot { return withComposeContainer(snap(), "a1", "w1", 4*gib) }
+			b.Observe(read(snap(), c.t))
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(a1(), c.t)) // it uses w1's lease, which ends
+			lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+			c.t = c.t.Add(5 * time.Second)
+			died := c.t
+			b.ContainerEvent("die", "a1", "a1", lab) // a crash: no stop
+			if x.span {
+				c.t = c.t.Add(time.Second)
+				b.Observe(read(a1(), died.Add(-time.Second)))
+			}
+			for range x.backoff {
+				c.t = c.t.Add(5 * time.Second)
+				b.Observe(read(snap(), c.t))
+			}
+			c.t = c.t.Add(time.Second)
+			b.Check(policy.Request{Worktree: x.up, Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			if x.event {
+				c.t = c.t.Add(time.Second)
+				b.ContainerEvent("start", "a1", "a1", lab) // the restart policy
+			}
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(a1(), c.t))
+			if x.up == "w2" {
+				if got := reserved(b); got != 2*gib {
+					t.Fatalf("reserved = %d MiB, want w2's 2048 MiB: %+v", got>>20, b.List())
+				}
+				return
+			}
+			if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+				t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+			}
+		})
+	}
+}
+
+// A reading begun after the restart ends the crash: the container, of no
+// known worktree, missing later from readings with no event and back,
+// binds its worktree's up as any container back does.
+func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
+	b, c, log := book(t)
+	a1 := func() *protocol.Snapshot { return withComposeContainer(snap(), "a1", "", 4*gib) }
+	b.Observe(read(snap(), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(a1(), c.t))
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", lab) // a crash: no stop
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(a1(), c.t))
+	for range 2 { // missing, with no event: its stats failed
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(a1(), c.t))
+	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
 	}
 }

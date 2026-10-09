@@ -310,3 +310,94 @@ func TestSamplesCountForTheTimeTheyCover(t *testing.T) {
 		t.Fatalf("a gap was counted: %v h", d.WorkingHours)
 	}
 }
+
+func TestOllamaIdle(t *testing.T) {
+	ss := threeDays(func(s *samples.Sample, i int) {
+		s.Ollama = &samples.Ollama{FootprintBytes: u64(gib / 4)}
+		if i%2 == 0 { // a model loaded: not the idle footprint
+			s.Ollama.Models = []samples.OllamaModel{{Name: "m", SizeBytes: 4 * gib}}
+			s.Ollama.FootprintBytes = u64(5 * gib)
+		}
+	})
+	v := value(t, aggregate(ss), "ollama_idle_gb")
+	if !v.OK || v.GB != 0.3 {
+		t.Fatalf("ollama idle = %+v", v)
+	}
+	// Under 10 minutes of it idle is not enough.
+	short := threeDays(func(s *samples.Sample, i int) {
+		if i < 30 { // 3 × 30 samples = 7.5 min
+			s.Ollama = &samples.Ollama{FootprintBytes: u64(gib / 4)}
+		}
+	})
+	if v := value(t, aggregate(short), "ollama_idle_gb"); v.OK || !strings.Contains(v.Why, "not enough data") {
+		t.Fatalf("ollama idle = %+v", v)
+	}
+}
+
+// The suggested ollama_idle_gb is the one the min_headroom replay uses.
+func TestMinHeadroomReplaysTheSuggestedOllamaIdle(t *testing.T) {
+	withIdle := func(idle bool) []samples.Sample {
+		return threeDays(func(s *samples.Sample, i int) {
+			if idle && i%2 == 0 {
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(3 * gib)}
+			}
+			if i%100 == 1 && i < 500 { // warn onsets, a 1 GiB model loaded
+				s.Host.Pressure = "warn"
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(gib), Models: []samples.OllamaModel{{Name: "m", SizeBytes: gib}}}
+			}
+		})
+	}
+	with, without := value(t, aggregate(withIdle(true)), "min_headroom_gb"), value(t, aggregate(withIdle(false)), "min_headroom_gb")
+	// Reserved at the onsets: 3 + 1 GiB with the suggested idle, 1 GiB
+	// with the current 0.
+	if !with.OK || !without.OK || without.GB-with.GB != 3 {
+		t.Fatalf("min headroom with idle Ollama %+v, without %+v", with, without)
+	}
+}
+
+func TestOllamaModelWithoutExpiryAdvice(t *testing.T) {
+	// The model stays loaded 2 h on each day, with no expiry on the days
+	// noExpiry says, and expiring in 5 minutes on the others.
+	model := func(noExpiry func(day int) bool) []samples.Sample {
+		return threeDays(func(s *samples.Sample, _ int) {
+			m := samples.OllamaModel{Name: "big-model", SizeBytes: 12 * gib}
+			if !noExpiry(int(s.T.Sub(day0).Hours() / 24)) {
+				exp := s.T.Add(5 * time.Minute)
+				m.ExpiresAt = &exp
+			}
+			s.Ollama = &samples.Ollama{FootprintBytes: u64(13 * gib), Models: []samples.OllamaModel{m}}
+		})
+	}
+	a := advice(aggregate(model(func(d int) bool { return d < 2 })))
+	if !strings.Contains(a, `Ollama: "big-model" (12.0 GB) stayed loaded with no expiry for 4.0 h on 2 days`) || !strings.Contains(a, "keep_alive") {
+		t.Fatalf("advice = %s", a)
+	}
+	if a := advice(aggregate(model(func(int) bool { return false }))); strings.Contains(a, "big-model") {
+		t.Fatalf("advice despite an expiry: %s", a)
+	}
+	if a := advice(aggregate(model(func(d int) bool { return d == 0 }))); strings.Contains(a, "big-model") {
+		t.Fatalf("advice for one day: %s", a)
+	}
+}
+
+func TestOllamaModelsUnknownAreLeftOut(t *testing.T) {
+	// Half the samples could not read the model list: Ollama's 6 GiB
+	// footprint then is not its idle one.
+	ss := threeDays(func(s *samples.Sample, i int) {
+		s.Ollama = &samples.Ollama{FootprintBytes: u64(gib / 4)}
+		if i%2 == 1 {
+			s.Ollama = &samples.Ollama{FootprintBytes: u64(6 * gib), ModelsUnknown: true}
+		}
+	})
+	if v := value(t, aggregate(ss), "ollama_idle_gb"); !v.OK || v.GB != 0.3 {
+		t.Fatalf("ollama idle = %+v", v)
+	}
+	// A model list marked unknown is not evidence of a model without expiry.
+	ss = threeDays(func(s *samples.Sample, _ int) {
+		s.Ollama = &samples.Ollama{FootprintBytes: u64(13 * gib), ModelsUnknown: true,
+			Models: []samples.OllamaModel{{Name: "big-model", SizeBytes: 12 * gib}}}
+	})
+	if a := advice(aggregate(ss)); strings.Contains(a, "big-model") {
+		t.Fatalf("advice from an unknown model list: %s", a)
+	}
+}

@@ -576,8 +576,13 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 // --env-files, else COMPOSE_ENV_FILES (comma-separated), relative to the
 // working directory cwd, a later one winning; else .env in each of dirs,
 // the first that sets it winning, unless COMPOSE_DISABLE_ENV_FILE is true.
-// A file that cannot be read is skipped (R7). As docker/compose's
-// cmd/compose/compose.go has it (the --env-file flag's default,
+// A file Compose fails on (envFileValue's error) leaves the name unknown,
+// whatever the others set: an --env-file that does not exist or is a
+// directory, and any file that cannot be read or parsed. A .env that does
+// not exist or is a directory is skipped, as Compose skips it; a .env
+// after the first that sets it is not read, though Compose fails on one it
+// cannot parse. As docker/compose's cmd/compose/compose.go (e11dce5) has it
+// (the --env-file flag's default,
 // toProjectOptions: WithEnvFiles and WithDotEnv once before the compose file
 // is found and once after, so the working directory's .env and then the
 // found project directory's) and compose-go's cli/options.go (WithEnvFiles,
@@ -608,13 +613,22 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 	found, done := within(left, func() (name string) {
 		// The --env-files: the last that sets it.
 		for _, f := range files {
-			if v, set := envFileValue(f, "COMPOSE_PROJECT_NAME"); set {
+			v, set, err := envFileValue(f, "COMPOSE_PROJECT_NAME")
+			if err != nil {
+				return ""
+			}
+			if set {
 				name = v
 			}
 		}
 		// The .env files: the first that sets it.
 		for _, d := range dirs {
-			if v, set := envFileValue(filepath.Join(d, ".env"), "COMPOSE_PROJECT_NAME"); set {
+			v, set, err := envFileValue(filepath.Join(d, ".env"), "COMPOSE_PROJECT_NAME")
+			switch {
+			case errors.Is(err, errEnvNoFile):
+			case err != nil:
+				return ""
+			case set:
 				return v
 			}
 		}
@@ -629,25 +643,33 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 const envFileMax = 64 << 10
 
 // envFileValue is key's value in env file path, and whether the file sets
-// it: "" for a value the shim cannot know (envValue). A file that cannot be
-// read or parsed sets nothing, nor does one that is not a regular file (a
-// device, a FIFO: stat, unlike open, does not wait on one). One longer than
-// envFileMax sets a value the shim cannot know.
-func envFileValue(path, key string) (string, bool) {
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
-		return "", false
+// it: "" for a value the shim cannot know (envValue). A path that does not
+// stat, or is a directory, is errEnvNoFile; a file that cannot be read, or
+// that envValue rejects, errEnvRejected: Compose fails on either
+// (compose-go 32d8d5d, dotenv/env.go GetEnvFromFile: "couldn't find env
+// file", "is a directory", the read's error, "failed to read"), except on a
+// .env that does not stat or is a directory, which it does not load
+// (cli/options.go WithEnvFiles). One that is not a regular file (a device,
+// a FIFO: stat, unlike open, does not wait on one) sets nothing. One longer
+// than envFileMax sets a value the shim cannot know.
+func envFileValue(path, key string) (string, bool, error) {
+	switch fi, err := os.Stat(path); {
+	case err != nil, fi.IsDir():
+		return "", false, errEnvNoFile
+	case !fi.Mode().IsRegular():
+		return "", false, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false
+		return "", false, errEnvRejected
 	}
 	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, envFileMax+1))
 	switch {
 	case err != nil:
-		return "", false
+		return "", false, errEnvRejected
 	case len(b) > envFileMax:
-		return "", true
+		return "", true, nil
 	}
 	return envValue(string(b), key)
 }
@@ -660,14 +682,17 @@ func envFileValue(path, key string) (string, bool) {
 // escape its quote with \; an unquoted one up to the line's end or " #".
 // A bare KEY looks itself up, which leaves key as it was. A value Compose
 // would interpolate ($, unquoted or in double quotes) or unescape (\ in
-// double quotes) is unknown: "". A file the parser rejects sets nothing,
-// as Compose then fails.
-func envValue(src, key string) (value string, set bool) {
+// double quotes) is unknown: "". A file the parser rejects is
+// errEnvRejected, as Compose then fails on it: a key with a space or a
+// character outside letters, digits and _.-[], a quote never closed, and an
+// export followed by nothing but spaces ("zero length string"; one followed
+// by a newline is a bare key, and a bare export a value of key "").
+func envValue(src, key string) (value string, set bool, err error) {
 	src = strings.TrimPrefix(src, "\uFEFF")
 	for {
 		src = strings.TrimLeftFunc(src, unicode.IsSpace)
 		if src == "" {
-			return value, set
+			return value, set, nil
 		}
 		if src[0] == '#' {
 			_, src, _ = strings.Cut(src, "\n")
@@ -675,6 +700,9 @@ func envValue(src, key string) (value string, set bool) {
 		}
 		if exportPrefix.MatchString(src) {
 			src = strings.TrimLeftFunc(strings.TrimPrefix(src, "export"), envSpace)
+			if src == "" {
+				return "", false, errEnvRejected // "zero length string"
+			}
 		}
 		// The key, up to =, : or a newline (a bare key); with none, the
 		// key is "" and the statement its value.
@@ -684,13 +712,13 @@ func envValue(src, key string) (value string, set bool) {
 				continue
 			}
 			if r != '=' && r != ':' && r != '\n' {
-				return "", false
+				return "", false, errEnvRejected
 			}
 			k, bare, src = src[:i], r == '\n', src[i+1:]
 			break
 		}
 		if k = strings.TrimRightFunc(k, unicode.IsSpace); strings.Contains(k, " ") {
-			return "", false
+			return "", false, errEnvRejected
 		}
 		src = strings.TrimLeftFunc(src, envSpace)
 		if bare {
@@ -717,7 +745,7 @@ func envValue(src, key string) (value string, set bool) {
 				}
 			}
 			if !closed {
-				return "", false
+				return "", false, errEnvRejected
 			}
 			v, src = string(b), src[i:]
 			known = quote == '\'' || !strings.ContainsAny(v, `$\`)
@@ -735,6 +763,14 @@ func envValue(src, key string) (value string, set bool) {
 		}
 	}
 }
+
+var (
+	// errEnvNoFile is a path that is no env file: Compose fails on it as an
+	// --env-file and skips it as a .env.
+	errEnvNoFile = errors.New("no env file")
+	// errEnvRejected is an env file Compose fails on.
+	errEnvRejected = errors.New("an env file Compose fails on")
+)
 
 // exportPrefix is the export an env file's statement may start with
 // (compose-go's dotenv exportRegex).

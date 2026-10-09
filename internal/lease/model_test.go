@@ -81,7 +81,6 @@ type model struct {
 // run only when HEADROOM_MODEL_OPEN is 1 (all) or lists the issue
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
-	89:  "a restart by policy binds another worktree's same-named compose lease (a container labelled with another worktree's project: #109's shared name, or a dressed run)",
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
 	111: "a crashed container stays bound to a two-container start's lease: a compose up restarting it binds nothing",
 	112: "an up taking over its stack's lease while that lease's services warm holds the larger estimate, not both",

@@ -172,6 +172,14 @@ type verdict struct {
 	u       protocol.Ungated // for ungated: what the snapshot lists
 	project string           // a compose container's project, and its directory
 	dir     string
+	// owner is the worktree the last reading that attributed it named: an
+	// event says nothing of whose a container is (#89).
+	owner string
+	lease string // the worktree of the lease it last bound
+	// crashed is set when it died without a stop, until a reading begun
+	// after its last event shows it again: one begun before the die may
+	// list it still. Until then its restart binds as bindsAfterCrash says.
+	crashed bool
 	last    time.Time // last in a reading
 	present bool      // in the latest reading (or a failed read kept it)
 }
@@ -420,6 +428,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
 				e.held[x.key], e.found = true, true
+				b.boundBy(x, e)
 			}
 		}
 	}
@@ -606,6 +615,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, b.unmark(r), true) == e {
 				e.bind(r)
 				b.judge(r, gated, now)
+				b.boundBy(r, e)
 				bound[r.key] = true
 			}
 		}
@@ -633,7 +643,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// a container ID) binds: anything else may have been there already.
 	var unbound []resource
 	for _, r := range fresh {
-		e := keyed(b.open, r, b.based[source(r.kind)])
+		es := b.open
+		if v := b.verdicts[r.key]; v != nil && v.crashed {
+			// Back after a crash and a reading: as for its start event.
+			es = slices.DeleteFunc(slices.Clone(es), func(e *entry) bool { return !b.bindsAfterCrash(r, e) })
+		}
+		e := keyed(es, r, b.based[source(r.kind)])
 		if e != nil && e.oneoff && !r.oneoff && b.verdicts[r.key] != nil {
 			// A service back after a tick away (a crash loop) is no new
 			// dependency of a compose run: it keeps its verdict.
@@ -651,6 +666,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			} else {
 				b.judge(r, gated, now)
 			}
+			b.boundBy(r, e)
 		} else {
 			unbound = append(unbound, r)
 		}
@@ -692,6 +708,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 		v.last, v.present = now, true
 		v.u.Worktree = r.worktree // attribution can change, or come late
+		v.owner = cmp.Or(r.worktree, v.owner)
+		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
 	}
 	for k, v := range b.verdicts {
 		if !v.present && now.Sub(v.last) >= b.timeout {
@@ -857,9 +875,15 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
+		// After a crash: Docker said so, or the verdict kept it across the
+		// readings since.
+		crashed := last.gone && !stopped || b.verdicts[r.key] != nil && b.verdicts[r.key].crashed
 		checkedSinceCrash := e != nil && last.gone && e.Created.After(last.at)
 		switch {
 		case e == nil:
+			return
+		case crashed && !b.bindsAfterCrash(r, e):
+			// It was gated before the crash, so it is not flagged.
 			return
 		case b.prev[r.key] && !stopped && !checkedSinceCrash && !e.labelled && !slices.Contains(e.containerIDs, id):
 			// A container the last reading held, started again without
@@ -876,8 +900,12 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		}
 		e.bind(r)
 		b.judge(r, gated, now)
+		b.boundBy(r, e)
 	case "die":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
+		if v := b.verdicts[r.key]; v != nil {
+			v.crashed = !b.seen[r.key].stopped
+		}
 		b.missed[r.key] = goneAfter(r.key) // gone at once
 		b.release(r.key)
 		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
@@ -1021,6 +1049,33 @@ func goneAfter(k string) int {
 		return 1
 	}
 	return 2
+}
+
+// bindsAfterCrash reports whether e may bind r, back after a crash (a
+// restart policy's restart): a lease keyed by r's label or ID, or a
+// project's only in r's owner's worktree. Another worktree may use the
+// name (#89), so a container of no known worktree binds none.
+func (b *Book) bindsAfterCrash(r resource, e *entry) bool {
+	o := b.owner(r)
+	return e.labelled || slices.Contains(e.containerIDs, r.id) || e.Kind != "compose" || o != "" && o == e.Worktree
+}
+
+// owner is the worktree r is in: as this reading attributes it, else as
+// the last reading that attributed it did, else that of the lease it last
+// bound; "" if none says.
+func (b *Book) owner(r resource) string {
+	if v := b.verdicts[r.key]; v != nil {
+		return cmp.Or(r.worktree, v.owner, v.lease)
+	}
+	return r.worktree
+}
+
+// boundBy records that r bound e, if e's key says whose r is: its label or
+// its project. A start by ID names the container, not whose it is (#89).
+func (b *Book) boundBy(r resource, e *entry) {
+	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
+		v.lease = e.Worktree
+	}
 }
 
 // release lets go of a held container that is gone: it was never this
@@ -1178,6 +1233,10 @@ func (b *Book) lapsedFor(r resource) bool {
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
+	if old := b.verdicts[r.key]; old != nil {
+		v.owner, v.lease = old.owner, old.lease // an event's r is unattributed
+	}
+	v.owner = cmp.Or(r.worktree, v.owner)
 	b.verdicts[r.key] = v
 	return v
 }

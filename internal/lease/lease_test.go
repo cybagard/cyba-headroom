@@ -1142,3 +1142,62 @@ func TestAGuessAndARealKeyOfOneProject(t *testing.T) {
 		})
 	}
 }
+
+// w1 and w2 use one project name (#89). w1's container crashes, w2
+// checks an up of the name, and w1's restart policy brings the container
+// back: it is w1's, so it binds nothing of w2's lease. w2's reservation
+// stands, and its own containers bind its lease.
+func TestARestartAfterACrashBindsNoLeaseOfAnotherWorktree(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t)) // it uses w1's lease, which ends
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", lab) // a crash: no stop
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab) // the restart policy
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	if got := reserved(b); got != 2*gib {
+		t.Fatalf("reserved = %d MiB, want w2's 2048 MiB: %+v", got>>20, b.List())
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "b1", "b1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	s := withComposeContainer(snap(), "a1", "w1", 4*gib)
+	b.Observe(read(withComposeContainer(s, "b1", "w2", gib), c.t))
+	if got := reserved(b); got != gib {
+		t.Fatalf("reserved = %d MiB, want w2's 1024 MiB left: %+v", got>>20, b.List())
+	}
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A restart after a crash, after its own worktree checked an up of its
+// project, binds that up's lease, though the reading lost its attribution.
+func TestARestartAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "", 4*gib), c.t)) // attribution lost for a reading
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", lab)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want w1's up bound and ended", l)
+	}
+}

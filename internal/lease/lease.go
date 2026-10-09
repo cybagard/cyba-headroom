@@ -172,6 +172,9 @@ type verdict struct {
 	u       protocol.Ungated // for ungated: what the snapshot lists
 	project string           // a compose container's project, and its directory
 	dir     string
+	// owner is the worktree the last reading that attributed it named: an
+	// event says nothing of whose a container is (#89).
+	owner   string
 	last    time.Time // last in a reading
 	present bool      // in the latest reading (or a failed read kept it)
 }
@@ -692,6 +695,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 		v.last, v.present = now, true
 		v.u.Worktree = r.worktree // attribution can change, or come late
+		v.owner = cmp.Or(r.worktree, v.owner)
 	}
 	for k, v := range b.verdicts {
 		if !v.present && now.Sub(v.last) >= b.timeout {
@@ -857,9 +861,16 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
-		checkedSinceCrash := e != nil && last.gone && e.Created.After(last.at)
+		crashed := last.gone && !stopped
+		checkedSinceCrash := e != nil && crashed && e.Created.After(last.at)
 		switch {
 		case e == nil:
+			return
+		case crashed && !e.labelled && !slices.Contains(e.containerIDs, id) && e.Kind == "compose" && b.owner(r.key) != e.Worktree:
+			// A restart after a crash binds a project's lease only in the
+			// worktree the readings last put the container in: another
+			// worktree may use the name (#89). It was gated before the
+			// crash, so it is not flagged.
 			return
 		case b.prev[r.key] && !stopped && !checkedSinceCrash && !e.labelled && !slices.Contains(e.containerIDs, id):
 			// A container the last reading held, started again without
@@ -1023,6 +1034,15 @@ func goneAfter(k string) int {
 	return 2
 }
 
+// owner is the worktree the last reading that attributed k named, "" if
+// none did.
+func (b *Book) owner(k string) string {
+	if v := b.verdicts[k]; v != nil {
+		return v.owner
+	}
+	return ""
+}
+
 // release lets go of a held container that is gone: it was never this
 // lease's to start, so a start of it is a new call's.
 func (b *Book) release(key string) {
@@ -1178,6 +1198,10 @@ func (b *Book) lapsedFor(r resource) bool {
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
+	if old := b.verdicts[r.key]; old != nil {
+		v.owner = old.owner // an event's r is unattributed
+	}
+	v.owner = cmp.Or(r.worktree, v.owner)
 	b.verdicts[r.key] = v
 	return v
 }

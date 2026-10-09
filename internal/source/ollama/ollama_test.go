@@ -340,8 +340,18 @@ func TestAnotherUsersOllamaCostsOneAPIReadPerReading(t *testing.T) {
 	if calls != 1 || len(got.Models) != 1 {
 		t.Fatalf("%d reads of /api/ps, models %+v; want 1 read, one model", calls, got.Models)
 	}
-	// Beside the user's own server, the other's footprint makes it unknown.
-	if got.FootprintBytes != nil || got.FootprintError == "" {
-		t.Fatalf("footprint=%v error=%q, want unknown", got.FootprintBytes, got.FootprintError)
+	// The API that answers is the user's own server's: the other's process
+	// is ignored, and the footprint is the user's own tree.
+	if got.FootprintBytes == nil || *got.FootprintBytes != 2312<<20 {
+		t.Fatalf("footprint=%v error=%q, want the own server's 2312 MiB", got.FootprintBytes, got.FootprintError)
+	}
+}
+
+func TestAnotherUsersClientKeepsTheOwnServersFootprint(t *testing.T) {
+	procs := serverTree()
+	procs.procs = append(procs.procs, vmproc.Process{PID: 650, PPID: 2, Comm: "ollama", ArgsErr: errNotPermitted})
+	got := collect(t, ollama.New(fakeAPI{t: t, file: "ps-one.json", allowed: true}, procs, is(true)))
+	if !got.Running || len(got.Models) != 1 || got.FootprintBytes == nil || *got.FootprintBytes != 2312<<20 || got.FootprintError != "" {
+		t.Fatalf("got %+v, want running, one model, the own server's 2312 MiB", got)
 	}
 }

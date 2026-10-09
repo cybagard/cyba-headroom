@@ -55,14 +55,15 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ollama processes: %w", err)
 	}
-	// Another user's ollama may be a server or a client: it is a server
-	// if the API answers. Its footprint cannot be read, and footprint(1)
-	// skips such pids without failing, so with it the footprint is unknown,
-	// even beside the user's own server (two servers rarely share a Mac:
-	// they contend for the port).
+	// Another user's ollama may be a server or a client: with no server of
+	// the user's own, it is a server if the API answers. Its footprint
+	// cannot be read, and footprint(1) skips such pids without failing, so
+	// with it the footprint is unknown. Beside the user's own server it is
+	// ignored: the API that answers is the user's own (two servers contend
+	// for the port).
 	var probed *ps
 	othersServe := false
-	if len(others) > 0 {
+	if len(pids) == 0 && len(others) > 0 {
 		m, err := s.models(ctx)
 		othersServe = err == nil
 		probed = &ps{m, err}

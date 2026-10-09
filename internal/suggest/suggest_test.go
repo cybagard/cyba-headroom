@@ -401,3 +401,37 @@ func TestOllamaModelsUnknownAreLeftOut(t *testing.T) {
 		t.Fatalf("advice from an unknown model list: %s", a)
 	}
 }
+
+// idleOn is threeDays with one model idle for the first minutes(day) of
+// each day's 2 h: LM Studio's unused with no TTL, and Ollama's loaded with
+// no expiry.
+func idleOn(minutes func(day int) int) []samples.Sample {
+	return threeDays(func(s *samples.Sample, i int) {
+		if i >= minutes(int(s.T.Sub(day0).Hours()/24))*12 { // 12 samples a minute
+			return
+		}
+		last := s.T.Add(-2 * time.Hour)
+		s.LMStudio = &samples.LMStudio{FootprintBytes: u64(13 * gib), Models: []samples.Model{
+			{Key: "big-model", SizeBytes: 12 * gib, Status: "idle", LastUsedAt: &last}}}
+		s.Ollama = &samples.Ollama{FootprintBytes: u64(13 * gib), Models: []samples.OllamaModel{{Name: "big-model", SizeBytes: 12 * gib}}}
+	})
+}
+
+// A day counts toward the model advice from one hour of it.
+func TestModelAdviceNeedsAnHourADay(t *testing.T) {
+	for _, c := range []struct {
+		minutes []int
+		named   bool
+	}{
+		{[]int{120, 60, 0}, true},
+		{[]int{120, 59, 0}, false},
+		{[]int{120, 30, 0}, false},
+	} {
+		a := advice(aggregate(idleOn(func(d int) int { return c.minutes[d] })))
+		for _, tool := range []string{`LM Studio: "big-model"`, `Ollama: "big-model"`} {
+			if strings.Contains(a, tool) != c.named {
+				t.Errorf("%v min a day: %s named = %v, want %v; advice:\n%s", c.minutes, tool, !c.named, c.named, a)
+			}
+		}
+	}
+}

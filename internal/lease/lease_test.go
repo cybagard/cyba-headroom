@@ -1201,3 +1201,59 @@ func TestARestartAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {
 		t.Fatalf("leases = %+v, want w1's up bound and ended", l)
 	}
 }
+
+// As above, with readings between the crash and the restart: the reading
+// that shows the container back binds nothing of w2's either.
+func TestAContainerBackAfterACrashBindsNoLeaseOfAnotherWorktree(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", lab) // a crash: no stop
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t)) // the restart policy's backoff
+	}
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	if got := reserved(b); got != 2*gib {
+		t.Fatalf("reserved = %d MiB, want w2's 2048 MiB: %+v", got>>20, b.List())
+	}
+	c.t = c.t.Add(5 * time.Second)
+	s := withComposeContainer(snap(), "a1", "w1", 4*gib)
+	b.Observe(read(withComposeContainer(s, "b1", "w2", gib), c.t))
+	if got := reserved(b); got != gib {
+		t.Fatalf("reserved = %d MiB, want w2's 1024 MiB left: %+v", got>>20, b.List())
+	}
+	if got := ungatedKeys(b); len(got) != 0 {
+		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A container back after a crash and readings, after its own worktree
+// checked an up of its project, binds that up's lease.
+func TestAContainerBackAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", map[string]string{protocol.ComposeProjectLabel: "app"})
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t)) // no event: the reading shows it
+	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+	}
+}

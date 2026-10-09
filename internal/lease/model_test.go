@@ -37,6 +37,8 @@ type mcont struct {
 	startedAt                time.Time // when its call was checked
 	crashed                  time.Time // when it last crashed, zero once it stopped or started
 	crashTick                int       // the readings before it crashed
+	crashHeld                bool      // it was held when it crashed
+	heldBy                   string    // the up that found it running, "" once it stopped or started
 	missing                  bool      // left out of this reading
 	multi                    bool      // its call started others too (docker start a b)
 }
@@ -65,10 +67,10 @@ type model struct {
 // run only when HEADROOM_MODEL_OPEN is 1 (all) or lists the issue
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
-	87:  "a compose service missing from one reading (or restarted after one) comes back new and binds the up's lease as counted",
+	87:  "a held container missing from one reading (or restarted after one) comes back new and binds the up's lease as counted",
 	89:  "a restart by policy binds another worktree's same-named compose lease",
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
-	110: "a run's or start's container missing from one reading ends its lease (#87's cause)",
+	110: "a container not held, missing from one reading (or restarted after one), ends its lease or binds an up's as counted (#87's cause)",
 	111: "a crashed container stays bound to a two-container start's lease: a compose up restarting it binds nothing",
 	112: "an up taking over its stack's lease while that lease's services warm holds the larger estimate, not both",
 }
@@ -128,7 +130,7 @@ func (m *model) snapshot() *protocol.Snapshot {
 func (m *model) event(action string, x *mcont) { m.b.ContainerEvent(action, x.id, x.id, x.labels) }
 
 func (m *model) start(x *mcont, by string) {
-	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi = true, 0, by, m.c.t, by == "", time.Time{}, false
+	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy = true, 0, by, m.c.t, by == "", time.Time{}, false, ""
 	if by != "" {
 		m.starts[by]++
 	}
@@ -212,6 +214,9 @@ func (m *model) composeUp(st stack) bool {
 	m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
 	for _, sv := range []string{"a", "b"} {
 		x := have[sv]
+		if x != nil && x.running {
+			x.heldBy = d.LeaseID // it found it running
+		}
 		if x == nil {
 			x = m.newCont(project, sv, wt, map[string]string{protocol.ComposeProjectLabel: project,
 				protocol.ComposeServiceLabel: sv, protocol.ComposeConfigHashLabel: "h", protocol.ComposeWorkingDirLabel: "/src/" + wt})
@@ -230,10 +235,18 @@ func (m *model) stop(x *mcont, crash bool) {
 		m.event("stop", x)
 	}
 	m.event("die", x)
-	x.running, x.crashed = false, time.Time{}
 	if crash {
-		x.crashed, x.crashTick = m.c.t, m.ticks
+		x.crashed, x.crashTick, x.crashHeld = m.c.t, m.ticks, m.held(x)
+	} else {
+		x.crashed = time.Time{}
 	}
+	x.running, x.heldBy = false, ""
+}
+
+// held reports whether x is held: an up found it running, and that up's
+// lease is open.
+func (m *model) held(x *mcont) bool {
+	return x.heldBy != "" && slices.ContainsFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == x.heldBy })
 }
 
 // restart is Docker's restart policy bringing a crashed container back, as
@@ -496,9 +509,9 @@ func (m *model) run(ops []op) {
 			if x == nil {
 				break
 			}
-			issue := 87
-			if x.startedBy != "" && !strings.HasPrefix(m.leases[x.startedBy], "docker compose") {
-				issue = 110
+			issue := 110
+			if m.held(x) {
+				issue = 87
 			}
 			if !m.on(issue) {
 				m.tick()
@@ -510,11 +523,18 @@ func (m *model) run(ops []op) {
 			}
 		case 17:
 			// Docker's restart policy restarts a crashed container, with a
-			// backoff of at most a minute. One that spans a reading is #87's.
+			// backoff of at most a minute. One that spans a reading is #87's
+			// if it was held, else #110's.
+			spans := func(x *mcont) bool {
+				if x.crashHeld {
+					return !m.on(87)
+				}
+				return !m.on(110)
+			}
 			if !m.on(89) {
 				m.tick()
 			} else if x := m.pick(func(x *mcont) bool {
-				return !x.crashed.IsZero() && m.c.t.Sub(x.crashed) <= time.Minute && (m.on(87) || x.crashTick == m.ticks)
+				return !x.crashed.IsZero() && m.c.t.Sub(x.crashed) <= time.Minute && (x.crashTick == m.ticks || !spans(x))
 			}); x != nil {
 				m.restart(x)
 				m.step("restart policy started %s", x.id)
@@ -600,5 +620,29 @@ func TestTheLeaseModel(t *testing.T) {
 	}
 	if len(kinds) > 0 {
 		t.Logf("failing seeds by kind: %v", kinds)
+	}
+}
+
+// TestTheLeaseModelOn87 plays #87's case, which random runs do not reach:
+// a service warms in two readings, and a missing reading and the next take
+// two. An up holds c1 and c2, which run; c2 stops; c1 is missing from one
+// reading while that up's lease holds it; an up of the stack starts c2;
+// c1 comes back.
+func TestTheLeaseModelOn87(t *testing.T) {
+	if !(&model{open: openIssues()}).on(87) {
+		t.Skip("open: #87")
+	}
+	ops := []op{
+		{0, 0, 0},  // w1: compose up p1, starts c1 and c2
+		{10, 0, 0}, // tick
+		{10, 0, 0}, // tick: they use the lease's cost, it ends
+		{0, 0, 0},  // w1: compose up p1 holds c1 and c2
+		{6, 0, 1},  // stop c2
+		{16, 0, 0}, // c1, held, missing from the reading
+		{0, 0, 0},  // w1: compose up p1 starts c2
+		{10, 0, 0}, // tick: c1 is back
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#87:\n%s", f.msg)
 	}
 }

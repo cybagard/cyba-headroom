@@ -875,3 +875,44 @@ func TestAGuessThatHitsKeepsItsOwnContainerFromAnotherWorktree(t *testing.T) {
 		t.Errorf("log: %s", log)
 	}
 }
+
+// A guess that hits is confirmed: a later up of its project in its own
+// worktree (compose -p api up) takes it over as any repeat up does, so that
+// up's lease holds the stack. It never says the stack never appeared, nor
+// lapses to hide another worktree's unchecked stack of that name.
+func TestAnUpTakesAGuessThatHitOver(t *testing.T) {
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p api up", CostBytes: gib, Target: "api", OnEngine: true}
+	for _, tc := range []struct {
+		name     string
+		recreate bool // the up recreates api-web-1, read before any event
+		w2       bool // w2 then starts an unchecked api stack
+	}{
+		{"an up that starts nothing new", false, false},
+		{"an up whose recreated container is read first", true, false},
+		{"another worktree's unchecked stack after", false, true},
+	} {
+		b, c, log := book(t)
+		b.Observe(snap())
+		b.Check(guessed("w1", "api"), snap(), cfg)
+		s := withComposeProject(snap(), "api-web-1", "w1", "api", gib/4)
+		b.Observe(s)
+		c.t = c.t.Add(time.Minute)
+		b.Check(up, s, cfg)
+		if tc.recreate {
+			s = withComposeProject(snap(), "api-web-2", "w1", "api", gib/4)
+			b.Observe(s)
+		}
+		c.t = c.t.Add(3 * time.Minute)
+		b.Observe(s)
+		if strings.Contains(log.String(), "never appeared") {
+			t.Errorf("%s: log: %s", tc.name, log)
+		}
+		if tc.w2 {
+			b.Observe(addContainer(s, protocol.Container{ID: "api-x-1", Name: "api-x-1", MemoryBytes: gib / 4,
+				Labels: map[string]string{"com.docker.compose.project": "api", protocol.ComposeWorkingDirLabel: "/w2/api"}}, "w2"))
+			if !strings.Contains(log.String(), "ungated") {
+				t.Errorf("%s: api-x-1 is not ungated; log: %s", tc.name, log)
+			}
+		}
+	}
+}

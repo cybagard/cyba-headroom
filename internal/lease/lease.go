@@ -17,7 +17,8 @@
 // sends none) never binds: a worktree's holds its cost to its timeout. A
 // compose project the shim guessed, Compose's config having failed (#84),
 // binds only containers its own worktree's reading shows, takes no lease
-// over, and when it binds none, ends as one with no key.
+// over, and when it binds none, ends as one with no key. Once it binds one,
+// the guess hit: its key is as real as one the shim named.
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -120,7 +121,8 @@ type entry struct {
 	// guessed is set for a compose lease whose project the shim guessed
 	// (policy.Request.Guessed): it binds only containers the reading
 	// attributes to its own worktree, takes no lease over, and ends quietly
-	// when the guess missed (#84).
+	// when the guess missed (#84). Its first container clears it: the guess
+	// hit.
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
@@ -186,8 +188,8 @@ const stale = 2 * time.Second
 // an open lease of the same project in its own worktree, neither a compose
 // run's (its one-off container is new). Another worktree's keeps its
 // lease, against its own cap; a manual call reserves nothing. A guessed
-// project takes nothing over, and nothing takes it over: the guess may
-// name another stack.
+// project takes nothing over, and nothing takes it over until it binds: the
+// guess may name another stack.
 func composeTakes(r policy.Request, o *entry) bool {
 	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && !o.guessed && o.project == r.Target && o.Worktree == r.Worktree
 }
@@ -1129,6 +1131,7 @@ func (e *entry) bind(r resource) {
 	if e.Kind == "compose" && e.project == "" {
 		e.project = r.project
 	}
+	e.guessed = false // it hit
 }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.

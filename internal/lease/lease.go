@@ -112,8 +112,9 @@ type entry struct {
 	// is not what the lease waits for.
 	bound, held map[string]bool
 	used        uint64
-	// found is set once it held a stack: one it lets go of when it stops
-	// (Book.release) still appeared, so the lease ends quietly.
+	// found is set once it held a stack, or a start of several let one of
+	// its containers go: one it lets go of when it stops (Book.release,
+	// Book.letGo) still appeared, so the lease ends quietly.
 	found bool
 	// project is the compose project a compose lease locked onto with its
 	// first container.
@@ -797,6 +798,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 		return false
 	})
+	for _, e := range b.open {
+		for k := range e.bound {
+			if b.gone(k) {
+				b.letGo(k)
+			}
+		}
+	}
 	b.expire(now)
 }
 
@@ -804,11 +812,17 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 // compose project's, whose first container may be a one-shot with the
 // services after it, nor a start's before each of its containers came.
 func (e *entry) over() bool {
-	want := len(e.containerIDs)
-	if want > 0 && e.target != "" {
-		want++ // and the first, by its name
+	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= e.starts()
+}
+
+// starts is how many containers a start's lease waits for: 0 for any
+// other lease.
+func (e *entry) starts() int {
+	n := len(e.containerIDs)
+	if n > 0 && e.target != "" {
+		n++ // and the first, by its name
 	}
-	return len(e.bound) > 0 && (e.Kind != "compose" || e.oneoff && e.hasOneoff) && len(e.bound) >= want
+	return n
 }
 
 // boundIDs counts the containers e bound by their ID.
@@ -920,6 +934,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			b.log.Debug("lease ended: its container exited", "lease", e.ID, "worktree", e.Worktree)
 			return true
 		})
+		b.letGo(r.key)
 	}
 }
 
@@ -1086,6 +1101,21 @@ func (b *Book) release(key string) {
 			delete(e.bound, key)
 			delete(e.held, key)
 		}
+	}
+}
+
+// letGo lets go of key, a container that is gone, in each open start of
+// several still waiting on others: it covers starting each of them once, so
+// a later start of it is a new call's, and binds afresh (#111). Leases it
+// was all of ended first: they end quietly, as before.
+func (b *Book) letGo(key string) {
+	for _, e := range b.open {
+		if e.starts() < 2 || !e.bound[key] || !slices.ContainsFunc(e.containerIDs, func(id string) bool { return "container:"+id == key }) {
+			continue
+		}
+		delete(e.bound, key)
+		e.containerIDs = slices.DeleteFunc(e.containerIDs, func(id string) bool { return "container:"+id == key })
+		e.found = true
 	}
 }
 

@@ -1440,3 +1440,56 @@ func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
 	}
 }
+
+// docker start c1 c2 covers starting each once: c2 dying while its lease
+// waits on c1 lets c2 go, so a compose up that starts it again binds it
+// (#111).
+func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
+	b, c, log := book(t)
+	p1 := func(mem1, mem2 uint64) *protocol.Snapshot {
+		s := snap()
+		if mem1 > 0 {
+			withComposeProject(s, "c1", "w1", "p1", mem1)
+		}
+		if mem2 > 0 {
+			withComposeProject(s, "c2", "w1", "p1", mem2)
+		}
+		return read(s, c.t)
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p p1 up -d", CostBytes: 2 * gib, Target: "p1", OnEngine: true}
+	b.Observe(read(snap(), c.t))
+	b.Check(up, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib, gib)) // the up's lease ends
+	for _, id := range []string{"c1", "c2"} {
+		b.ContainerEvent("stop", id, id, lab)
+		b.ContainerEvent("die", id, id, lab)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(0, 0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib/8))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	up.CostBytes = gib
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}

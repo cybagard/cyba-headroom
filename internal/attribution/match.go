@@ -204,8 +204,11 @@ func (m *Matcher) pathMatches(paths []string) []string {
 		return git
 	}
 	for _, g := range git {
-		if slices.ContainsFunc(ids, func(id string) bool { return !sameRepo(id, g) }) {
-			return append(ids, g) // another repo too: ambiguous
+		if slices.ContainsFunc(ids, func(id string) bool { return id != g && !sameRepo(id, g) }) {
+			if !slices.Contains(ids, g) {
+				ids = append(ids, g)
+			}
+			return ids // another repo too: ambiguous
 		}
 	}
 	return ids

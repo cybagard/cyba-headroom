@@ -25,17 +25,16 @@ func TestMatchPaths(t *testing.T) {
 		k    attribution.Keys
 		want attribution.Match
 	}{
-		"equal":                {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
-		"under":                {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/data/db"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
-		"segment boundary":     {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a2/x"}}, attribution.Match{WorktreeID: "a2", By: attribution.ByMount}},
-		"deepest wins":         {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/sub/wt/x"}}, attribution.Match{WorktreeID: "nested", By: attribution.ByMount}},
-		"unclean path":         {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/../project-b/./x/"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
-		"private alias":        {attribution.Keys{Mounts: []string{"/private/tmp/scratch/x"}}, attribution.Match{WorktreeID: "tmp", By: attribution.ByMount}},
-		"prefix not parent":    {attribution.Keys{Mounts: []string{"/Users/dev/w/project"}}, attribution.Match{Reason: attribution.NoMatch}},
-		"no keys":              {attribution.Keys{}, attribution.Match{Reason: attribution.NoMatch}},
-		"relative ignored":     {attribution.Keys{Mounts: []string{"project-a"}}, attribution.Match{Reason: attribution.NoMatch}},
-		".github still counts": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.github"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
-		"case-insensitive":     {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},
+		"equal":             {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
+		"under":             {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/data/db"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
+		"segment boundary":  {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a2/x"}}, attribution.Match{WorktreeID: "a2", By: attribution.ByMount}},
+		"deepest wins":      {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/sub/wt/x"}}, attribution.Match{WorktreeID: "nested", By: attribution.ByMount}},
+		"unclean path":      {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/../project-b/./x/"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
+		"private alias":     {attribution.Keys{Mounts: []string{"/private/tmp/scratch/x"}}, attribution.Match{WorktreeID: "tmp", By: attribution.ByMount}},
+		"prefix not parent": {attribution.Keys{Mounts: []string{"/Users/dev/w/project"}}, attribution.Match{Reason: attribution.NoMatch}},
+		"no keys":           {attribution.Keys{}, attribution.Match{Reason: attribution.NoMatch}},
+		"relative ignored":  {attribution.Keys{Mounts: []string{"project-a"}}, attribution.Match{Reason: attribution.NoMatch}},
+		"case-insensitive":  {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -161,11 +160,33 @@ func TestGitMounts(t *testing.T) {
 		"launch cwd in .git decides":           {attribution.Keys{LaunchCwd: "/Users/dev/r1/.git/hooks"}, attribution.Match{WorktreeID: "r1::main", By: attribution.ByLaunchCwd}},
 		"compose dir in .git decides":          {attribution.Keys{ComposeDir: "/Users/dev/r1/.git/x", Mounts: []string{"/Users/dev/wt/r1-feat"}}, attribution.Match{WorktreeID: "r1::main", By: attribution.ByComposeDir}},
 		"ids without a repo: no setting aside": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a", "/Users/dev/w/project-b/.git"}}, amb},
+		"id without a repo, its own .git":      {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a", "/Users/dev/w/project-a/.git"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			all := append(slices.Clone(gwts), wts...)
 			if got := attribution.MatchKeys(all, tc.k); got != tc.want {
 				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An ambiguous result lists each worktree once.
+func TestPathMatchesListsEachOnce(t *testing.T) {
+	m := attribution.NewMatcher(append([]attribution.Worktree{
+		{ID: "r1::main", Path: "/Users/dev/r1"},
+		{ID: "r2::main", Path: "/Users/dev/r2"},
+	}, wts...))
+	for name, tc := range map[string]struct {
+		paths []string
+		want  []string
+	}{
+		"a .git with its own and another repo's data": {[]string{"/Users/dev/r1/data", "/Users/dev/r2/x", "/Users/dev/r1/.git"}, []string{"r1::main", "r2::main"}},
+		"the same without repos":                      {[]string{"/Users/dev/w/project-a", "/Users/dev/w/project-b", "/Users/dev/w/project-a/.git"}, []string{"a", "b"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := attribution.PathMatches(m, tc.paths); !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

@@ -16,9 +16,8 @@
 // resource is logged as expired. A lease with no key (a headroom check
 // sends none) never binds: a worktree's holds its cost to its timeout. A
 // compose project the shim guessed, Compose's config having failed (#84),
-// binds only containers its own worktree's reading shows, takes no lease
-// over, and when it binds none, ends as one with no key. Once it binds one,
-// the guess hit: its key is as real as one the shim named.
+// binds only containers its own worktree's reading shows, and when it binds
+// none, ends as one with no key (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -119,10 +118,18 @@ type entry struct {
 	// VM appears, the run failed.
 	pid int
 	// guessed is set for a compose lease whose project the shim guessed
-	// (policy.Request.Guessed): it binds only containers the reading
-	// attributes to its own worktree, takes no lease over, and ends quietly
-	// when the guess missed (#84). Its first container clears it: the guess
-	// hit.
+	// (policy.Request.Guessed, #84). The guess may name another stack, so
+	// it stays a guess for the life of the lease: it binds only a container
+	// the reading attributes to its own worktree (key), and loses one in
+	// that worktree to a lease that is not a guess (keyed). An event, which
+	// does not say whose a container is, binds none to another worktree's
+	// lease that may be the guess's (tied): the reading decides, as it does
+	// for two real keys. It holds no stack at its check (one running
+	// says nothing of a hit) and takes no lease over. One it bound shows it
+	// hit: a later up of the project in its worktree takes it over as any
+	// repeat up does (composeTakes). One that bound nothing missed, or its
+	// stack was another lease's: it ends quietly at its timeout, as one
+	// with no key.
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
@@ -187,11 +194,10 @@ const stale = 2 * time.Second
 // composeTakes reports whether the lease of compose call r takes o over:
 // an open lease of the same project in its own worktree, neither a compose
 // run's (its one-off container is new). Another worktree's keeps its
-// lease, against its own cap; a manual call reserves nothing. A guessed
-// project takes nothing over, and nothing takes it over until it binds: the
-// guess may name another stack.
+// lease, against its own cap; a manual call reserves nothing. A guess takes
+// nothing over, and is taken over once it hit (entry.guessed).
 func composeTakes(r policy.Request, o *entry) bool {
-	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && !o.guessed && o.project == r.Target && o.Worktree == r.Worktree
+	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && (!o.guessed || len(o.bound) > 0) && o.project == r.Target && o.Worktree == r.Worktree
 }
 
 // startTakes reports whether a start of starts takes o over: the lease of
@@ -274,9 +280,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	// The project's running services in the caller's worktree: a compose
-	// up's lease holds them (below).
+	// up's lease holds them (below). Not a guess's (entry.guessed).
 	var stack []resource
-	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && r.Worktree != "" && r.OnEngine && s != nil {
+	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && r.Worktree != "" && r.OnEngine && s != nil {
 		for _, x := range resources(s) {
 			// Not one Docker's events said exited since (compose stop).
 			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree && !b.seen[x.key].gone {
@@ -887,8 +893,9 @@ func (b *Book) expire(now time.Time) {
 			b.log.Debug("lease with no key ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
 		case e.guessed:
-			// Its project was a guess, which may have missed: it held its
-			// cost to the timeout, as with no key.
+			// The guess missed, or its stack was another lease's
+			// (entry.guessed): it held its cost to the timeout, as with no
+			// key.
 			b.log.Debug("lease with a guessed key ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
 		default:
@@ -1019,8 +1026,13 @@ func rank(e *entry, r resource) int {
 func tied(es []*entry, r resource, e *entry) bool {
 	return slices.ContainsFunc(es, func(o *entry) bool {
 		// A manual call's lease reserves nothing: the worktree's wins, as
-		// in keyed.
-		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.key(r, true) && rank(o, r) == rank(e, r)
+		// in keyed. A guess keys only its worktree's (entry.guessed), and
+		// an event does not say whose r is: it may be the guess's.
+		a := r
+		if a.worktree == "" {
+			a.worktree = o.Worktree
+		}
+		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.key(a, true) && rank(o, r) == rank(e, r)
 	})
 }
 
@@ -1032,12 +1044,16 @@ func tied(es []*entry, r resource, e *entry) bool {
 func keyed(es []*entry, r resource, based bool) *entry {
 	// Among equal keys, the lease of the worktree r is attributed to: two
 	// worktrees may bring up one project.
+	// Then a key the shim named before a guess (entry.guessed).
 	better := func(e, best *entry) bool {
 		if rank(e, r) != rank(best, r) {
 			return rank(e, r) < rank(best, r)
 		}
 		if r.worktree != "" {
-			return e.Worktree == r.worktree && best.Worktree != r.worktree
+			if (e.Worktree == r.worktree) != (best.Worktree == r.worktree) {
+				return e.Worktree == r.worktree
+			}
+			return !e.guessed && best.guessed
 		}
 		// Unattributed: a worktree's lease, which reserves, before a
 		// manual one, which does not.
@@ -1073,8 +1089,8 @@ func (e *entry) key(r resource, based bool) bool {
 			// project) must not take a project's lease by its name.
 			return false
 		case e.guessed && (r.worktree == "" || r.worktree != e.Worktree):
-			// A guess may name another stack: only one the reading
-			// attributes to its own worktree (an event's is unknown).
+			// Only its own worktree's, as the reading attributes it (an
+			// event's is unknown): entry.guessed.
 			return false
 		case r.oneoff:
 			return e.oneoff && !e.hasOneoff // a compose run's own, one each
@@ -1131,7 +1147,6 @@ func (e *entry) bind(r resource) {
 	if e.Kind == "compose" && e.project == "" {
 		e.project = r.project
 	}
-	e.guessed = false // it hit
 }
 
 // processAlive reports whether pid runs: signal 0 checks without sending.

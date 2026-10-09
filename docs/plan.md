@@ -2,6 +2,8 @@
 
 Phases are sequential; each epic is blocked by the previous one. Each epic is a GitHub issue with its tasks attached as sub-issues. Issues were created from the (now removed) `scripts/issues.json`.
 
+Follow-up issues, mostly opened by reviews, are listed under each phase's tasks, by issue number. Those with no phase label are under "Follow-ups without a phase" at the end. Add each new issue here when it is opened, and tick an issue when it closes.
+
 
 ## [#1](https://github.com/cybagard/cyba-headroom/issues/1) Phase 1: Spike — answer the blocking questions
 
@@ -14,6 +16,10 @@ Exit criterion: attribution and the Orca launch environment are confirmed to rea
 - [x] #10 **Decide language and packaging (Python vs Go)**
 - [x] #11 **Spike: Kilo CLI before-tool-execution hook?**
 
+Follow-ups:
+
+- [ ] #96 **Kilo hook note and lease comments: four statements to tighten**
+
 ## [#2](https://github.com/cybagard/cyba-headroom/issues/2) Phase 2: Observe — daemon, budget model, attribution, --watch (R1–R4)
 
 Run for two weeks after completion to collect the baseline and set default thresholds. Blocked by Phase 1. Spec: docs/02-requirements.md R1–R4.
@@ -22,7 +28,7 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #13 **R1: daemon core — collection loop and in-memory budget state**
 - [x] #14 **R1: Docker/Podman collector**
 - [ ] #49 **R1: runtime autodiscovery — Docker Desktop, Podman, every VM process** (parked: needs a LuLu rule for Podman)
-- [ ] #59 **R1: Ollama collector**
+- [x] #59 **R1: Ollama collector**
 - [x] #15 **R1: Tart collector**
 - [x] #16 **R1: LM Studio collector**
 - [x] #17 **R1: Orca collector**
@@ -33,6 +39,21 @@ Run for two weeks after completion to collect the baseline and set default thres
 - [x] #22 **Daemon lifecycle: launchd agent, install/uninstall, logs**
 - [x] #55 **R1: record samples to disk for baseline and suggest**
 - [x] #23 **Baseline: `headroom suggest` learns thresholds from recorded samples; two-week run**
+- [ ] #63 **Baseline run: headroom suggest on the dev Mac, docs/baseline.md, defaults** (not before about 2026-10-22)
+
+Follow-ups:
+
+- [ ] #78 **Suggest: learn ollama_idle_gb and flag Ollama models kept loaded**
+- [ ] #81 **Ollama: see a server run by another user**
+- [ ] #84 **Compose: a slow or failing `compose config` leaves the lease without a key**
+- [ ] #85 **Compose: `-f -` ignores COMPOSE_PROJECT_NAME from .env and --env-file**
+- [ ] #87 **Lease: a held container missing from one reading loses its held state**
+- [x] #88 **Lease: a denied start still renews the lease that covers it**
+- [ ] #89 **Lease: a restart after a crash can bind another worktree's same-named compose lease**
+- [ ] #90 **Shim: remote-context edge cases**
+- [ ] #91 **Lease model: cover missing readings, restart policies and denials**
+- [ ] #98 **Attribution: .git rule edge cases left after #94**
+- [ ] #102 **Observe view: show each worktree's project, so primary checkouts named main can be told apart**
 
 ## [#3](https://github.com/cybagard/cyba-headroom/issues/3) Phase 3: Gate — launch env, shims, leases, slot gate, fail-open, policy (R5–R10)
 
@@ -46,9 +67,14 @@ Exit criterion: agents recover from denies without human help in most cases. Blo
 - [x] #29 **R6: macOS VM slot gate**
 - [x] #30 **R7: fail-open**
 - [x] #31 **R9: Orca launch environment integration**
-- [ ] #32 **R9: `headroom doctor`**
-- [ ] #33 **R4: ungated detection using leases**
+- [x] #32 **R9: `headroom doctor`**
+- [x] #33 **R4: ungated detection using leases**
 - [ ] #34 **Gate rollout: enable, measure deny recovery rate**
+
+Follow-ups:
+
+- [ ] #67 **Leases: settle short-lived containers through Docker events**
+- [ ] #95 **Docs: R9 says HEADROOM_WORKTREE is set for every agent, but nothing sets it**
 
 ## [#4](https://github.com/cybagard/cyba-headroom/issues/4) Phase 4: Learn and advise (P1)
 
@@ -70,3 +96,11 @@ Unscheduled. Spec: docs/02-requirements.md (Future).
 - [ ] #43 **Placement advice for Orca remote runtimes**
 - [ ] #44 **Priority ordering (foreground worktree first)**
 - [ ] #45 **Full TUI (Textual)**
+
+## Follow-ups without a phase
+
+- [ ] #71 **Gate: resolve named Docker contexts and Podman connections**
+- [ ] #72 **Gate: FIFO queue for BUDGET_WAIT in the daemon**
+- [ ] #74 **Attribution: give a container or VM the worktree of the lease it settled**
+- [ ] #100 **CLAUDE.md: the smoke test should name the racing cases again**
+- [ ] #104 **Loop Pick: what counts as ready (epics, parked and dated issues, Phase 5, phase order)**

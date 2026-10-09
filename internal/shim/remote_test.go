@@ -139,20 +139,34 @@ func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
 	}
 }
 
-// A numeric host is a number on either scheme, read as inet_aton reads it,
-// never resolved and never an ssh alias: 127.1, 127.0.1, 2130706433 and
-// localhost. are this Mac's even when the resolver says otherwise (#118).
-func TestANumericHostIsThisMacsOnEitherScheme(t *testing.T) {
-	old := lookupIP
-	t.Cleanup(func() { lookupIP = old })
-	lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
-		return []net.IPAddr{{IP: net.ParseIP("203.0.113.7")}}, nil
-	}
-	for _, host := range []string{"127.1", "127.0.1", "2130706433", "0x7f000001", "0177.0.0.1", "localhost."} {
-		for _, endpoint := range []string{"tcp://" + host + ":2375", "ssh://core@" + host + ":2222"} {
-			if Remote("docker", endpoint, func(string) string { return "" }) {
-				t.Errorf("Remote(docker, %q) = true, want this Mac's", endpoint)
+// A numeric host is resolved on either scheme, as getaddrinfo reads it, and
+// never taken for an ssh alias: 127.1, 127.0.1, 2130706433 and 0x7f000001
+// are this Mac's when they resolve to it, and 0177.0.0.1, read as
+// 177.0.0.1, stays remote. localhost. is a name, and so is cafe, an ssh
+// host that is not resolved (#118).
+func TestANumericHostIsResolvedOnEitherScheme(t *testing.T) {
+	resolving(t, map[string]string{
+		"127.1": "127.0.0.1", "127.0.1": "127.0.0.1", "2130706433": "127.0.0.1",
+		"0x7f000001": "127.0.0.1", "0177.0.0.1": "177.0.0.1",
+	})
+	for _, c := range []struct {
+		host   string
+		remote bool
+	}{
+		{"127.1", false},
+		{"127.0.1", false},
+		{"2130706433", false},
+		{"0x7f000001", false},
+		{"localhost.", false},
+		{"0177.0.0.1", true},
+	} {
+		for _, endpoint := range []string{"tcp://" + c.host + ":2375", "ssh://core@" + c.host + ":2222"} {
+			if got := Remote("docker", endpoint, func(string) string { return "" }); got != c.remote {
+				t.Errorf("Remote(docker, %q) = %v, want %v", endpoint, got, c.remote)
 			}
 		}
+	}
+	if !Remote("docker", "ssh://dev@cafe", func(string) string { return "" }) {
+		t.Error("ssh://dev@cafe is this Mac's, want remote: a name, not resolved")
 	}
 }

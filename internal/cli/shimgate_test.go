@@ -694,12 +694,7 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 	}
 	call := []string{"compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "up", "-d"}
 	// Compose's name wins over its defaults, which it has already weighed.
-	env := func(k string) string {
-		if k == "COMPOSE_PROJECT_NAME" {
-			return "other"
-		}
-		return ""
-	}
+	env := envMap(map[string]string{"COMPOSE_PROJECT_NAME": "other"})
 	wd := func() (string, error) { return "/Users/dev/src/project-a", nil }
 	if got := composeProject("/usr/local/bin/docker", call, shim.Parse("docker", call), env, wd, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
@@ -718,8 +713,16 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 }
 
 // noEnv and noWd are a call with no environment and no working directory.
-func noEnv(string) string   { return "" }
-func noWd() (string, error) { return "", errors.New("no working directory") }
+func noEnv(string) (string, bool) { return "", false }
+func noWd() (string, error)       { return "", errors.New("no working directory") }
+
+// envMap is a call's environment, m.
+func envMap(m map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := m[k]
+		return v, ok
+	}
+}
 
 // When Compose cannot name the project (its config fails or times out), the
 // project is the one Compose names by default: COMPOSE_PROJECT_NAME, else
@@ -763,7 +766,7 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 		{"the working directory, with its own compose file", []string{"compose", "up"}, nil, stack, "myapp"},
 	} {
 		c := shim.Parse("docker", tc.args)
-		getenv := func(k string) string { return tc.env[k] }
+		getenv := envMap(tc.env)
 		if tc.wd == "" {
 			tc.wd = "/Users/dev/src/project-a"
 		}
@@ -818,10 +821,11 @@ func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
 		{"the found compose file's .env", []string{"compose", "up"}, nil, "stack/deeper", "from-stack"},
 		{"the working directory's .env before the found one's", []string{"compose", "up"}, nil, "stack/own", "from-own"},
 		{"the process environment beats .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "plain", "env"},
+		{"an empty COMPOSE_PROJECT_NAME in the environment: the directory's, not .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": ""}, "plain", "plain"},
 		{"an interpolated name: the directory's", []string{"compose", "up"}, nil, "dollar", "dollar"},
 	} {
 		c := shim.Parse("docker", tc.args)
-		getenv := func(k string) string { return tc.env[k] }
+		getenv := envMap(tc.env)
 		wd := func() (string, error) { return filepath.Join(root, tc.wd), nil }
 		got, guessed := composeKey("/usr/local/bin/docker", tc.args, c, getenv, wd, failing, time.Now, os.Stat)
 		if got != tc.want || !guessed {
@@ -1020,16 +1024,11 @@ func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
 // project directory's name (the working directory's).
 func TestComposeProjectOfStdin(t *testing.T) {
 	wd := func() (string, error) { return "/Users/dev/src/My_App", nil }
-	none := func(string) string { return "" }
+	none := noEnv
 	if got, _ := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, none, wd); got != "my_app" {
 		t.Fatalf("project = %q, want my_app", got)
 	}
-	env := func(k string) string {
-		if k == "COMPOSE_PROJECT_NAME" {
-			return "Piped"
-		}
-		return ""
-	}
+	env := envMap(map[string]string{"COMPOSE_PROJECT_NAME": "Piped"})
 	if got, _ := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, env, wd); got != "piped" {
 		t.Fatalf("project = %q, want piped", got)
 	}
@@ -1085,10 +1084,12 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "env"},
 		{"the process environment beats .env", []string{"compose", "-f", "-", "up", "-d"},
 			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "env"},
+		{"an empty COMPOSE_PROJECT_NAME in the environment: the directory's, not .env", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_PROJECT_NAME": ""}, "app"},
 		{"-p beats both", []string{"compose", "-p", "flag", "--env-file", "x.env", "-f", "-", "up", "-d"},
 			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "flag"},
 	} {
-		getenv := func(k string) string { return tc.env[k] }
+		getenv := envMap(tc.env)
 		// Only the directory's name is a guess.
 		got, guessed := composeStdinProject(shim.Parse("docker", tc.args), getenv, wd)
 		if got != tc.want || guessed != (tc.want == "app") {

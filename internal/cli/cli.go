@@ -382,13 +382,23 @@ func (e Env) envOf() ([]string, func(string) string) {
 		environ = os.Environ
 	}
 	env := environ()
+	lookup := lookupIn(env)
 	return env, func(k string) string {
+		v, _ := lookup(k)
+		return v
+	}
+}
+
+// lookupIn is a lookup in env that tells an empty value from none, as
+// os.LookupEnv does; the first of duplicates wins.
+func lookupIn(env []string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
 		for _, kv := range env {
 			if v, ok := strings.CutPrefix(kv, k+"="); ok {
-				return v
+				return v, true
 			}
 		}
-		return ""
+		return "", false
 	}
 }
 

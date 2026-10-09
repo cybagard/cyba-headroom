@@ -164,11 +164,13 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// not asked), and says whether a detached up starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
 		// down (R7).
+		env, _ := e.envOf()
+		lookupEnv := lookupIn(env)
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
-			req.Target, req.Guessed = composeStdinProject(c, getenv, h.getwd)
+			req.Target, req.Guessed = composeStdinProject(c, lookupEnv, h.getwd)
 		} else {
-			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, getenv, h.getwd, h.composeAsk, h.now, h.stat)
+			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
 			// Compose would start anything ("interactive run is not
 			// supported"), and a restart's lists each container as
@@ -290,8 +292,8 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 // name: the way it does, keeps the two from parting. When Compose cannot
 // say (its config fails or times out), the name it gives by default
 // (composeDefaultProject, #84).
-func composeProject(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
-	project, _ := composeKey(bin, args, c, getenv, getwd, ask, time.Now, os.Stat)
+func composeProject(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
+	project, _ := composeKey(bin, args, c, lookupEnv, getwd, ask, time.Now, os.Stat)
 	return project
 }
 
@@ -299,7 +301,7 @@ func composeProject(bin string, args []string, c shim.Call, getenv func(string) 
 // Compose gives by default, its config having failed, which misses a name
 // Compose finds elsewhere (#85). The lease book trusts a guess less (#84).
 // now and stat are the clock and os.Stat.
-func composeKey(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error),
+func composeKey(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error),
 	ask func(bin string, args []string) ([]byte, error), now func() time.Time, stat func(string) (fs.FileInfo, error)) (project string, guessed bool) {
 	if c.Target != "" {
 		return c.Target, false
@@ -314,7 +316,7 @@ func composeKey(bin string, args []string, c shim.Call, getenv func(string) stri
 		Name string `json:"name"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		project = composeDefaultProject(c, getenv, getwd, asked.Add(composeTimeout), now, stat)
+		project = composeDefaultProject(c, lookupEnv, getwd, asked.Add(composeTimeout), now, stat)
 		return project, project != ""
 	}
 	return cfg.Name, false
@@ -340,8 +342,9 @@ func composeKey(bin string, args []string, c shim.Call, getenv func(string) stri
 // It cannot see a name: in the compose file, nor a COMPOSE_FILE in .env, nor
 // an interpolated COMPOSE_PROJECT_NAME: there the name differs from
 // Compose's, and the lease, a guess, binds nothing (entry.guessed).
-func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func() (string, error), deadline time.Time, now func() time.Time,
+func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), deadline time.Time, now func() time.Time,
 	stat func(string) (fs.FileInfo, error)) string {
+	getenv := getenvOf(lookupEnv)
 	if name := getenv("COMPOSE_PROJECT_NAME"); name != "" {
 		return normalProject(name)
 	}
@@ -356,7 +359,7 @@ func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func()
 	} else if i := first(c.ComposeFiles); i >= 0 {
 		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
 	}
-	if name, ok := composeEnvFileProject(c, getenv, cwd, []string{dir}, deadline.Sub(now())); ok {
+	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
 		return normalProject(name)
 	}
 	if dir == cwd && c.ComposeProjectDir == "" {
@@ -374,7 +377,7 @@ func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func()
 			dir = found
 		}
 		if dir != cwd {
-			if name, ok := composeEnvFileProject(c, getenv, cwd, []string{dir}, deadline.Sub(now())); ok {
+			if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
 				return normalProject(name)
 			}
 		}
@@ -538,7 +541,8 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 // file, which the shim cannot read, beats it but none of the others
 // (compose-go's cli/options.go, withNamePrecedenceLoad). A guess that
 // misses binds nothing and ends quietly (#85).
-func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (string, error)) (project string, guessed bool) {
+func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string, guessed bool) {
+	getenv := getenvOf(lookupEnv)
 	switch {
 	case c.Target != "":
 		return c.Target, false
@@ -556,7 +560,7 @@ func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (
 	if c.ComposeProjectDir != "" {
 		dir = absIn(cwd, c.ComposeProjectDir)
 	}
-	if name, ok := composeEnvFileProject(c, getenv, cwd, []string{dir}, composeTimeout); ok {
+	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout); ok {
 		return normalProject(name), false
 	}
 	project = normalProject(filepath.Base(dir))
@@ -576,8 +580,15 @@ func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (
 // found project directory's) and compose-go's cli/options.go (WithEnvFiles,
 // WithDotEnv), dotenv/env.go (GetEnvFromFile: one map, a later file
 // overwriting) and types/mapping.go (Mapping.Merge keeps what is set: the
-// process environment, then the first .env, beat what follows).
-func composeEnvFileProject(c shim.Call, getenv func(string) string, cwd string, dirs []string, left time.Duration) (string, bool) {
+// process environment, then the first .env, beat what follows). A
+// COMPOSE_PROJECT_NAME set in the process environment, even empty, is kept
+// (WithOsEnv copies it so), and none is read: an empty one leaves the
+// directory's name (withNamePrecedenceLoad).
+func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), cwd string, dirs []string, left time.Duration) (string, bool) {
+	if _, set := lookupEnv("COMPOSE_PROJECT_NAME"); set {
+		return "", false
+	}
+	getenv := getenvOf(lookupEnv)
 	files := c.ComposeEnvFiles
 	if len(files) == 0 {
 		files = strings.FieldsFunc(getenv("COMPOSE_ENV_FILES"), func(r rune) bool { return r == ',' })
@@ -716,6 +727,14 @@ func envSpace(r rune) bool {
 		return true
 	}
 	return false
+}
+
+// getenvOf is lookupEnv as getenv: "" when unset.
+func getenvOf(lookupEnv func(string) (string, bool)) func(string) string {
+	return func(k string) string {
+		v, _ := lookupEnv(k)
+		return v
+	}
 }
 
 // within is f's result, unless it takes longer than left: then false. What

@@ -1,13 +1,16 @@
 package shim
 
 import (
+	"context"
 	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemote(t *testing.T) {
+	resolving(t, map[string]string{"build-box": "203.0.113.7"})
 	host, _ := os.Hostname()
 	lan := ""
 	if addrs, err := net.InterfaceAddrs(); err == nil {
@@ -53,5 +56,119 @@ func TestRemote(t *testing.T) {
 			t.Errorf("Remote(%s, %q, DOCKER_HOST=%q, CONTAINER_HOST=%q) = %v, want %v",
 				c.name, c.endpoint, c.dockerHost, c.containerHost, got, c.want)
 		}
+	}
+}
+
+// resolving makes lookupIP answer from names for the test, and fail for
+// any other name.
+func resolving(t *testing.T, names map[string]string) {
+	t.Helper()
+	old := lookupIP
+	t.Cleanup(func() { lookupIP = old })
+	lookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if ip, ok := names[host]; ok {
+			return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+}
+
+// A tcp:// host is this Mac's when it resolves to one of its addresses, as
+// the docker CLI dials it: 127.1, a name for 127.0.0.1; and so is a bare
+// ::1 on either scheme, with or without a port (#118).
+func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
+	resolving(t, map[string]string{"127.1": "127.0.0.1", "dev-box": "127.0.0.1", "dev-box6": "::1"})
+	for _, c := range []struct{ endpoint, dockerHost string }{
+		{"tcp://127.1:2375", ""},
+		{"127.1:2375", ""},
+		{"", "tcp://127.1:2375"},
+		{"::1", ""},
+		{"tcp://::1", ""},
+		{"", "::1"},
+		{"ssh://dev@::1", ""},
+		{"ssh://dev@::1:22", ""}, // ssh -p 22 -- ::1
+		{"", "ssh://core@::1:2222/run/podman/podman.sock"},
+		{"tcp://dev-box:2375", ""},
+		{"tcp://dev-box6:2375", ""},
+	} {
+		env := map[string]string{"DOCKER_HOST": c.dockerHost}
+		if Remote("docker", c.endpoint, func(k string) string { return env[k] }) {
+			t.Errorf("Remote(docker, %q, DOCKER_HOST=%q) = true, want this Mac's", c.endpoint, c.dockerHost)
+		}
+	}
+}
+
+// A tcp host that resolves only to another machine stays remote, and so
+// does an ssh host, which is not resolved (#118).
+func TestARemoteTCPHostStaysRemote(t *testing.T) {
+	resolving(t, map[string]string{"build-box": "203.0.113.7"})
+	for _, endpoint := range []string{
+		"tcp://build-box:2376",
+		"build-box:2376",
+		"tcp://203.0.113.7:2376",
+		"tcp://[2001:db8::1]:2376",
+		"2001:db8::1",
+		"ssh://dev@ssh-alias",
+	} {
+		if !Remote("docker", endpoint, func(string) string { return "" }) {
+			t.Errorf("Remote(docker, %q) = false, want remote", endpoint)
+		}
+	}
+}
+
+// A tcp host that does not resolve, or not in time, is this Mac's: the
+// shim gates it rather than skip a local call, and waits about 200 ms
+// for a slow resolver (#118).
+func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
+	resolving(t, nil)
+	if Remote("docker", "tcp://no-such-box:2375", func(string) string { return "" }) {
+		t.Error("an unresolved host is remote, want this Mac's")
+	}
+	lookupIP = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return []net.IPAddr{{IP: net.ParseIP("203.0.113.7")}}, nil
+		}
+	}
+	start := time.Now()
+	if Remote("docker", "tcp://slow-box:2375", func(string) string { return "" }) {
+		t.Error("a host that resolves too late is remote, want this Mac's")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the shim waited %v for the resolver, want about 200ms", took)
+	}
+}
+
+// A numeric host is resolved on either scheme, as getaddrinfo reads it, and
+// never taken for an ssh alias: 127.1, 127.0.1, 2130706433 and 0x7f000001
+// are this Mac's when they resolve to it, and 0177.0.0.1, read as
+// 177.0.0.1, stays remote. localhost. is a name, and so is cafe, an ssh
+// host that is not resolved (#118).
+func TestANumericHostIsResolvedOnEitherScheme(t *testing.T) {
+	resolving(t, map[string]string{
+		"127.1": "127.0.0.1", "127.0.1": "127.0.0.1", "2130706433": "127.0.0.1",
+		"0x7f000001": "127.0.0.1", "0177.0.0.1": "177.0.0.1",
+	})
+	for _, c := range []struct {
+		host   string
+		remote bool
+	}{
+		{"127.1", false},
+		{"127.0.1", false},
+		{"2130706433", false},
+		{"0x7f000001", false},
+		{"localhost.", false},
+		{"0177.0.0.1", true},
+	} {
+		for _, endpoint := range []string{"tcp://" + c.host + ":2375", "ssh://core@" + c.host + ":2222"} {
+			if got := Remote("docker", endpoint, func(string) string { return "" }); got != c.remote {
+				t.Errorf("Remote(docker, %q) = %v, want %v", endpoint, got, c.remote)
+			}
+		}
+	}
+	if !Remote("docker", "ssh://dev@cafe", func(string) string { return "" }) {
+		t.Error("ssh://dev@cafe is this Mac's, want remote: a name, not resolved")
 	}
 }

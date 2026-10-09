@@ -67,7 +67,8 @@ type Book struct {
 	// prev are the resources in the last fresh reading of each source. A
 	// resource not among them is new and may bind a lease: one started for
 	// the first time, or again after it stopped. A failed read keeps the
-	// previous set, so a resource missing from it does not come back new.
+	// previous set, so a resource missing from it does not come back new;
+	// so does a reading a container is only missing from (Book.gone).
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
 	// based says which sources (container, vm) prev holds a fresh reading
@@ -77,6 +78,10 @@ type Book struct {
 	// seen are the containers Docker's events said started or exited
 	// (#67), until a reading begun after the event shows them.
 	seen map[string]seen
+	// missed counts, for each container or VM in prev or bound by an open
+	// lease, the fresh readings in a row it was missing from; a die sets it
+	// to gone (Book.gone).
+	missed map[string]int
 	// verdicts say, for each resource seen within the lease timeout, how it
 	// started (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
@@ -179,7 +184,7 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
 	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
-		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, seen: map[string]seen{}}
+		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, seen: map[string]seen{}, missed: map[string]int{}}
 }
 
 // dockerSettle is how long after the Docker engine comes back its
@@ -371,30 +376,17 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost:
 		// what they use stays counted, so a start of one stopped is
-		// covered. Those it held stay held while they run, whoever the
-		// reading says runs them; one stopped since is no longer this
-		// lease's: Compose starting it binds it afresh, and a plain start
-		// of it is checked.
-		var running map[string]bool
+		// covered. Those it held stay held, whoever the reading says runs
+		// them: one gone since (Book.gone) is no longer held, so Compose
+		// starting it binds it afresh, and a plain start of it is checked.
 		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
 			if !composeTakes(r, o) {
 				return false
 			}
-			if running == nil {
-				running = map[string]bool{}
-				if s != nil {
-					for _, x := range resources(s) {
-						running[x.key] = !b.seen[x.key].gone
-					}
-				}
-			}
 			e.took = append(e.took, o)
 			reserved, used = reserved+o.reserved(), used+o.used
 			for k := range o.bound {
-				if o.held[k] && !running[k] {
-					continue
-				}
 				e.bound[k], e.held[k] = true, o.held[k]
 			}
 			e.found = e.found || o.found
@@ -697,13 +689,38 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 	}
 	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return !now.Before(e.Expires.Add(b.timeout)) })
+	// What was there, in the last reading or bound by an open lease, and is
+	// missing from this one: gone only after goneAfter readings (Book.gone).
+	missed := map[string]int{}
+	count := func(k string) {
+		n := b.missed[k]
+		switch _, ok := present[k]; {
+		case b.seen[k].at.After(began):
+			// It started or died during the reading, which may not show
+			// it: the event stands.
+		case ok:
+			n = 0
+		case readable(s, kindOf(k)):
+			n = min(n+1, goneAfter(k)) // a failed read keeps the count
+		}
+		missed[k] = n
+	}
+	for k := range b.prev {
+		count(k)
+	}
+	for _, e := range b.open {
+		for k := range e.bound {
+			count(k)
+		}
+	}
+	b.missed = missed
 	next := map[string]bool{}
 	for _, r := range res {
 		next[r.key] = true
 	}
 	for k := range b.prev {
-		if !readable(s, kindOf(k)) {
-			next[k] = true // a failed read: keep what was there
+		if !readable(s, kindOf(k)) || !b.gone(k) {
+			next[k] = true // a failed read, or only missing: keep what was there
 		}
 	}
 	b.prev = next
@@ -713,9 +730,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 
 	for _, e := range b.open {
 		for k := range e.held {
-			_, ok := present[k]
-			startedSince := b.seen[k].at.After(began) && !b.seen[k].gone // during the reading, so it may lack it
-			if !ok && readable(s, e.waitsFor()) && !startedSince {
+			if b.gone(k) {
 				b.release(k)
 			}
 		}
@@ -740,9 +755,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 		alive := false
 		for k := range e.bound {
-			_, ok := present[k]
-			started := b.seen[k].at.After(began) && !b.seen[k].gone // during the reading, so it may lack it
-			alive = alive || ok || started || !readable(s, e.waitsFor())
+			alive = alive || !b.gone(k)
 		}
 		switch {
 		case e.Kind == "tart" && len(e.bound) == 0 && e.pid > 0 && !b.alive(e.pid):
@@ -828,6 +841,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		last := b.seen[r.key]
 		stopped := last.stopped
 		b.seen[r.key] = seen{at: now}
+		delete(b.missed, r.key) // it runs again
 		if b.boundAnywhere(r.key) {
 			return
 		}
@@ -854,14 +868,15 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.judge(r, gated, now)
 	case "die":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
+		b.missed[r.key] = goneAfter(r.key) // gone at once
 		b.release(r.key)
 		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 			if !e.bound[r.key] || !e.over() {
 				return false
 			}
 			for k := range e.bound {
-				if v, ok := b.seen[k]; ok && !v.gone || !ok && b.prev[k] {
-					return false // it runs, by an event or the last reading
+				if !b.gone(k) {
+					return false // it runs, or is only missing
 				}
 			}
 			b.log.Debug("lease ended: its container exited", "lease", e.ID, "worktree", e.Worktree)
@@ -977,6 +992,24 @@ func later(a, b time.Time) time.Time {
 
 func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
+}
+
+// gone reports whether k, a container or VM in the last reading or bound by
+// an open lease, is gone: Docker said it died, or it was missing from
+// goneAfter fresh readings in a row (#87). A container missing from one is
+// missing, not gone: its stats failed, or a restart backoff spans the
+// reading. Only one gone lets go of its held state, ends its lease, and
+// leaves prev, so that when it is back it is new.
+func (b *Book) gone(k string) bool { return b.missed[k] >= goneAfter(k) }
+
+// goneAfter is how many fresh readings in a row k must be missing from to
+// be gone: two for a container, one for a VM, as before (#87's causes,
+// failed stats and a restart backoff, are Docker's).
+func goneAfter(k string) int {
+	if kindOf(k) == "vm" {
+		return 1
+	}
+	return 2
 }
 
 // release lets go of a held container that is gone: it was never this

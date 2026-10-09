@@ -94,8 +94,11 @@ func TestAReadingOlderThanTheStartKeepsTheLease(t *testing.T) {
 	}
 	c.t = t0.Add(10 * time.Second)
 	b.Observe(read(snap(), t0.Add(5*time.Second)))
+	// Missing from one later reading is not gone (#87): a second ends it.
+	c.t = t0.Add(15 * time.Second)
+	b.Observe(read(snap(), t0.Add(10*time.Second)))
 	if l := b.List(); len(l) != 0 {
-		t.Fatalf("leases = %+v: a later reading without x ends it", l)
+		t.Fatalf("leases = %+v: later readings without x end it", l)
 	}
 }
 

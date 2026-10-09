@@ -19,7 +19,11 @@ func TestComposeUpAfterStopBindsByItsProject(t *testing.T) {
 	}
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
-	b.Observe(snap()) // docker compose stop
+	// docker compose stop: its events say A1 is gone, not just missing (#87).
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.ContainerEvent("stop", "A1", "app-db-1", lab)
+	b.ContainerEvent("die", "A1", "app-db-1", lab)
+	b.Observe(snap())
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // docker compose up -d: the same containers
@@ -555,7 +559,9 @@ func TestAComposeRunLeaseEndsWithItsContainer(t *testing.T) {
 	b.Observe(snap())
 	b.Check(run("w1", "p"), snap(), cfg)
 	b.Observe(oneoff("r1", "p", "w1")(snap()))
-	b.Observe(snap()) // exited, removed
+	// Exited, removed: its die says r1 is gone, not just missing (#87).
+	b.ContainerEvent("die", "r1", "r1", map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"})
+	b.Observe(snap())
 	if l := b.List(); len(l) != 0 {
 		t.Fatalf("leases = %+v", l)
 	}
@@ -1204,7 +1210,10 @@ func TestAHeldContainerStoppedSinceCountsWhenItIsBack(t *testing.T) {
 	b.Observe(s)
 	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
 	b.Check(up, s, cfg) // db held
-	b.Observe(snap())   // compose stop
+	// compose stop: its events say db is gone, not just missing (#87).
+	b.ContainerEvent("stop", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.Observe(snap())
 	c.t = c.t.Add(time.Second)
 	b.Check(up, snap(), cfg)
 	b.Observe(s) // the same db again

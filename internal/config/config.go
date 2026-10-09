@@ -334,11 +334,11 @@ func (c Config) Validate() error {
 	if c.Daemon.TrendWindow.Duration < 3*c.Daemon.Interval.Duration {
 		errs = append(errs, errors.New("daemon.trend_window must be at least 3 x daemon.interval"))
 	}
-	if !(c.Policy.MinHeadroomGB >= 0) { // also rejects NaN
-		errs = append(errs, errors.New("policy.min_headroom_gb must be >= 0"))
+	if g := c.Policy.MinHeadroomGB; !(g >= 0) || g > MaxBudgetGB { // also rejects NaN
+		errs = append(errs, fmt.Errorf("policy.min_headroom_gb must be >= 0 and <= %d", MaxBudgetGB))
 	}
-	if !(c.Policy.PerWorktreeCapGB >= 0) {
-		errs = append(errs, errors.New("policy.per_worktree_cap_gb must be >= 0"))
+	if g := c.Policy.PerWorktreeCapGB; !(g >= 0) || g > MaxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.per_worktree_cap_gb must be >= 0 and <= %d", MaxBudgetGB))
 	}
 	switch c.Policy.PressureGuard {
 	case "off", "warn", "critical":

@@ -47,12 +47,16 @@ The default for every issue. Each step ends when its condition holds.
    - **Hard findings.** If a finding holds up but has no obvious fix, investigate it with `mattpocock-skills:diagnosing-bugs` before deciding. If several findings come from one design, change the design rather than adding a special case for each.
    - **Out of scope.** For a finding that belongs in another issue, open a follow-up issue and link it from the PR.
    - **Declining a finding.** Before you decline a finding or leave it open, state its consequence: what goes wrong, when, and how often. Then decide whether it hurts someone using headroom: a wrong allow or deny, a reservation that is lost or held for no reason, or a false or missing warning that users will meet. If it does, fix it, even when the fix is large. If it does not, accept it and write that reason down. Each declined or open finding goes into the PR with its consequence and the reason.
+   - **Budget.** A PR gets five review rounds in all. Nothing resets the count: not a fix, not late scope, not a redesign.
    - **Done when:**
      - at least three rounds have run, and
      - the last round found no confirmed correctness or security finding, and
      - the last commit is the one that round reviewed: no fix or feature has gone in unreviewed.
-
-     Stop at five rounds and say in the PR what is still open.
-   - **Late scope.** New behaviour added after the review started (a follow-up asked for in review, a redesign) restarts the count: it gets its own three rounds, covering the whole branch.
-7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and, per round, what each review found and how it was resolved. For each finding declined or left open, give its consequence and why it does not hurt users. Name the commit the last round reviewed. Done when CI is green.
+   - **Budget spent with findings still open.** Do not run a sixth round.
+     1. Run `mattpocock-skills:diagnosing-bugs` on every confirmed finding from all the rounds. Tally them by feature and design to find what keeps producing them.
+     2. Fix what the diagnosis points to, usually a design change, and verify it with tests and a smoke test.
+     3. Run one final round on the whole branch.
+     4. Stop there. Whatever that round confirms goes into the PR as open, with its consequence and a follow-up issue. The user decides whether to ship or to run more rounds. Never start another round on your own.
+   - **Late scope.** New behaviour added after the review started (a follow-up asked for in review, a redesign) draws on the same budget. If it would need more rounds than are left, put it in its own issue and PR.
+7. **Ship.** Open a PR that closes the issue. The body covers what changed, how it was verified, and, per round, what each review found and how it was resolved. For each finding declined or left open, give its consequence and why it does not hurt users. If the budget ran out, include the diagnosis and what it changed. Name the commit the last round reviewed. Done when CI is green.
 8. **Learn.** Record whatever the issue taught you that later issues need: a spike note, a new acceptance criterion on a later issue, or a line in this file.

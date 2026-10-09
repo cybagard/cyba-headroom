@@ -1441,9 +1441,9 @@ func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 	}
 }
 
-// docker start c1 c2 covers starting each once: c2 dying while its lease
-// waits on c1 lets c2 go, so a compose up that starts it again binds it
-// (#111).
+// docker start c1 c2 covers starting each once: c2 died while its lease
+// waits on c1, so a compose up checked since that starts it again takes it,
+// and its use counts against the up's lease, not the start's (#111).
 func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
 	b, c, log := book(t)
 	p1 := func(mem1, mem2 uint64) *protocol.Snapshot {
@@ -1468,12 +1468,20 @@ func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
 	}
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(p1(0, 0))
-	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+	start := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
 		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
 	b.ContainerEvent("start", "c1", "c1", lab)
 	b.ContainerEvent("start", "c2", "c2", lab)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(p1(gib/8, gib/8))
+	held := func() uint64 {
+		i := slices.IndexFunc(b.List(), func(l protocol.Lease) bool { return l.ID == start.LeaseID })
+		if i < 0 {
+			t.Fatalf("leases = %+v, want %s open", b.List(), start.LeaseID)
+		}
+		return b.List()[i].Bytes
+	}
+	cost := held() + gib/4
 	c.t = c.t.Add(time.Second)
 	b.ContainerEvent("die", "c2", "c2", lab) // a crash
 	c.t = c.t.Add(time.Second)
@@ -1485,11 +1493,77 @@ func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
 	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
 		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
 	}
+	if got, want := held(), cost-gib/8; got != want {
+		t.Fatalf("%s holds %d MiB, want %d MiB: its cost less c1's use", start.LeaseID, got>>20, want>>20)
+	}
 	for range 30 {
 		c.t = c.t.Add(5 * time.Second)
 		b.Observe(p1(gib/8, gib))
 	}
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("log: %s", log)
+	}
+}
+
+// startTwo is docker start c1 c2, both resolved.
+var startTwo = policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+	Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}
+
+// withC1C2 is a reading of c1 and c2 in w1, each at its use in cs.
+func withC1C2(head uint64, cs map[string]uint64) *protocol.Snapshot {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(int64(head))
+	for _, id := range []string{"c1", "c2"} {
+		if m, ok := cs[id]; ok {
+			withContainerMem(s, id, "w1", m)
+		}
+	}
+	return s
+}
+
+// docker stop c2 && docker start c2 after docker start c1 c2: the start's
+// lease still covers c2, so the second start is allowed, with no lease,
+// however low headroom is (#111).
+func TestAStartOfSeveralCoversItsStopAndStart(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(withC1C2(8*gib, nil), c.t))
+	b.Check(startTwo, withC1C2(8*gib, nil), cfg)
+	b.ContainerEvent("start", "c1", "c1", nil)
+	b.ContainerEvent("start", "c2", "c2", nil)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withC1C2(8*gib, map[string]uint64{"c1": gib / 8, "c2": gib / 8}), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "c2", "c2", nil)
+	b.ContainerEvent("die", "c2", "c2", nil)
+	c.t = c.t.Add(4 * time.Second)
+	s := read(withC1C2(2*gib+gib/2, map[string]uint64{"c1": gib / 8}), c.t)
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c2", Target: "c2", ContainerID: "c2", CostBytes: gib, OnEngine: true}, s, cfg)
+	if !d.Allow || d.LeaseID != "" {
+		t.Fatalf("docker start c2 = %+v, want allowed by the start's lease", d)
+	}
+}
+
+// A restart policy restarting c2 after a crash: c2 stays the start's, and
+// its use counts against the start's reservation (#111).
+func TestAStartOfSeveralCountsARestartByPolicy(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(withC1C2(8*gib, nil), c.t))
+	b.Check(startTwo, withC1C2(8*gib, nil), cfg)
+	b.ContainerEvent("start", "c1", "c1", nil)
+	b.ContainerEvent("start", "c2", "c2", nil)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withC1C2(8*gib, map[string]uint64{"c1": gib / 8, "c2": gib / 8}), c.t))
+	cost := reserved(b) + gib/4
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", nil) // a crash
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", nil) // its restart policy
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withC1C2(4*gib+gib/2, map[string]uint64{"c1": gib / 2, "c2": gib}), c.t))
+	}
+	if got, want := reserved(b), cost-gib/2-gib; got != want {
+		t.Fatalf("reserved = %d MiB, want %d MiB: the cost less c1's and c2's use", got>>20, want>>20)
 	}
 }

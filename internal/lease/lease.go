@@ -14,8 +14,8 @@
 // reservation back at once. A lease ends when its resources use the full
 // cost, when they are gone, or at its timeout; one that never saw its
 // resource is logged as expired. A lease with no key (a headroom check,
-// which names no container, or Docker not answering at a start) never
-// binds: it holds its cost to its timeout.
+// which sends none, or Docker not answering at a start) never binds: a
+// worktree's holds its cost to its timeout.
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers

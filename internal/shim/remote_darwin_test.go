@@ -36,7 +36,7 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 // names none) and dialed through the system resolver; ssh:// as docker's
 // connhelper hands it to ssh ("ssh -p PORT -- HOST", HOST being
 // url.Hostname) and ssh resolves it. Each row's reach is what docker 29.8.1
-// dialed, or what "ssh -G" and "ssh -v" connected to, on macOS 26. A
+// dialed, or what "ssh -G" and "ssh -v" connected to, on macOS 27. A
 // number goes to the resolver on either scheme; a name is resolved on
 // tcp:// only, so an ssh name stays remote (#118).
 func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
@@ -86,6 +86,9 @@ func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
 		{"ssh://core@0127.0.0.1:2222", true, "127.0.0.1"},
 		{"ssh://core@0177.0.0.1:2222", false, "177.0.0.1"},
 		{"ssh://core@6425673729:2222", true, "127.0.0.1"},
+		{"ssh://core@0x17f000001:2222", true, "127.0.0.1"},
+		{"ssh://core@4294967296:2222", true, "0.0.0.0"},
+		{"ssh://core@127.0x.1:2222", true, "127.0.0.1"},
 		{"ssh://core@0x.0:2222", true, "0.0.0.0"},
 		{"ssh://core@203.0.113.7:2222", false, "203.0.113.7"},
 		{"ssh://core@localhost:2222", true, "the loopback"},

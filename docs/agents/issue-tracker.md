@@ -47,4 +47,4 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 ## This repo
 
 - Plan issues carry a `phase:*` label for their phase in `docs/plan.md`; a triage role is added only when one applies.
-- Blocking edges are a `Blocked by #<n>` line in the issue body; `docs/plan.md` gives the order.
+- Blocking edges are GitHub's native issue dependencies, read and added as in **Blocking** above; when an issue's body names a blocker, add the edge too. `docs/plan.md` gives the order.

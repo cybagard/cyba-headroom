@@ -49,8 +49,9 @@ func TestParse(t *testing.T) {
 		{"docker run", Call{Kind: "container", Op: "run", Command: "docker run"}},
 		// Global flags.
 		{"docker --context remote run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", Context: "remote"}},
-		{"docker -c remote -D --host=unix:///x.sock run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", Host: "unix:///x.sock", HasHost: true, Context: "remote"}},
-		{"podman --connection m1 --url=ssh://h run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Host: "ssh://h", HasHost: true, Context: "m1"}},
+		{"docker -c remote -D --host=unix:///x.sock run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", Host: "unix:///x.sock", HasHost: true, Context: "remote", HostLast: true}},
+		{"podman --connection m1 --url=ssh://h run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Host: "ssh://h", HasHost: true, Context: "m1", HostLast: true}},
+		{"podman --url=ssh://h --connection m1 run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Host: "ssh://h", HasHost: true, Context: "m1"}},
 		// A global flag newer than the tables: boolean if a command follows it,
 		// else it takes a value.
 		{"docker --unknown run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
@@ -64,7 +65,7 @@ func TestParse(t *testing.T) {
 		{"docker restart db -t 5", Call{Kind: "container", Op: "restart", Command: "docker restart db", Target: "db"}},
 		{"docker run img\u202egnp", Call{Kind: "container", Op: "run", Command: "docker run", Target: "img\u202egnp"}},
 		{"podman --remote -c conn run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Context: "conn"}},
-		{"docker --newbool -H unix:///x run img", Call{Kind: "container", Op: "run", Command: "docker run img", Target: "img", Host: "unix:///x", HasHost: true}},
+		{"docker --newbool -H unix:///x run img", Call{Kind: "container", Op: "run", Command: "docker run img", Target: "img", Host: "unix:///x", HasHost: true, HostLast: true}},
 		{"docker run --newflag x alpine stress -m 64g", Call{Kind: "container", Op: "run", Command: "docker run"}},
 		{"docker run --newflag x -dm2g img", Call{Kind: "container", Op: "run", Command: "docker run", MemoryBytes: 2 * g}},
 		{"docker run --newbool -m 1g img", Call{Kind: "container", Op: "run", Command: "docker run", MemoryBytes: g}},

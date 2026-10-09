@@ -1170,6 +1170,36 @@ func TestABareHostNameIsTCP(t *testing.T) {
 	}
 }
 
+// Podman's engine is the last of --url, -H, --connection and --context on
+// the command line, as before #90; podman's own order is #71's.
+func TestPodmansEngineIsItsLastEngineFlag(t *testing.T) {
+	const far = "ssh://dev@build.example"
+	for _, c := range []struct {
+		args  []string
+		gated bool
+	}{
+		{[]string{"--url", far, "--connection", "near", "run", "-l", "dev.headroom.lease=x", "alpine"}, true},
+		{[]string{"--url", far, "-c", "near", "run", "alpine"}, true},
+		{[]string{"-H", far, "--context", "near", "run", "alpine"}, true},
+		{[]string{"--connection", "near", "--url", far, "run", "-l", "dev.headroom.lease=x", "alpine"}, false},
+		{[]string{"-c", "near", "--url", far, "run", "alpine"}, false},
+		{[]string{"--context", "near", "-H", far, "run", "alpine"}, false},
+		{[]string{"--url", far, "run", "alpine"}, false},
+		{[]string{"-c", "near", "run", "alpine"}, true},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		if err := os.WriteFile(filepath.Join(r.dir, "podman"), []byte("#!real\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(r.env, "DOCKER_HOST="+far)
+		code, _ := r.run(append([]string{"podman"}, c.args...)...)
+		if gated := code == exitDenied || len(r.asked) == 1; gated != c.gated {
+			t.Errorf("%q: code %d, asked %d, want gated %v", c.args, code, len(r.asked), c.gated)
+		}
+	}
+}
+
 // docker --config DIR --context X compose reads X from DIR, as Compose
 // does: it runs as a docker CLI plugin, under the CLI's global options.
 func TestComposeReadsItsContextFromTheCallsConfig(t *testing.T) {

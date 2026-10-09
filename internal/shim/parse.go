@@ -50,10 +50,11 @@ type Call struct {
 	// one was: docker reads -H "" as its default socket, not DOCKER_HOST.
 	// Context is the one named with --context or -c/--connection. A remote
 	// engine's memory is not this Mac's. Both are raw: they may hold a user
-	// name.
-	Host    string
-	HasHost bool
-	Context string
+	// name. HostLast is whether Host was given after Context.
+	Host     string
+	HasHost  bool
+	Context  string
+	HostLast bool
 }
 
 // Parse tells what the call name args (argv[1:]) would start. It is pure and
@@ -79,9 +80,9 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
 		case "-H", "--host", "--url":
-			c.Host, c.HasHost = v, true
+			c.Host, c.HasHost, c.HostLast = v, true, true
 		case "--context", "-c", "--connection":
-			c.Context = v
+			c.Context, c.HostLast = v, false
 		case "--config":
 			c.ConfigDir = v
 		case "-v":
@@ -321,7 +322,8 @@ func parseCompose(engine Call, words, args []string) Call {
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
 		ComposeEnvFiles: envFiles, ComposeDetached: detached,
-		ConfigDir: engine.ConfigDir, Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context}
+		ConfigDir: engine.ConfigDir, Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context,
+		HostLast: engine.HostLast}
 	return c.named(append(words, op))
 }
 

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,7 +122,13 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote(name, engine, getenv)
 	default:
-		remote = shim.Remote(name, cmp.Or(c.Host, c.Context), getenv)
+		// Podman's is the last engine flag, as before #90 (its own order
+		// is #71).
+		endpoint := c.Context
+		if c.HostLast {
+			endpoint = c.Host
+		}
+		remote = shim.Remote(name, endpoint, getenv)
 	}
 	if remote {
 		return gated{proceed: true}

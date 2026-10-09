@@ -79,6 +79,9 @@ type CheckRequest struct {
 	// Idle is set for a compose call Compose's own dry run (--dry-run)
 	// said creates, recreates and starts nothing.
 	Idle bool `json:"idle,omitempty"`
+	// Guessed is set when a compose call's Target is the name Compose
+	// gives by default, guessed because its config failed (#84).
+	Guessed bool `json:"guessed,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

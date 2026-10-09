@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -759,6 +760,60 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 	}
 }
 
+// The search for a compose file in the parents stops within what is left of
+// config's budget (#84): a parent may be a mount that hangs (autofs's /net),
+// and the call has already waited for config. Cut short, the project is the
+// working directory's, as when no file is found.
+func TestComposeFileSearchStopsWithinTheBudget(t *testing.T) {
+	wd := func() (string, error) { return "/Users/dev/src/project-a/sub", nil }
+	hung := make(chan struct{})
+	t.Cleanup(func() { close(hung) })
+	for _, tc := range []struct {
+		name  string
+		took  time.Duration // what config took of composeTimeout
+		stat  func(string) (fs.FileInfo, error)
+		want  string
+		stats bool // whether the search may stat at all
+	}{
+		{"time left: found in a parent", time.Second, func(p string) (fs.FileInfo, error) {
+			if p == "/Users/dev/src/project-a/compose.yaml" {
+				return nil, nil
+			}
+			return nil, fs.ErrNotExist
+		}, "project-a", true},
+		{"no time left", composeTimeout, nil, "sub", false},
+		{"a parent hangs", composeTimeout - 50*time.Millisecond, func(string) (fs.FileInfo, error) { <-hung; return nil, fs.ErrNotExist }, "sub", true},
+	} {
+		now := time.Unix(1e9, 0)
+		clock := func() time.Time { return now }
+		ask := func(string, []string) ([]byte, error) { now = now.Add(tc.took); return nil, context.DeadlineExceeded }
+		stat := func(p string) (fs.FileInfo, error) {
+			if !tc.stats {
+				t.Errorf("%s: stat %s", tc.name, p)
+				return nil, fs.ErrNotExist
+			}
+			return tc.stat(p)
+		}
+		type key struct {
+			project string
+			guessed bool
+		}
+		done := make(chan key, 1)
+		go func() {
+			p, g := composeKey("/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, wd, ask, clock, stat)
+			done <- key{p, g}
+		}()
+		select {
+		case got := <-done:
+			if got != (key{tc.want, true}) {
+				t.Errorf("%s: %+v, want %q, guessed", tc.name, got, tc.want)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("%s: still searching after a second", tc.name)
+		}
+	}
+}
+
 // The fallback name is normalised as compose-go's NormalizeProjectName does
 // it: lower case (Unicode's), then only a-z, 0-9, - and _, with no leading
 // - or _. With nothing left, no key.
@@ -834,6 +889,44 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r.run("podman", "compose", "up", "-d")
 	if asked != 2 || dry != 1 {
 		t.Fatalf("podman: asked %d, dry %d", asked, dry)
+	}
+}
+
+// The name the shim falls back on when Compose's config fails is sent as a
+// guess (#84), and only that one: not -p, not Compose's own name, not
+// stdin's (the project directory's, as before).
+func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w", "COMPOSE_PROJECT_NAME=Shop")
+	r.ask = allow
+	config := []byte(`{"name":"x"}`)
+	r.composeAsk = func(string, []string) ([]byte, error) {
+		if config == nil {
+			return nil, errors.New("exit status 1")
+		}
+		return config, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		fails   bool
+		call    []string
+		target  string
+		guessed bool
+	}{
+		{"config fails", true, []string{"docker", "compose", "up", "-d"}, "shop", true},
+		{"config names it", false, []string{"docker", "compose", "up", "-d"}, "x", false},
+		{"-p", true, []string{"docker", "compose", "-p", "p", "up", "-d"}, "p", false},
+		{"stdin", true, []string{"docker", "compose", "-f", "-", "up", "-d"}, "shop", false},
+	} {
+		config = []byte(`{"name":"x"}`)
+		if tc.fails {
+			config = nil
+		}
+		r.asked = nil
+		r.run(tc.call...)
+		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Guessed != tc.guessed {
+			t.Errorf("%s: asked %+v, want target %q, guessed %v", tc.name, r.asked, tc.target, tc.guessed)
+		}
 	}
 }
 

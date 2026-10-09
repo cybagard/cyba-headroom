@@ -82,14 +82,18 @@ func (f fakeProcs) Footprints(_ context.Context, pids ...int) (uint64, error) {
 	if f.footprintErr != nil {
 		return 0, f.footprintErr
 	}
+	// Like footprint(1), it skips another user's pids without failing, and
+	// fails only when it finds none of them.
+	var total uint64
+	found := false
 	for _, p := range f.procs {
-		if p.ArgsErr != nil && slices.Contains(pids, p.PID) {
-			return 0, errors.New("footprint: exit status 1") // another user's
+		if p.ArgsErr == nil && slices.Contains(pids, p.PID) {
+			total += f.footprint[p.PID]
+			found = true
 		}
 	}
-	var total uint64
-	for _, pid := range pids {
-		total += f.footprint[pid]
+	if !found {
+		return 0, errors.New("footprint: exit status 66")
 	}
 	return total, nil
 }

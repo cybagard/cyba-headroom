@@ -56,18 +56,18 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		return nil, fmt.Errorf("ollama processes: %w", err)
 	}
 	// Another user's ollama may be a server or a client: it is a server
-	// if the API answers. Its footprint cannot be read, so with it the
-	// footprint is unknown, even beside the user's own server (two servers
-	// rarely share a Mac: they contend for the port).
+	// if the API answers. Its footprint cannot be read, and footprint(1)
+	// skips such pids without failing, so with it the footprint is unknown,
+	// even beside the user's own server (two servers rarely share a Mac:
+	// they contend for the port).
 	var probed *ps
+	othersServe := false
 	if len(others) > 0 {
 		m, err := s.models(ctx)
-		if err == nil {
-			pids = append(pids, others...)
-		}
+		othersServe = err == nil
 		probed = &ps{m, err}
 	}
-	if len(pids) == 0 {
+	if len(pids) == 0 && !othersServe {
 		o.Installed = s.installed()
 		return reading{o}, nil
 	}
@@ -86,7 +86,9 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			read <- ps{m, err}
 		}()
 	}
-	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
+	if othersServe {
+		o.FootprintError = "another user's ollama server: footprint not readable"
+	} else if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
 		o.FootprintError = err.Error()
 	} else {
 		o.FootprintBytes = &fp

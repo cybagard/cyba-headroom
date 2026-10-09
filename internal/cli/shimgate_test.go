@@ -800,6 +800,8 @@ func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
 	write("stack/.env", "COMPOSE_PROJECT_NAME=from-stack\n")
 	write("stack/deeper/x", "")
 	write("stack/own/.env", "COMPOSE_PROJECT_NAME=from-own\n")
+	write("stack/empty/.env", "COMPOSE_PROJECT_NAME=\n")
+	write("stack/unknown/.env", "COMPOSE_PROJECT_NAME=$UNSET_X\n")
 	write("plain/.env", "COMPOSE_PROJECT_NAME=from-plain\n")
 	write("web/compose.yaml", "services: {}\n")
 	write("web/.env", "COMPOSE_PROJECT_NAME=from-web\n")
@@ -820,6 +822,9 @@ func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
 		{"--env-file, relative to the working directory", []string{"compose", "--project-directory", "plain", "--env-file", "x.env", "up"}, nil, "", "from-x"},
 		{"the found compose file's .env", []string{"compose", "up"}, nil, "stack/deeper", "from-stack"},
 		{"the working directory's .env before the found one's", []string{"compose", "up"}, nil, "stack/own", "from-own"},
+		// The first .env that sets it wins, even to a name the shim cannot know.
+		{"the working directory's .env, set empty, before the found one's", []string{"compose", "up"}, nil, "stack/empty", "stack"},
+		{"the working directory's .env, interpolated, before the found one's", []string{"compose", "up"}, nil, "stack/unknown", "stack"},
 		{"the process environment beats .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "plain", "env"},
 		{"an empty COMPOSE_PROJECT_NAME in the environment: the directory's, not .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": ""}, "plain", "plain"},
 		{"an interpolated name: the directory's", []string{"compose", "up"}, nil, "dollar", "dollar"},

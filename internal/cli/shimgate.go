@@ -377,7 +377,9 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 			dir = found
 		}
 		if dir != cwd {
-			if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
+			// The working directory's .env again, first: one that sets it
+			// to a name the shim cannot know wins too.
+			if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{cwd, dir}, deadline.Sub(now())); ok {
 				return normalProject(name)
 			}
 		}

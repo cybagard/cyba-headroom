@@ -220,3 +220,58 @@ func TestAKillThatStopsNothingIsNoStop(t *testing.T) {
 		t.Fatal("the lease ended while web still runs")
 	}
 }
+
+// A die newer than a reading that still shows the container is gone, not
+// back: it binds no lease checked since. A compose run's one-off that
+// exited must not take the next run's place from that run's own one-off.
+func TestADieNewerThanTheReadingBindsNoNewRun(t *testing.T) {
+	b, c, log := book(t)
+	r := func(id string) func(*protocol.Snapshot) *protocol.Snapshot {
+		return func(s *protocol.Snapshot) *protocol.Snapshot {
+			return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: gib / 4,
+				Labels: map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}}, "w1")
+		}
+	}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(r("r1")(snap()), t0.Add(4*time.Second)))
+	c.t = t0.Add(9 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg) // the next compose run
+	c.t = t0.Add(11 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"})
+	b.Observe(read(r("r1")(snap()), t0.Add(10*time.Second))) // began before r1's die
+	c.t = t0.Add(16 * time.Second)
+	b.Observe(read(r("r2")(snap()), t0.Add(15*time.Second)))
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("the run's own one-off was warned ungated: %s", log)
+	}
+}
+
+// The same for a compose up checked after a service died: the up that
+// starts nothing still logs never appeared.
+func TestADieNewerThanTheReadingKeepsNeverAppeared(t *testing.T) {
+	b, c, log := book(t)
+	app := func(s *protocol.Snapshot) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: "A1", Name: "app-db-1", MemoryBytes: gib / 2,
+			Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: "/Users/dev/src/a"}}, "w1")
+	}
+	b.Observe(read(app(snap()), t0))
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(app(snap()), t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.ContainerEvent("stop", "A1", "app-db-1", lab)
+	b.ContainerEvent("die", "A1", "app-db-1", lab)
+	c.t = t0.Add(11 * time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	c.t = t0.Add(12 * time.Second)
+	b.Observe(read(app(snap()), t0.Add(9*time.Second))) // began before the die
+	for i := 0; i < 40; i++ {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+	if !strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("no never appeared for an up that started nothing: %s", log)
+	}
+}

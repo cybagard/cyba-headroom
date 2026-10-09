@@ -610,9 +610,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			}
 		}
 	}
-	var fresh []resource // new this tick, or back after a reading it was missing from, and bound to no lease yet
+	var fresh []resource // new this tick, or back after a reading it was missing from (not gone: a die), and bound to no lease yet
 	for _, r := range res {
-		if (!b.prev[r.key] || b.missed[r.key] > 0) && !bound[r.key] {
+		if (!b.prev[r.key] || b.missed[r.key] > 0 && !b.gone(r.key)) && !bound[r.key] {
 			fresh = append(fresh, b.unmark(r))
 		}
 	}

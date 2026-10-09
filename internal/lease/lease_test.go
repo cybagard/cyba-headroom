@@ -1304,3 +1304,42 @@ func TestAContainerBackAfterACrashIsWhoseItsReadingSays(t *testing.T) {
 		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
 	}
 }
+
+// A start by ID names the container, not whose it is (#89): w2's run
+// dressed as a container of w1's project, started by ID from w1, is still
+// w2's run, and after a crash its restart binds nothing of w1's up.
+func TestARestartAfterACrashOfARunStartedByIDFromAnotherWorktreeBindsNoLeaseOfThatWorktree(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	run := b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker run -l com.docker.compose.project=app img", CostBytes: gib, Labelled: true}, snap(), cfg)
+	lab := map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeConfigHashLabel: "h", protocol.LeaseLabel: run.LeaseID}
+	dressed := func() *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "c1", Name: "c1", MemoryBytes: gib, Labels: lab}, "")
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(dressed(), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c1", "c1", lab) // a crash: no stop
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1", CostBytes: gib, Target: "c1", ContainerID: "c1", OnEngine: true, TakesOver: protocol.LeaseOf(lab)}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	for range 60 { // the run's lease lapses: its label marks no live lease
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(dressed(), c.t))
+	}
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want the start's bound and ended", l)
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c1", "c1", lab)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c1", "c1", lab) // the restart policy
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(dressed(), c.t))
+	if got := reserved(b); got != 2*gib {
+		t.Fatalf("reserved = %d MiB, want w1's 2048 MiB: %+v", got>>20, b.List())
+	}
+}

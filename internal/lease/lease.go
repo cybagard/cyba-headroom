@@ -1069,9 +1069,10 @@ func (b *Book) owner(r resource) string {
 	return r.worktree
 }
 
-// boundBy records that r bound e.
+// boundBy records that r bound e, if e's key says whose r is: its label or
+// its project. A start by ID names the container, not whose it is (#89).
 func (b *Book) boundBy(r resource, e *entry) {
-	if v := b.verdicts[r.key]; v != nil {
+	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
 		v.lease = e.Worktree
 	}
 }

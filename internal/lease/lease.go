@@ -744,12 +744,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			}
 			if bytes, ok := present[k]; ok {
 				used += bytes
-			} else if !readable(s, e.waitsFor()) {
+			} else if !readable(s, e.waitsFor()) || !b.gone(k) {
 				unsure = true
 			}
 		}
 		if !unsure {
-			e.used = used // a failed read keeps the last known use
+			e.used = used // a failed read, or one it is only missing from, keeps the last known use
 		}
 	}
 	b.open = slices.DeleteFunc(b.open, func(e *entry) bool {

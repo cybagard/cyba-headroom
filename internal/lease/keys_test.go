@@ -93,7 +93,10 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b.Check(up, snap(), cfg)
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
-	b.Observe(snap()) // compose stop
+	// compose stop: its events say A1 is gone, not just missing (#87).
+	b.ContainerEvent("stop", "A1", "a-web-1", map[string]string{"com.docker.compose.project": "a"})
+	b.ContainerEvent("die", "A1", "a-web-1", map[string]string{"com.docker.compose.project": "a"})
+	b.Observe(snap())
 	b.Check(up, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // compose up -d again
@@ -1192,7 +1195,10 @@ func TestATakeOverKeepsCoveringTheContainersItTook(t *testing.T) {
 	idle := up
 	idle.Idle = true
 	b.Check(idle, s, cfg)
-	b.Observe(snap()) // docker stop db
+	// docker stop db: its events say db is gone, not just missing (#87).
+	b.ContainerEvent("stop", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.Observe(snap())
 	if r := reserved(b); r != 2*gib {
 		t.Fatalf("reserved %d MiB with db stopped, want 2048", r>>20)
 	}

@@ -340,7 +340,9 @@ func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
 	b, _, _ := book(t)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	b.Observe(withComposeContainer(snap(), "migrate", "w1", gib/10))
-	b.Observe(snap()) // migrate exited; db and app not up yet
+	// migrate exited, its die says (#87); db and app not up yet.
+	b.ContainerEvent("die", "migrate", "migrate", map[string]string{"com.docker.compose.project": "app"})
+	b.Observe(snap())
 	if r := reserved(b); r != 3*gib {
 		t.Fatalf("reserved %d, want the full 3 GiB until the services come up", r)
 	}
@@ -448,6 +450,19 @@ func TestALeaseOutlivesOneReadingWithoutItsContainer(t *testing.T) {
 	observe(b, c, snap())
 	if ls := b.List(); len(ls) != 0 {
 		t.Fatalf("two readings without c1 left its lease open: %+v", ls)
+	}
+}
+
+// A container missing from one reading keeps its last known use, as a
+// failed read does: what it uses is still in the host's reading.
+func TestAContainerMissingFromOneReadingKeepsItsUse(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	observe(b, c, withRun(snap(), "c1", "w1", 3*gib/2, d.LeaseID))
+	observe(b, c, snap())
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB while c1 is missing, want 512", r>>20)
 	}
 }
 

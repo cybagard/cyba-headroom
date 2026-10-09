@@ -18,7 +18,7 @@ Exit criterion: attribution and the Orca launch environment are confirmed to rea
 
 Follow-ups:
 
-- [ ] #96 **Kilo hook note and lease comments: four statements to tighten**
+- [x] #96 **Kilo hook note and lease comments: four statements to tighten**
 
 ## [#2](https://github.com/cybagard/cyba-headroom/issues/2) Phase 2: Observe — daemon, budget model, attribution, --watch (R1–R4)
 
@@ -54,6 +54,7 @@ Follow-ups:
 - [ ] #91 **Lease model: cover missing readings, restart policies and denials**
 - [ ] #98 **Attribution: .git rule edge cases left after #94**
 - [ ] #102 **Observe view: show each worktree's project, so primary checkouts named main can be told apart**
+- [ ] #107 **Lease comments: every source of a keyless lease, and the name key's field comment**
 
 ## [#3](https://github.com/cybagard/cyba-headroom/issues/3) Phase 3: Gate — launch env, shims, leases, slot gate, fail-open, policy (R5–R10)
 

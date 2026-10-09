@@ -362,3 +362,19 @@ func TestGateChargesAPaddedTarget(t *testing.T) {
 		t.Fatalf("decision %+v: want a lease", d)
 	}
 }
+
+// A compose project the shim guessed reaches the book as a guess: it takes
+// no lease over (#84).
+func TestGatePassesAGuessedProjectOn(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}}
+	up := protocol.CheckRequest{Worktree: "w", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app"}
+	check(&up, s)
+	up.Guessed = true
+	check(&up, s)
+	if l := book.List(); len(l) != 2 {
+		t.Fatalf("leases = %+v, want both: the guess took the up's over", l)
+	}
+}

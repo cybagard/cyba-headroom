@@ -111,6 +111,9 @@ type Request struct {
 	// OnEngine is set when the call goes to the Docker engine the daemon
 	// reads: only then are that engine's containers the call's.
 	OnEngine bool
+	// Guessed is set when a compose call's Target is the shim's guess at
+	// Compose's default name, its config having failed (#84).
+	Guessed bool
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

@@ -3,6 +3,7 @@ package lease_test
 import (
 	"bytes"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -729,6 +730,313 @@ func TestAnAllowedStartRenewsTheLeaseThatCoversIt(t *testing.T) {
 			}
 			if got, want := expiry(b, id), t0.Add(3*time.Minute); !got.Equal(want) {
 				t.Fatalf("the covering lease expires at %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// guessed is a compose up whose project the shim guessed: Compose's config
+// failed, so the name is Compose's default, which may not be the one it
+// uses (#84).
+func guessed(wt, project string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: project, Guessed: true, OnEngine: true}
+}
+
+// A guess that misses: the up's stack comes up under another name (name:
+// in its file). Its container is ungated, as with no key, and the lease
+// ends quietly at its timeout: it never says its stack never appeared.
+func TestAGuessThatMissesEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(guessed("w1", "proj"), snap(), cfg)
+	s := withComposeProject(snap(), "x-web-1", "w1", "x", gib/4)
+	b.Observe(s)
+	if !strings.Contains(log.String(), "ungated") {
+		t.Fatalf("x-web-1 bound the guess: %s", log)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// A guess naming another worktree's same-named stack binds none of it:
+// neither one that worktree checked (its own lease binds it) nor one started
+// unchecked, there or unattributed (still ungated), nor by Docker's event,
+// which says nothing of whose it is. The guess still holds its cost.
+func TestAGuessBindsNoStackOfAnotherWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		checked bool   // w2 checked its up
+		wt      string // the container's worktree
+	}{
+		{"w2's checked stack", true, "w2"},
+		{"w2's unchecked stack", false, "w2"},
+		{"an unattributed stack", false, ""},
+	} {
+		b, _, log := book(t)
+		b.Observe(snap())
+		if tc.checked {
+			b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+		}
+		b.Check(guessed("w1", "api"), snap(), cfg)
+		// Docker's event first: it says nothing of whose the container is.
+		b.ContainerEvent("start", "api-web-1", "api-web-1", map[string]string{"com.docker.compose.project": "api"})
+		b.Observe(withComposeProject(snap(), "api-web-1", tc.wt, "api", gib/4))
+		for _, l := range b.List() {
+			want := gib
+			if l.Worktree == "w2" {
+				want = gib - gib/4
+			}
+			if l.Bytes != want {
+				t.Errorf("%s: %s reserves %d MiB, want %d", tc.name, l.Worktree, l.Bytes>>20, want>>20)
+			}
+		}
+		if ungated := strings.Contains(log.String(), "ungated"); ungated == tc.checked {
+			t.Errorf("%s: ungated logged %v; log: %s", tc.name, ungated, log)
+		}
+	}
+}
+
+// A guess takes no lease over, not even its own worktree's of the same
+// project (compose -f typo.yml up in app/): that lease keeps its
+// containers, its reservation and its timeout.
+func TestAGuessTakesNoLeaseOver(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	s := withComposeProject(snap(), "app-web-1", "w1", "app", gib/2)
+	b.Observe(s)
+	before := expiry(b, d.LeaseID)
+	c.t = c.t.Add(time.Minute)
+	b.Check(guessed("w1", "app"), s, cfg)
+	if got := expiry(b, d.LeaseID); !got.Equal(before) {
+		t.Fatalf("the up's lease expires at %v, want %v: the guess took it over", got, before)
+	}
+	if r := reserved(b); r != 2*gib-gib/2+gib {
+		t.Fatalf("reserved %d MiB, want the up's remainder and the guess's estimate", r>>20)
+	}
+}
+
+// Nothing takes a guess over, not even a later up of the same project in its
+// own worktree (compose -p api up while the guess's stack, named billing in
+// its file, still pulls): both reserve, and the guess keeps its timeout.
+func TestNoUpTakesAGuessOver(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(guessed("w1", "api"), snap(), cfg)
+	before := expiry(b, d.LeaseID)
+	c.t = c.t.Add(time.Minute)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p api up -d", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+	if got := expiry(b, d.LeaseID); !got.Equal(before) {
+		t.Fatalf("the guess's lease expires at %v, want %v: the up took it over", got, before)
+	}
+	if r := reserved(b); r != 2*gib {
+		t.Fatalf("reserved %d MiB, want both estimates", r>>20)
+	}
+}
+
+// A guess that hits: the up's containers, in its own worktree, bind its
+// lease. None is ungated, and the lease ends quietly.
+func TestAGuessThatHitsBindsItsStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(guessed("w1", "app"), snap(), cfg)
+	s := withComposeProject(withComposeProject(snap(), "app-web-1", "w1", "app", gib/4), "app-db-1", "w1", "app", gib/4)
+	b.Observe(s)
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB, want the estimate less what its containers use", r>>20)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "ungated") || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// A guess that hits while another worktree's checked up names the same
+// project: each binds the container its own worktree runs, the guess too.
+func TestAGuessThatHitsKeepsItsOwnContainerFromAnotherWorktree(t *testing.T) {
+	b, _, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+	b.Check(guessed("w1", "api"), snap(), cfg)
+	b.Observe(withComposeProject(snap(), "api-web-1", "w1", "api", gib/4))
+	for _, l := range b.List() {
+		want := gib
+		if l.Worktree == "w1" {
+			want = gib - gib/4
+		}
+		if l.Bytes != want {
+			t.Errorf("%s reserves %d MiB, want %d", l.Worktree, l.Bytes>>20, want>>20)
+		}
+	}
+	if strings.Contains(log.String(), "ungated") {
+		t.Errorf("log: %s", log)
+	}
+}
+
+// A guess that hits is confirmed: a later up of its project in its own
+// worktree (compose -p api up) takes it over as any repeat up does, so that
+// up's lease holds the stack. It never says the stack never appeared, nor
+// lapses to hide another worktree's unchecked stack of that name.
+func TestAnUpTakesAGuessThatHitOver(t *testing.T) {
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p api up", CostBytes: gib, Target: "api", OnEngine: true}
+	for _, tc := range []struct {
+		name     string
+		recreate bool // the up recreates api-web-1, read before any event
+		w2       bool // w2 then starts an unchecked api stack
+	}{
+		{"an up that starts nothing new", false, false},
+		{"an up whose recreated container is read first", true, false},
+		{"another worktree's unchecked stack after", false, true},
+	} {
+		b, c, log := book(t)
+		b.Observe(snap())
+		b.Check(guessed("w1", "api"), snap(), cfg)
+		s := withComposeProject(snap(), "api-web-1", "w1", "api", gib/4)
+		b.Observe(s)
+		c.t = c.t.Add(time.Minute)
+		b.Check(up, s, cfg)
+		if tc.recreate {
+			s = withComposeProject(snap(), "api-web-2", "w1", "api", gib/4)
+			b.Observe(s)
+		}
+		c.t = c.t.Add(3 * time.Minute)
+		b.Observe(s)
+		if strings.Contains(log.String(), "never appeared") {
+			t.Errorf("%s: log: %s", tc.name, log)
+		}
+		if tc.w2 {
+			b.Observe(addContainer(s, protocol.Container{ID: "api-x-1", Name: "api-x-1", MemoryBytes: gib / 4,
+				Labels: map[string]string{"com.docker.compose.project": "api", protocol.ComposeWorkingDirLabel: "/w2/api"}}, "w2"))
+			if !strings.Contains(log.String(), "ungated") {
+				t.Errorf("%s: api-x-1 is not ungated; log: %s", tc.name, log)
+			}
+		}
+	}
+}
+
+// A guess and a real key of one project, in one worktree or two, in either
+// order, by Docker's event or the reading (#84). Whatever the order: a guess
+// binds only what the reading attributes to its own worktree, takes no
+// lease's reservation, never makes a real lease warn "never appeared", and
+// hides no unchecked container. Steps run in order; reserves checks what
+// each worktree's leases still hold.
+func TestAGuessAndARealKeyOfOneProject(t *testing.T) {
+	type ctr struct{ id, wt string }
+	web1 := ctr{"api-web-1", "w1"} // the up's stack, in w1
+	web2 := ctr{"api-web-2", "w1"} // web1 recreated
+	x := ctr{"api-x-1", "w2"}      // w2's stack of the same name
+	type harness struct {
+		b       *lease.Book
+		c       *clock
+		running []ctr
+	}
+	labels := func(k ctr) map[string]string {
+		return map[string]string{"com.docker.compose.project": "api", protocol.ComposeWorkingDirLabel: "/" + k.wt + "/api"}
+	}
+	s := func(h *harness) *protocol.Snapshot {
+		out := snap()
+		for _, k := range h.running {
+			addContainer(out, protocol.Container{ID: k.id, Name: k.id, MemoryBytes: gib / 4, Labels: labels(k)}, k.wt)
+		}
+		return out
+	}
+	type step func(t *testing.T, h *harness)
+	up := func(wt string) policy.Request {
+		return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose -p api up", CostBytes: gib, Target: "api", OnEngine: true}
+	}
+	check := func(r policy.Request) step {
+		return func(_ *testing.T, h *harness) { h.b.Check(r, s(h), cfg) }
+	}
+	guess := check(guessed("w1", "api"))
+	upIn := func(wt string) step { return check(up(wt)) }
+	start := func(k ctr) step { // starts k; neither event nor reading yet
+		return func(_ *testing.T, h *harness) { h.running = append(h.running, k) }
+	}
+	stop := func(k ctr) step {
+		return func(_ *testing.T, h *harness) {
+			h.running = slices.DeleteFunc(h.running, func(o ctr) bool { return o == k })
+		}
+	}
+	event := func(k ctr) step {
+		return func(_ *testing.T, h *harness) { h.b.ContainerEvent("start", k.id, k.id, labels(k)) }
+	}
+	reading := func(_ *testing.T, h *harness) { h.b.Observe(s(h)) }
+	wait := func(_ *testing.T, h *harness) { h.c.t = h.c.t.Add(3 * time.Minute); h.b.Observe(s(h)) }
+	reserves := func(w1, w2 uint64) step {
+		return func(t *testing.T, h *harness) {
+			got := map[string]uint64{}
+			for _, l := range h.b.List() {
+				got[l.Worktree] += l.Bytes
+			}
+			if got["w1"] != w1 || got["w2"] != w2 {
+				t.Errorf("reserved w1 %d MiB, w2 %d MiB; want %d, %d", got["w1"]>>20, got["w2"]>>20, w1>>20, w2>>20)
+			}
+		}
+	}
+	const q = gib / 4 // what each container uses
+	for _, tc := range []struct {
+		name      string
+		before    []ctr  // running before the guess, held by no lease
+		steps     []step // after a first reading
+		unchecked []ctr  // started past the gate: ungated
+	}{
+		// The guess misses: its stack comes up under another name.
+		{name: "S3 miss, then a real up", steps: []step{guess, upIn("w1"), reserves(2*gib, 0)}},
+		{name: "F1a miss over a stack already running, then a real up",
+			before: []ctr{web1}, steps: []step{guess, upIn("w1"), reserves(2*gib, 0), wait}},
+		{name: "F1b miss over a stack already running, w2's unchecked by reading",
+			before: []ctr{web1}, steps: []step{guess, start(x), reading, reserves(gib, 0)}, unchecked: []ctr{x}},
+		{name: "F1c miss over a stack already running, w2's unchecked by event",
+			before: []ctr{web1}, steps: []step{guess, start(x), event(x), reading, reserves(gib, 0)}, unchecked: []ctr{x}},
+		// The guess hits, then a real up of the project in w1.
+		{name: "N1a hit, then a real up that starts nothing new",
+			steps: []step{guess, start(web1), reading, upIn("w1"), reserves(gib, 0), wait, start(x), reading}, unchecked: []ctr{x}},
+		{name: "N1b hit, then a real up whose recreated container is read first",
+			steps: []step{guess, start(web1), reading, upIn("w1"), stop(web1), start(web2), reading, wait}},
+		{name: "N1c hit by event, then a real up",
+			steps: []step{guess, start(web1), event(web1), reading, upIn("w1"), reserves(gib, 0), wait}},
+		// A real up of the project in w1 before the guess binds.
+		{name: "F2a real up first, stack read first",
+			steps: []step{guess, upIn("w1"), start(web1), reading, reserves(gib+gib-q, 0), wait, start(x), reading}, unchecked: []ctr{x}},
+		{name: "F2b real up first, stack by event first",
+			steps: []step{guess, upIn("w1"), start(web1), event(web1), reading, reserves(gib+gib-q, 0), wait, start(x), reading}, unchecked: []ctr{x}},
+		{name: "F2c real up checked first, then the guess, stack read first",
+			steps: []step{upIn("w1"), guess, start(web1), reading, reserves(gib+gib-q, 0), wait}},
+		// The guess hits, then w2 starts a stack of the same name unchecked.
+		{name: "F3a hit, w2's unchecked by reading",
+			steps: []step{guess, start(web1), reading, start(x), reading, reserves(gib-q, 0)}, unchecked: []ctr{x}},
+		{name: "F3b hit, w2's unchecked by event",
+			steps: []step{guess, start(web1), reading, start(x), event(x), reading, reserves(gib-q, 0)}, unchecked: []ctr{x}},
+		{name: "F3c hit and w2's unchecked in one reading",
+			steps: []step{guess, start(web1), start(x), reading, reserves(gib-q, 0)}, unchecked: []ctr{x}},
+		// w2's real up of the same project: each binds its own worktree's.
+		{name: "S1a w2's real up, the guess hits, read first",
+			steps: []step{upIn("w2"), guess, start(web1), reading, reserves(gib-q, gib)}},
+		{name: "S1b w2's real up, the guess hits, by event first",
+			steps: []step{upIn("w2"), guess, start(web1), event(web1), reading, reserves(gib-q, gib)}},
+		{name: "S1c w2's real up, w2's stack by event, the guess misses",
+			steps: []step{upIn("w2"), guess, start(x), event(x), reading, reserves(gib, gib-q)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c, log := book(t)
+			h := &harness{b: b, c: c, running: slices.Clone(tc.before)}
+			b.Observe(s(h))
+			for _, st := range tc.steps {
+				st(t, h)
+			}
+			if strings.Contains(log.String(), "never appeared") {
+				t.Errorf("a lease warned its stack never appeared: %s", log)
+			}
+			var want []string
+			for _, k := range tc.unchecked {
+				want = append(want, "container:"+k.id)
+			}
+			if got := ungatedKeys(b); !slices.Equal(got, want) {
+				t.Errorf("ungated %v, want %v", got, want)
 			}
 		})
 	}

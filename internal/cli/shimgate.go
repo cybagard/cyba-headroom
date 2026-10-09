@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -75,6 +76,9 @@ func (e Env) withDefaults() Env {
 	}
 	if e.getwd == nil {
 		e.getwd = os.Getwd
+	}
+	if e.stat == nil {
+		e.stat = os.Stat
 	}
 	if e.composeAsk == nil {
 		env, _ := e.envOf()
@@ -163,7 +167,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, getenv, h.getwd)
 		} else {
-			req.Target = composeProject(bin, e.Args[1:], c.Target, h.composeAsk)
+			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, getenv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
 			// Compose would start anything ("interactive run is not
 			// supported"), and a restart's lists each container as
@@ -282,24 +286,132 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 // --env-file, --config, ...) in its own environment and working directory.
 // Compose labels each container with the project, so the name is the
 // lease's key. Asking Compose, rather than reading .env, override files and
-// name: the way it does, keeps the two from parting. "" when Compose cannot
-// say (the call will fail too): no key, failing closed.
-func composeProject(bin string, args []string, target string, ask func(bin string, args []string) ([]byte, error)) string {
-	if target != "" {
-		return target
+// name: the way it does, keeps the two from parting. When Compose cannot
+// say (its config fails or times out), the name it gives by default
+// (composeDefaultProject, #84).
+func composeProject(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
+	project, _ := composeKey(bin, args, c, getenv, getwd, ask, time.Now, os.Stat)
+	return project
+}
+
+// composeKey is composeProject's name, and whether it is a guess: the name
+// Compose gives by default, its config having failed, which misses a name
+// Compose finds elsewhere (#85). The lease book trusts a guess less (#84).
+// now and stat are the clock and os.Stat.
+func composeKey(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error),
+	ask func(bin string, args []string) ([]byte, error), now func() time.Time, stat func(string) (fs.FileInfo, error)) (project string, guessed bool) {
+	if c.Target != "" {
+		return c.Target, false
 	}
 	cargs, ok := shim.ComposeConfig(args, false)
 	if !ok {
-		return ""
+		return "", false
 	}
+	asked := now()
 	out, err := ask(bin, cargs)
 	var cfg struct {
 		Name string `json:"name"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
+		project = composeDefaultProject(c, getenv, getwd, composeTimeout-now().Sub(asked), stat)
+		return project, project != ""
+	}
+	return cfg.Name, false
+}
+
+// composeDefaultProject is the project Compose names when it is not asked
+// (#84): COMPOSE_PROJECT_NAME from the call's environment, else the name of
+// the project directory: --project-directory, else the directory of the
+// first file (-f, else COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR; not
+// stdin's -), else of the compose file found in the working directory or
+// the nearest of its parents (searched for at most left), else the working
+// directory. Normalised as
+// Compose does. As compose-go's cli/options.go has it (GetWorkingDir,
+// WithConfigFileEnv, WithDefaultConfigPath, withNamePrecedenceLoad) and
+// loader.NormalizeProjectName; Compose's docs, "Specify a project name".
+//
+// It cannot see a name: in the compose file, nor a COMPOSE_PROJECT_NAME or
+// COMPOSE_FILE in .env (#85): there the name differs from Compose's, the
+// lease never binds and holds its cost, as with no name at all.
+func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func() (string, error), left time.Duration, stat func(string) (fs.FileInfo, error)) string {
+	if name := getenv("COMPOSE_PROJECT_NAME"); name != "" {
+		return normalProject(name)
+	}
+	cwd, err := getwd()
+	if err != nil {
 		return ""
 	}
-	return cfg.Name
+	files := c.ComposeFiles
+	if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
+		sep := getenv("COMPOSE_PATH_SEPARATOR")
+		if sep == "" {
+			sep = string(filepath.ListSeparator)
+		}
+		files = strings.Split(f, sep)
+	}
+	dir := cwd
+	if c.ComposeProjectDir != "" {
+		dir = absIn(cwd, c.ComposeProjectDir)
+	} else if i := slices.IndexFunc(files, func(f string) bool { return f != "-" }); i >= 0 {
+		dir = filepath.Dir(absIn(cwd, files[i]))
+	} else if found, ok := composeFileDirWithin(cwd, left, stat); ok {
+		dir = found
+	}
+	return normalProject(filepath.Base(dir))
+}
+
+// composeFileDir is the nearest of dir and its parents that holds a compose
+// file under one of the names Compose looks for (compose-go's
+// DefaultFileNames).
+func composeFileDir(dir string, stat func(string) (fs.FileInfo, error)) (string, bool) {
+	for {
+		for _, n := range []string{"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"} {
+			if _, err := stat(filepath.Join(dir, n)); err == nil {
+				return dir, true
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// composeFileDirWithin is composeFileDir given up after left, what is left
+// of config's budget: a parent may be a mount that hangs (autofs's /net),
+// and the call has already waited for config (#84). Given up, none is
+// found. The search left behind ends with the process, which the real
+// binary replaces.
+func composeFileDirWithin(dir string, left time.Duration, stat func(string) (fs.FileInfo, error)) (string, bool) {
+	if left <= 0 {
+		return "", false
+	}
+	type found struct {
+		dir string
+		ok  bool
+	}
+	done := make(chan found, 1)
+	go func() {
+		d, ok := composeFileDir(dir, stat)
+		done <- found{d, ok}
+	}()
+	t := time.NewTimer(left)
+	defer t.Stop()
+	select {
+	case f := <-done:
+		return f.dir, f.ok
+	case <-t.C:
+		return "", false
+	}
+}
+
+// absIn is path p made absolute in directory dir.
+func absIn(dir, p string) string {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(dir, p)
 }
 
 // composePlain reports whether a compose call's dry run tells what it
@@ -420,18 +532,16 @@ func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (
 	return normalProject(filepath.Base(cwd))
 }
 
-// normalProject is a project name as Compose normalises it: lower case,
-// only letters, digits, - and _, and no leading - or _.
+// normalProject is a project name as Compose normalises it (compose-go's
+// loader.NormalizeProjectName): lower case, then only a-z, 0-9, - and _,
+// and no leading - or _.
 func normalProject(s string) string {
 	return strings.TrimLeft(strings.Map(func(c rune) rune {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
 			return c
-		case c >= 'A' && c <= 'Z':
-			return c + 'a' - 'A'
 		}
 		return -1
-	}, s), "_-")
+	}, strings.ToLower(s)), "_-")
 }
 
 // composeTimeout bounds docker compose config (30-40 ms on a plain stack):

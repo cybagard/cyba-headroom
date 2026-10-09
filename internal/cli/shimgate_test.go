@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -692,19 +693,164 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 		return []byte(`{"name":"shop","services":{"web":{},"db":{}}}`), nil
 	}
 	call := []string{"compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "up", "-d"}
-	if got := composeProject("/usr/local/bin/docker", call, "", ask); got != "shop" {
+	// Compose's name wins over its defaults, which it has already weighed.
+	env := func(k string) string {
+		if k == "COMPOSE_PROJECT_NAME" {
+			return "other"
+		}
+		return ""
+	}
+	wd := func() (string, error) { return "/Users/dev/src/project-a", nil }
+	if got := composeProject("/usr/local/bin/docker", call, shim.Parse("docker", call), env, wd, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
 	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
-	if got := composeProject("/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, "p", ask); got != "p" || len(asked) != 1 {
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, shim.Call{Target: "p"}, noEnv, noWd, ask); got != "p" || len(asked) != 1 {
 		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
 	}
 	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	if got := composeProject("/usr/local/bin/docker", []string{"compose", "up"}, "", failing); got != "" {
-		t.Fatalf("Compose could not say: %q, want no key", got)
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, noWd, failing); got != "" {
+		t.Fatalf("neither Compose nor its defaults could say: %q, want no key", got)
+	}
+}
+
+// noEnv and noWd are a call with no environment and no working directory.
+func noEnv(string) string   { return "" }
+func noWd() (string, error) { return "", errors.New("no working directory") }
+
+// When Compose cannot name the project (its config fails or times out), the
+// project is the one Compose names by default: COMPOSE_PROJECT_NAME, else
+// the project directory's name, normalised.
+func TestComposeProjectWhenConfigFails(t *testing.T) {
+	asks := map[string]func(string, []string) ([]byte, error){
+		"fails":     func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") },
+		"times out": func(string, []string) ([]byte, error) { return nil, context.DeadlineExceeded },
+	}
+	// A stack whose compose file is in a parent of the working directory.
+	root := t.TempDir()
+	stack, deeper := filepath.Join(root, "My App"), filepath.Join(root, "My App", "sub", "deeper")
+	if err := os.MkdirAll(deeper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stack, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		wd   string
+		want string
+	}{
+		{"COMPOSE_PROJECT_NAME wins", []string{"compose", "--project-directory", "/srv/api", "-f", "/srv/web/compose.yaml", "up"},
+			map[string]string{"COMPOSE_PROJECT_NAME": "Shop"}, "", "shop"},
+		{"--project-directory before -f", []string{"compose", "--project-directory", "/srv/My App", "-f", "/srv/web/compose.yaml", "up"}, nil, "", "myapp"},
+		{"a relative --project-directory", []string{"compose", "--project-directory", "../api", "up"}, nil, "", "api"},
+		{"the first -f file's directory", []string{"compose", "-f", "/srv/web/compose.yaml", "-f", "/srv/other/x.yaml", "up"}, nil, "", "web"},
+		{"a relative -f file", []string{"compose", "-f", "sub/Web.Site/compose.yaml", "up"}, nil, "", "website"},
+		{"the first -f file that is not stdin", []string{"compose", "-f", "-", "-f", "/srv/web/compose.yaml", "up"}, nil, "", "web"},
+		{"-f before COMPOSE_FILE", []string{"compose", "-f", "/srv/web/compose.yaml", "up"},
+			map[string]string{"COMPOSE_FILE": "/srv/x/a.yaml"}, "", "web"},
+		{"COMPOSE_FILE's first file", []string{"compose", "up"},
+			map[string]string{"COMPOSE_FILE": "/srv/Stack/a.yaml:/srv/b/b.yaml"}, "", "stack"},
+		{"COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR", []string{"compose", "up"},
+			map[string]string{"COMPOSE_FILE": "/srv/c/a.yaml;/srv/b/b.yaml", "COMPOSE_PATH_SEPARATOR": ";"}, "", "c"},
+		{"the working directory, with no compose file found", []string{"compose", "up"}, nil, "", "project-a"},
+		{"the directory of a compose file found in a parent", []string{"compose", "up"}, nil, deeper, "myapp"},
+		{"the working directory, with its own compose file", []string{"compose", "up"}, nil, stack, "myapp"},
+	} {
+		c := shim.Parse("docker", tc.args)
+		getenv := func(k string) string { return tc.env[k] }
+		if tc.wd == "" {
+			tc.wd = "/Users/dev/src/project-a"
+		}
+		wd := func() (string, error) { return tc.wd, nil }
+		for how, ask := range asks {
+			if got := composeProject("/usr/local/bin/docker", tc.args, c, getenv, wd, ask); got != tc.want {
+				t.Errorf("%s, config %s: project = %q, want %q", tc.name, how, got, tc.want)
+			}
+		}
+	}
+}
+
+// The search for a compose file in the parents stops within what is left of
+// config's budget (#84): a parent may be a mount that hangs (autofs's /net),
+// and the call has already waited for config. Cut short, the project is the
+// working directory's, as when no file is found.
+func TestComposeFileSearchStopsWithinTheBudget(t *testing.T) {
+	wd := func() (string, error) { return "/Users/dev/src/project-a/sub", nil }
+	hung := make(chan struct{})
+	t.Cleanup(func() { close(hung) })
+	for _, tc := range []struct {
+		name  string
+		took  time.Duration // what config took of composeTimeout
+		stat  func(string) (fs.FileInfo, error)
+		want  string
+		stats bool // whether the search may stat at all
+	}{
+		{"time left: found in a parent", time.Second, func(p string) (fs.FileInfo, error) {
+			if p == "/Users/dev/src/project-a/compose.yaml" {
+				return nil, nil
+			}
+			return nil, fs.ErrNotExist
+		}, "project-a", true},
+		{"no time left", composeTimeout, nil, "sub", false},
+		{"a parent hangs", composeTimeout - 50*time.Millisecond, func(string) (fs.FileInfo, error) { <-hung; return nil, fs.ErrNotExist }, "sub", true},
+	} {
+		now := time.Unix(1e9, 0)
+		clock := func() time.Time { return now }
+		ask := func(string, []string) ([]byte, error) { now = now.Add(tc.took); return nil, context.DeadlineExceeded }
+		stat := func(p string) (fs.FileInfo, error) {
+			if !tc.stats {
+				t.Errorf("%s: stat %s", tc.name, p)
+				return nil, fs.ErrNotExist
+			}
+			return tc.stat(p)
+		}
+		type key struct {
+			project string
+			guessed bool
+		}
+		done := make(chan key, 1)
+		go func() {
+			p, g := composeKey("/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, wd, ask, clock, stat)
+			done <- key{p, g}
+		}()
+		select {
+		case got := <-done:
+			if got != (key{tc.want, true}) {
+				t.Errorf("%s: %+v, want %q, guessed", tc.name, got, tc.want)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("%s: still searching after a second", tc.name)
+		}
+	}
+}
+
+// The fallback name is normalised as compose-go's NormalizeProjectName does
+// it: lower case (Unicode's), then only a-z, 0-9, - and _, with no leading
+// - or _. With nothing left, no key.
+func TestComposeProjectNormalisedAsCompose(t *testing.T) {
+	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	wd := func() (string, error) { return "/Users/dev/src/project-a", nil }
+	for dir, want := range map[string]string{
+		"My App":       "myapp",
+		".hidden":      "hidden",
+		"Web.Site_2-x": "website_2-x",
+		"__-api":       "api",
+		"9lives":       "9lives",
+		"Café":         "caf",
+		"\u212Aelvin":  "kelvin", // the Kelvin sign: lower case, it is k
+		"___":          "",
+		"Éü":           "",
+	} {
+		args := []string{"compose", "--project-directory", "/srv/" + dir, "up"}
+		if got := composeProject("/usr/local/bin/docker", args, shim.Parse("docker", args), noEnv, wd, failing); got != want {
+			t.Errorf("%q: project = %q, want %q", dir, got, want)
+		}
 	}
 }
 
@@ -726,7 +872,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	write("compose.override.yaml", "name: ${STACK}-shop\n")
 	write(".env", "STACK=blue\n")
 	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
-	if got := composeProject(bin, []string{"compose", "up"}, "", ask); got != "blue-shop" {
+	if got := composeProject(bin, []string{"compose", "up"}, shim.Call{}, noEnv, noWd, ask); got != "blue-shop" {
 		t.Fatalf("project = %q, want blue-shop", got)
 	}
 }
@@ -734,7 +880,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	var asked []string
 	ask := func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"x"}`), nil }
-	composeProject("/d", []string{"--config", "/work/.docker", "compose", "up"}, "", ask)
+	composeProject("/d", []string{"--config", "/work/.docker", "compose", "up"}, shim.Call{}, noEnv, noWd, ask)
 	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
 		t.Fatalf("asked %q", asked)
 	}
@@ -759,6 +905,44 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r.run("podman", "compose", "up", "-d")
 	if asked != 2 || dry != 1 {
 		t.Fatalf("podman: asked %d, dry %d", asked, dry)
+	}
+}
+
+// The name the shim falls back on when Compose's config fails is sent as a
+// guess (#84), and only that one: not -p, not Compose's own name, not
+// stdin's (the project directory's, as before).
+func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w", "COMPOSE_PROJECT_NAME=Shop")
+	r.ask = allow
+	config := []byte(`{"name":"x"}`)
+	r.composeAsk = func(string, []string) ([]byte, error) {
+		if config == nil {
+			return nil, errors.New("exit status 1")
+		}
+		return config, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		fails   bool
+		call    []string
+		target  string
+		guessed bool
+	}{
+		{"config fails", true, []string{"docker", "compose", "up", "-d"}, "shop", true},
+		{"config names it", false, []string{"docker", "compose", "up", "-d"}, "x", false},
+		{"-p", true, []string{"docker", "compose", "-p", "p", "up", "-d"}, "p", false},
+		{"stdin", true, []string{"docker", "compose", "-f", "-", "up", "-d"}, "shop", false},
+	} {
+		config = []byte(`{"name":"x"}`)
+		if tc.fails {
+			config = nil
+		}
+		r.asked = nil
+		r.run(tc.call...)
+		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Guessed != tc.guessed {
+			t.Errorf("%s: asked %+v, want target %q, guessed %v", tc.name, r.asked, tc.target, tc.guessed)
+		}
 	}
 }
 

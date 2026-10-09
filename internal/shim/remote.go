@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -69,12 +70,17 @@ func ownIP(ip net.IP) bool {
 // 127.0.0.1. One that does not resolve within resolveTimeout is this Mac's.
 // An ssh host is not resolved: the CLI hands it to the ssh binary
 // (getConnectionHelper in docker/cli v29.0.0's cli/connhelper/connhelper.go),
-// whose config may alias it.
+// whose config may alias it. A number is a number on either scheme, read
+// as getaddrinfo reads it (see inetAton), and a trailing dot ends a name.
 func thisMac(host string, tcp bool) bool {
-	if ip := net.ParseIP(host); ip != nil {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ip = inetAton(host)
+	}
+	if ip != nil {
 		return ownIP(ip)
 	}
-	name := strings.TrimSuffix(strings.ToLower(host), ".local")
+	name := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(host), "."), ".local")
 	if name == "localhost" || name == "host.docker.internal" {
 		return true
 	}
@@ -96,4 +102,37 @@ func thisMac(host string, tcp bool) bool {
 		}
 	}
 	return false
+}
+
+// inetAton reads s as inet_aton(3) does, which getaddrinfo and ssh use for
+// a numeric host: one to four parts, each decimal, 0-prefixed octal or
+// 0x-prefixed hex, the last filling the remaining bytes (127.1 is
+// 127.0.0.1, 2130706433 is too). It returns nil for anything else.
+func inetAton(s string) net.IP {
+	parts := strings.Split(s, ".")
+	if len(parts) > 4 {
+		return nil
+	}
+	var v uint64
+	for i, p := range parts {
+		base := 10
+		if len(p) > 2 && (p[:2] == "0x" || p[:2] == "0X") {
+			p, base = p[2:], 16
+		} else if len(p) > 1 && p[0] == '0' {
+			p, base = p[1:], 8
+		}
+		n, err := strconv.ParseUint(p, base, 32)
+		if err != nil {
+			return nil
+		}
+		bits := uint(8)
+		if i == len(parts)-1 {
+			bits = 8 * uint(5-len(parts))
+		}
+		if n >= 1<<bits {
+			return nil
+		}
+		v = v<<bits | n
+	}
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }

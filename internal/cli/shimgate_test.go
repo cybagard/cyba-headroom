@@ -1590,6 +1590,16 @@ func TestALoopbackTCPHostIsGated(t *testing.T) {
 	}
 }
 
+// ssh://core@127.1 is this Mac's loopback too, a number rather than an ssh
+// alias: the call is gated, and its lease label refused (#118).
+func TestALoopbackSSHHostIsGated(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	if code, stderr := r.run("docker", "-H", "ssh://core@127.1:2222", "run", "-l", "dev.headroom.lease=x", "alpine"); code != exitDenied || r.execed != "" {
+		t.Errorf("code %d, execed %q, stderr %q, want the label refused", code, r.execed, stderr)
+	}
+}
+
 // -H "" is the default socket, as the docker CLI reads it (ParseHost in
 // docker/cli's opts/hosts.go trims it and takes DefaultHost), not
 // DOCKER_HOST: the call is asked about, and its lease label refused.

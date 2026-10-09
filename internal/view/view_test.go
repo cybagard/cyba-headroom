@@ -320,3 +320,60 @@ func TestCPUUnknownWhenAgentsUnknown(t *testing.T) {
 	r := line(t, render(t, s, view.Options{}), "Fix login")
 	has(t, r, "?")
 }
+
+func TestUngatedIsFlagged(t *testing.T) {
+	s := busy()
+	s.Ungated = []protocol.Ungated{
+		{Key: "container:x1", Name: "testcontainers-ryuk", Kind: "container", Worktree: "w1", Since: now.Add(-time.Minute)},
+		{Key: "container:x2", Name: "db-old", Kind: "container", Since: now.Add(-time.Minute)},
+	}
+	lines := render(t, s, view.Options{})
+	has(t, line(t, lines, "Fix login"), "⚠")
+	has(t, line(t, lines, "unattributed"), "⚠")
+	if r := line(t, lines, "Release prep"); strings.Contains(r, "⚠") {
+		t.Errorf("worktree without ungated flagged: %q", r)
+	}
+	f := lines[len(lines)-1]
+	has(t, f, "2 ungated: testcontainers-ryuk, db-old")
+	has(t, f, "headroom doctor")
+}
+
+func TestManyUngatedAreCut(t *testing.T) {
+	s := busy()
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		s.Ungated = append(s.Ungated, protocol.Ungated{Key: "container:" + n, Name: n, Kind: "container"})
+	}
+	f := render(t, s, view.Options{})
+	has(t, f[len(f)-1], "5 ungated: a, b, c, …")
+}
+
+func TestUngatedNamesAreCleaned(t *testing.T) {
+	s := busy()
+	s.Ungated = []protocol.Ungated{{Key: "container:x", Name: "evil\x1b[2Jname", Kind: "container"}}
+	for _, l := range render(t, s, view.Options{}) {
+		if strings.Contains(l, "\x1b[2J") {
+			t.Fatalf("escape printed: %q", l)
+		}
+	}
+}
+
+func TestOneMarkPerRow(t *testing.T) {
+	s := busy()
+	// Release prep holds a VM while its agent is done (⚑); now also an
+	// ungated container: ⚠ alone, so the columns stay aligned.
+	s.Ungated = []protocol.Ungated{{Key: "vm:ci", Name: "ci", Kind: "vm", Worktree: "w2"}}
+	r := line(t, render(t, s, view.Options{}), "Release prep")
+	has(t, r, "⚠")
+	if strings.Contains(r, "⚑") {
+		t.Fatalf("two marks: %q", r)
+	}
+}
+
+func TestLongUngatedNamesAreCut(t *testing.T) {
+	s := busy()
+	s.Ungated = []protocol.Ungated{{Key: "container:x", Name: strings.Repeat("n", 200), Kind: "container"}}
+	f := render(t, s, view.Options{})
+	if l := f[len(f)-1]; strings.Contains(l, strings.Repeat("n", 41)) {
+		t.Fatalf("footer = %q", l)
+	}
+}

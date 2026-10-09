@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,7 +20,8 @@ func TestParse(t *testing.T) {
 		// Containers.
 		{"docker run --rm alpine true", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -it --rm -m 2g postgres:17 psql", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", MemoryBytes: 2 * g}},
-		{"docker run --memory=512m -e A=b -v /a:/b --name db postgres:17", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", MemoryBytes: 512 << 20}},
+		{"docker run --memory=512m -e A=b -v /a:/b --name db postgres:17", Call{Kind: "container", Op: "run", Command: "docker run postgres:17", Target: "postgres:17", Name: "db", MemoryBytes: 512 << 20}},
+		{"docker create --name=web nginx", Call{Kind: "container", Op: "create", Command: "docker create nginx", Target: "nginx", Name: "web"}},
 		{"docker run -dm1.5G -p 80:80 nginx", Call{Kind: "container", Op: "run", Command: "docker run nginx", Target: "nginx", MemoryBytes: 3 * g / 2}},
 		{"docker run -h myhost alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -m 1g -m 3g alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", MemoryBytes: 3 * g}},
@@ -35,7 +37,9 @@ func TestParse(t *testing.T) {
 		{"docker run -m= alpine true", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
 		{"docker run -m=1g alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", MemoryBytes: g}},
 		{"docker run --help=false alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},
-		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db"}},
+		{"docker container start db other", Call{Kind: "container", Op: "start", Command: "docker container start db", Target: "db", MultiTarget: true, Targets: []string{"db", "other"}}},
+		{"docker compose --env-file ops/.env up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeEnvFiles: []string{"ops/.env"}}},
+		{"docker compose --env-file base.env --env-file local.env up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeEnvFiles: []string{"base.env", "local.env"}}},
 		{"podman run --pod p1 --creds u:pw alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine"}},
 		// An unknown flag: still gated, but the image is a guess, so none.
 		{"docker run --future-flag x alpine", Call{Kind: "container", Op: "run", Command: "docker run"}},
@@ -71,7 +75,13 @@ func TestParse(t *testing.T) {
 		{"docker --unknown ps", Call{}},
 		// Compose.
 		{"docker compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
-		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
+		{"docker compose up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose up --detach web", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose up --wait", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -f a.yml -p proj up -d --build", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}, ComposeDetached: true}},
+		{"docker compose -f sub/c.yml -f other/d.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"sub/c.yml", "other/d.yml"}}},
+		{"docker compose --project-directory /srv/app -f c.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeProjectDir: "/srv/app", ComposeFiles: []string{"c.yml"}}},
+		{"docker compose --file=deploy/c.yml up", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"deploy/c.yml"}}},
 		{"docker compose --project-name=proj run --rm web sh", Call{Kind: "compose", Op: "run", Command: "docker compose run", Target: "proj"}},
 		{"podman compose up", Call{Kind: "compose", Op: "up", Command: "podman compose up"}},
 		{"docker --context x compose up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Endpoint: "x"}},
@@ -89,10 +99,10 @@ func TestParse(t *testing.T) {
 		{"docker compose scale web=5", Call{Kind: "compose", Op: "scale", Command: "docker compose scale"}},
 		{"docker compose watch", Call{Kind: "compose", Op: "watch", Command: "docker compose watch"}},
 		{"docker compose watch --no-up", Call{}},
-		{"docker compose up -p proj -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
-		{"docker compose up --project-name=proj -f a.yml web", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj"}},
+		{"docker compose up -p proj -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeDetached: true}},
+		{"docker compose up --project-name=proj -f a.yml web", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", ComposeFiles: []string{"a.yml"}}},
 		{"docker compose up -f a.yml web --dry-run", Call{}},
-		{"docker compose --verbose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up"}},
+		{"docker compose --verbose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"a.yml"}, ComposeDetached: true}},
 		{"docker compose up web --dry-run", Call{}},
 		{"docker compose watch web --no-up", Call{}},
 		{"docker compose up web --help", Call{}},
@@ -134,7 +144,7 @@ func TestParse(t *testing.T) {
 	}
 	for _, c := range cases {
 		argv := strings.Fields(c.argv)
-		if got := Parse(argv[0], argv[1:]); got != c.want {
+		if got := Parse(argv[0], argv[1:]); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.argv, got, c.want)
 		}
 	}
@@ -247,7 +257,7 @@ func FuzzParse(f *testing.F) {
 		argv := strings.Split(s, " ")
 		c := Parse(argv[0], argv[1:])
 		if c.Kind == "" {
-			if c != (Call{}) {
+			if !reflect.DeepEqual(c, Call{}) {
 				t.Fatalf("pass-through with fields: %+v", c)
 			}
 			return
@@ -325,4 +335,43 @@ func helpCommands(t *testing.T, name string) []string {
 		t.Fatalf("%s: no commands found", name)
 	}
 	return out
+}
+
+func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"compose", "up", "-d"}, []string{"compose", "--dry-run", "up", "-d"}},
+		{[]string{"--context", "x", "compose", "-f", "a.yml", "up", "--scale", "web=3", "web"},
+			[]string{"--context", "x", "compose", "--dry-run", "-f", "a.yml", "up", "--scale", "web=3", "web"}},
+		{[]string{"compose", "restart"}, []string{"compose", "--dry-run", "restart"}},
+		{[]string{"compose", "run", "web"}, nil},
+		{[]string{"compose", "-f", "-", "up"}, nil},
+		{[]string{"run", "alpine"}, nil},
+		// A call that sets --dry-run itself is not dry-run: the last value
+		// wins, so --dry-run=false after ours would make it a real up.
+		{[]string{"compose", "--dry-run=false", "up", "-d"}, nil},
+		{[]string{"compose", "up", "--dry-run=0", "-d"}, nil},
+		{[]string{"compose", "--dry-run", "up"}, nil},
+	} {
+		got, ok := DryRun(tc.args)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("DryRun(%q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+	}
+}
+
+func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
+	got, ok := ComposeConfig([]string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
+	want := []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "--profile", "*", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	if got, _ := ComposeConfig([]string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
+		t.Fatalf("one profile set: %q", got)
+	}
+	if _, ok := ComposeConfig([]string{"run", "alpine"}, false); ok {
+		t.Fatal("not compose")
+	}
 }

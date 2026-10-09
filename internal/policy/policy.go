@@ -81,6 +81,36 @@ type Request struct {
 	// PID is the calling process for a tart run, which becomes tart: the
 	// lease ends if it exits before its VM appears (#29).
 	PID int
+	// Target and Name identify what the call starts (the image, container,
+	// compose project or VM, and a --name), for its lease to bind (#33).
+	Target, Name string
+	// Labelled means the container will carry the lease's ID (#33).
+	Labelled bool
+	// Op is the call's subcommand (run, up, start, ...).
+	Op string
+	// ContainerID is a start's container as Docker resolved it, and
+	// TakesOver the lease of the run or create that made it (its label),
+	// which this call's lease replaces (#33).
+	ContainerID, TakesOver string
+	// Running is Docker's word that a start's container already runs, and
+	// MultiTarget that the start names others Docker did not resolve.
+	Running, MultiTarget bool
+	// Others are the other containers a start names, as Docker resolved
+	// them (docker start a b c).
+	Others []Start
+	// Unresolved counts the other containers a start names that were not
+	// looked up or that Docker did not resolve: each may still start, and
+	// costs one container.
+	Unresolved int
+	// FirstMissing is set when Docker says the first container a start
+	// names does not exist: it starts nothing, and is no Target.
+	FirstMissing bool
+	// Idle is set for a compose call Compose's own dry run said creates,
+	// recreates and starts nothing.
+	Idle bool
+	// OnEngine is set when the call goes to the Docker engine the daemon
+	// reads: only then are that engine's containers the call's.
+	OnEngine bool
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -96,6 +126,14 @@ type (
 	// Decision is the policy's answer.
 	Decision = protocol.Decision
 )
+
+// Start is one container a start names, as Docker resolved it: its ID,
+// the lease of the run or create that made it (its label), and whether it
+// already runs.
+type Start struct {
+	ID, TakesOver string
+	Running       bool
+}
 
 // Decide decides r against s.
 func Decide(r Request, s *protocol.Snapshot, c Config) Decision {

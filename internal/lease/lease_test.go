@@ -37,6 +37,7 @@ func snap() *protocol.Snapshot {
 		Docker:      &protocol.Docker{Running: true, Containers: []protocol.Container{{ID: "old", Name: "old"}}},
 		Tart:        &protocol.Tart{Installed: true},
 		Attribution: &protocol.Attribution{Worktrees: []protocol.WorktreeUsage{{ID: "w1"}, {ID: "w2"}}},
+		CollectedAt: t0,
 	}
 }
 
@@ -47,8 +48,9 @@ func book(t *testing.T) (*lease.Book, *clock, *bytes.Buffer) {
 	return lease.New(2*time.Minute, c.now, slog.New(slog.NewTextHandler(&log, nil))), c, &log
 }
 
+// req is a docker run through the shim: its container carries its lease.
 func req(wt string, cost uint64) policy.Request {
-	return policy.Request{Worktree: wt, Kind: "container", Command: "docker run x", CostBytes: cost}
+	return policy.Request{Worktree: wt, Kind: "container", Command: "docker run x", CostBytes: cost, Labelled: true}
 }
 
 func TestAnAllowLeasesItsCost(t *testing.T) {
@@ -67,11 +69,12 @@ func TestAnAllowLeasesItsCost(t *testing.T) {
 	}
 }
 
-func TestManualCallsAreNotLeased(t *testing.T) {
+func TestManualCallsReserveNothing(t *testing.T) {
 	// A manual call is outside admission control: it must not hold back
-	// memory from gated calls. Its container counts once it appears.
+	// memory from gated calls. Its container counts once it appears. Its
+	// lease only marks the call as checked (#33).
 	b, _, _ := book(t)
-	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeaseID != "" {
+	if d := b.Check(req("", 6*gib), snap(), cfg); !d.Allow || d.LeasedBytes != 0 {
 		t.Fatalf("manual = %+v", d)
 	}
 	if d := b.Check(req("w1", 4*gib), snap(), cfg); !d.Allow {
@@ -120,6 +123,13 @@ func withComposeContainer(s *protocol.Snapshot, id, wt string, mem uint64) *prot
 		Labels: map[string]string{"com.docker.compose.project": "app"}}, wt)
 }
 
+// withRun adds the container of the run whose lease is lease: the shim
+// labelled it with the lease's ID.
+func withRun(s *protocol.Snapshot, id, wt string, mem uint64, lease string) *protocol.Snapshot {
+	return addContainer(s, protocol.Container{ID: id, Name: id, MemoryBytes: mem,
+		Labels: map[string]string{protocol.LeaseLabel: lease}}, wt)
+}
+
 func addContainer(s *protocol.Snapshot, c protocol.Container, wt string) *protocol.Snapshot {
 	id := c.ID
 	s.Docker.Containers = append(s.Docker.Containers, c)
@@ -144,12 +154,12 @@ func worktrees(b *lease.Book) []string {
 func TestANewContainerInTheWorktreeSettlesItsLease(t *testing.T) {
 	b, _, _ := book(t)
 	b.Check(req("w1", gib), snap(), cfg)
-	b.Check(req("w2", gib), snap(), cfg)
+	d2 := b.Check(req("w2", gib), snap(), cfg)
 	b.Observe(snap()) // nothing new yet: only "old"
 	if len(b.List()) != 2 {
 		t.Fatalf("settled by an old container: %v", worktrees(b))
 	}
-	b.Observe(withContainer(snap(), "c2", "w2"))
+	b.Observe(withRun(snap(), "c2", "w2", 64*gib, d2.LeaseID))
 	if got := worktrees(b); len(got) != 1 || got[0] != "w1" {
 		t.Fatalf("open leases = %v, want w1's only", got)
 	}
@@ -157,7 +167,7 @@ func TestANewContainerInTheWorktreeSettlesItsLease(t *testing.T) {
 
 func TestTartLeasesWaitForAVM(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: gib, Target: "vm"}, snap(), cfg)
 	b.Observe(withContainer(snap(), "c2", "w1"))
 	if len(b.List()) != 1 {
 		t.Fatal("a container settled a Tart lease")
@@ -170,29 +180,14 @@ func TestTartLeasesWaitForAVM(t *testing.T) {
 	}
 }
 
-func TestAnUnattributedContainerSettlesTheOldestLease(t *testing.T) {
-	b, c, _ := book(t)
-	b.Check(req("w1", gib), snap(), cfg)
-	c.t = c.t.Add(time.Second)
-	b.Check(req("w2", gib), snap(), cfg)
-	b.Observe(withContainer(snap(), "c2", ""))
-	if got := worktrees(b); len(got) != 1 || got[0] != "w2" {
-		t.Fatalf("open leases = %v, want w2's only", got)
-	}
-	// Another worktree's container does not settle w2's lease.
-	b.Observe(withContainer(withContainer(snap(), "c2", ""), "c3", "w1"))
-	if len(b.List()) != 1 {
-		t.Fatal("w1's container settled w2's lease")
-	}
-}
-
 func TestOneResourceSettlesOneLease(t *testing.T) {
 	b, _, _ := book(t)
+	d := b.Check(req("w1", gib), snap(), cfg)
 	b.Check(req("w1", gib), snap(), cfg)
-	b.Check(req("w1", gib), snap(), cfg)
-	s := withContainer(snap(), "c2", "w1")
+	s := withRun(snap(), "c2", "w1", 64*gib, d.LeaseID)
+	s = withRun(s, "c3", "w1", 64*gib, d.LeaseID) // a copy with the same label
 	b.Observe(s)
-	b.Observe(s) // the same container on the next tick
+	b.Observe(s) // the same containers on the next tick
 	if len(b.List()) != 1 {
 		t.Fatalf("one container settled %d leases", 2-len(b.List()))
 	}
@@ -200,7 +195,7 @@ func TestOneResourceSettlesOneLease(t *testing.T) {
 
 func TestComposeSettlesOnItsFirstContainer(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	b.Observe(withComposeContainer(snap(), "db", "w1", 3*gib))
 	if len(b.List()) != 0 {
 		t.Fatal("compose lease still open after its containers used its cost")
@@ -255,8 +250,8 @@ func TestChecksUseTheSnapshotLeasesWereSettledOn(t *testing.T) {
 
 func TestASettlingContainerCannotSettleALaterLease(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(req("w1", gib), snap(), cfg)
-	s2 := withContainer(snap(), "c2", "w1")
+	d := b.Check(req("w1", gib), snap(), cfg)
+	s2 := withRun(snap(), "c2", "w1", 64*gib, d.LeaseID)
 	b.Observe(s2)
 	b.Check(req("w1", gib), snap() /* stale: no c2 */, cfg)
 	b.Observe(s2)
@@ -267,12 +262,12 @@ func TestASettlingContainerCannotSettleALaterLease(t *testing.T) {
 
 func TestALeaseKeepsWhatItsContainerHasNotUsedYet(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(req("w1", 6*gib), snap(), cfg)
-	b.Observe(withContainerMem(snap(), "jvm", "w1", gib/2))
+	d := b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withRun(snap(), "jvm", "w1", gib/2, d.LeaseID))
 	if r := reserved(b); r != 6*gib-gib/2 {
 		t.Fatalf("reserved %d, want 5.5 GiB: the container uses 0.5 so far", r)
 	}
-	b.Observe(withContainerMem(snap(), "jvm", "w1", 6*gib))
+	b.Observe(withRun(snap(), "jvm", "w1", 6*gib, d.LeaseID))
 	if len(b.List()) != 0 {
 		t.Fatalf("lease open after its container used it all: %+v", b.List())
 	}
@@ -280,7 +275,7 @@ func TestALeaseKeepsWhatItsContainerHasNotUsedYet(t *testing.T) {
 
 func TestComposeBindsAllItsNewContainers(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	s := withComposeContainer(snap(), "db", "w1", gib)
 	b.Observe(s)
 	if r := reserved(b); r != 2*gib {
@@ -294,10 +289,10 @@ func TestComposeBindsAllItsNewContainers(t *testing.T) {
 
 func TestABoundLeaseEndsQuietlyAtTheTimeout(t *testing.T) {
 	b, c, log := book(t)
-	b.Check(req("w1", 6*gib), snap(), cfg)
-	b.Observe(withContainerMem(snap(), "small", "w1", gib)) // never grows to 6
+	d := b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withRun(snap(), "small", "w1", gib, d.LeaseID)) // never grows to 6
 	c.t = t0.Add(2 * time.Minute)
-	b.Observe(withContainerMem(snap(), "small", "w1", gib))
+	b.Observe(withRun(snap(), "small", "w1", gib, d.LeaseID))
 	if len(b.List()) != 0 || strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("leases %+v, log %s", b.List(), log)
 	}
@@ -305,9 +300,9 @@ func TestABoundLeaseEndsQuietlyAtTheTimeout(t *testing.T) {
 
 func TestAContainerOnTheDeadlineSettlesItsOwnLease(t *testing.T) {
 	b, c, log := book(t)
-	b.Check(req("w1", gib), snap(), cfg)
+	d := b.Check(req("w1", gib), snap(), cfg)
 	c.t = t0.Add(2 * time.Minute)
-	b.Observe(withContainer(snap(), "c2", "w1"))
+	b.Observe(withRun(snap(), "c2", "w1", 64*gib, d.LeaseID))
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("logged as never appeared: %s", log)
 	}
@@ -315,10 +310,10 @@ func TestAContainerOnTheDeadlineSettlesItsOwnLease(t *testing.T) {
 
 func TestComposeAndPlainLeasesTakeTheirOwnContainers(t *testing.T) {
 	b, c, _ := book(t)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(time.Second)
-	b.Check(req("w1", 2*gib), snap(), cfg)
-	b.Observe(withContainerMem(snap(), "x", "w1", 2*gib)) // the plain docker run's container
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	b.Observe(withRun(snap(), "x", "w1", 2*gib, d.LeaseID)) // the plain docker run's container
 	ls := b.List()
 	if len(ls) != 1 || ls[0].Kind != "compose" {
 		t.Fatalf("open leases = %+v, want only the compose lease", ls)
@@ -329,9 +324,9 @@ func TestAnExpiredLeaseDoesNotTakeALiveLeasesContainer(t *testing.T) {
 	b, c, log := book(t)
 	b.Check(req("w1", gib), snap(), cfg) // its call failed: no container
 	c.t = t0.Add(time.Minute)
-	b.Check(req("w1", gib), snap(), cfg)
+	d := b.Check(req("w1", gib), snap(), cfg)
 	c.t = t0.Add(2 * time.Minute) // the first expires as the second's container appears
-	b.Observe(withContainer(snap(), "c2", "w1"))
+	b.Observe(withRun(snap(), "c2", "w1", 64*gib, d.LeaseID))
 	if len(b.List()) != 0 {
 		t.Fatalf("open leases = %+v", b.List())
 	}
@@ -342,7 +337,7 @@ func TestAnExpiredLeaseDoesNotTakeALiveLeasesContainer(t *testing.T) {
 
 func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	b.Observe(withComposeContainer(snap(), "migrate", "w1", gib/10))
 	b.Observe(snap()) // migrate exited; db and app not up yet
 	if r := reserved(b); r != 3*gib {
@@ -352,8 +347,8 @@ func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
 
 func TestAContainerMissingFromOneSnapshotKeepsItsLease(t *testing.T) {
 	b, c, _ := book(t)
-	b.Check(req("w1", 6*gib), snap(), cfg)
-	b.Observe(withContainerMem(snap(), "c2", "w1", gib)) // binds, 5 GB still reserved
+	d := b.Check(req("w1", 6*gib), snap(), cfg)
+	b.Observe(withRun(snap(), "c2", "w1", gib, d.LeaseID)) // binds, 5 GB still reserved
 	c.t = c.t.Add(time.Second)
 	b.Check(req("w1", gib), snap(), cfg) // another call from w1, still starting
 	missing := snap()
@@ -362,7 +357,7 @@ func TestAContainerMissingFromOneSnapshotKeepsItsLease(t *testing.T) {
 	if r := reserved(b); r != 5*gib+gib {
 		t.Fatalf("reserved %d after a failed read, want 6 GiB", r)
 	}
-	b.Observe(withContainerMem(snap(), "c2", "w1", gib)) // c2 is back
+	b.Observe(withRun(snap(), "c2", "w1", gib, d.LeaseID)) // c2 is back
 	ls := b.List()
 	if len(ls) != 2 {
 		t.Fatalf("c2 came back and took the other lease: %+v", ls)
@@ -371,10 +366,11 @@ func TestAContainerMissingFromOneSnapshotKeepsItsLease(t *testing.T) {
 
 func TestComposeLeasesKeepToTheirProject(t *testing.T) {
 	b, c, _ := book(t)
-	compose := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib}
+	compose := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "a"}
 	b.Check(compose, snap(), cfg)
 	b.Observe(withComposeProject(snap(), "a-db", "w1", "a", gib))
 	c.t = c.t.Add(time.Second)
+	compose.Target = "b"
 	b.Check(compose, snap(), cfg) // a second project
 	s := withComposeProject(withComposeProject(snap(), "a-db", "w1", "a", gib), "b-db", "w1", "b", gib)
 	b.Observe(s)
@@ -451,7 +447,7 @@ func TestARestartedVMBindsItsNewLease(t *testing.T) {
 	b.Observe(running) // ci-vm runs
 	b.Observe(snap())  // stopped
 	c.t = c.t.Add(5 * time.Minute)
-	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run ci-vm", CostBytes: 4 * gib}, snap(), cfg)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run ci-vm", CostBytes: 4 * gib, Target: "ci-vm"}, snap(), cfg)
 	b.Observe(running) // started again by that call
 	if len(b.List()) != 0 {
 		t.Fatalf("the restarted VM did not settle its lease: %+v (%s)", b.List(), log)
@@ -460,8 +456,8 @@ func TestARestartedVMBindsItsNewLease(t *testing.T) {
 
 func TestACheckBeforeTheFirstTickBindsItsContainer(t *testing.T) {
 	b, _, _ := book(t)
-	b.Check(req("w1", gib), &protocol.Snapshot{}, cfg) // the daemon has no reading yet
-	s := withContainer(snap(), "c2", "w1")             // "old" existed before; c2 is this call's
+	d := b.Check(req("w1", gib), &protocol.Snapshot{}, cfg) // the daemon has no reading yet
+	s := withRun(snap(), "c2", "w1", 64*gib, d.LeaseID)     // "old" existed before; c2 is this call's
 	b.Observe(s)
 	if len(b.List()) != 0 {
 		t.Fatalf("its container did not settle the lease: %+v", b.List())
@@ -523,7 +519,7 @@ func TestTheLastMacOSSlotGoesToOneRequest(t *testing.T) {
 	s.Tart = &protocol.Tart{Installed: true, MacOSRunning: 1, VMs: []protocol.TartVM{{Name: "held", OS: "darwin"}}}
 	c := cfg
 	c.MaxMacOSVMs = 2
-	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}
+	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, Target: "m"}
 	var wg sync.WaitGroup
 	allowed := make(chan bool, 8)
 	for range 8 {
@@ -559,7 +555,7 @@ func TestAMacOSLeaseWaitsForAMacOSVM(t *testing.T) {
 	s.Tart = &protocol.Tart{Installed: true}
 	c := cfg
 	c.MaxMacOSVMs = 1
-	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}
+	mac := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, Target: "m"}
 	if d := b.Check(mac, s, c); !d.Allow {
 		t.Fatalf("first: %+v", d)
 	}
@@ -622,8 +618,8 @@ func TestTartLeasesBindUnknownAndOwnVMs(t *testing.T) {
 	s.Tart = &protocol.Tart{Installed: true}
 	c := cfg
 	c.MaxMacOSVMs = 2
-	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true}, s, c)
-	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run x", CostBytes: gib, MacOS: true, VMUnknown: true, PID: 30}, s, c)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, Target: "m"}, s, c)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run x", CostBytes: gib, MacOS: true, VMUnknown: true, PID: 30, Target: "x"}, s, c)
 	s.Tart.VMs = []protocol.TartVM{{Name: "m"}, {Name: "x", OS: "linux", RunPID: 30}}
 	s.Tart.MacOSRunning = 1
 	b.Observe(s)
@@ -642,7 +638,7 @@ func TestATartLeaseBindsAVMRunByAWrapper(t *testing.T) {
 	s.Tart = &protocol.Tart{Installed: true}
 	c := cfg
 	c.MaxMacOSVMs = 2
-	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, PID: 40}, s, c)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m", CostBytes: gib, MacOS: true, PID: 40, Target: "m"}, s, c)
 	s.Tart.VMs = []protocol.TartVM{{Name: "m", OS: "darwin", RunPID: 41}}
 	s.Tart.MacOSRunning = 1
 	b.Observe(s)

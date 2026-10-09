@@ -73,6 +73,8 @@ type Env struct {
 	getwd      func() (string, error)                                                 // os.Getwd
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
+	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
+	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
@@ -218,9 +220,10 @@ func runDaemon(e Env) int {
 	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
+	dockerSrc := docker.New(cfg.Docker.Socket, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
-		docker.New(cfg.Docker.Socket, vms),
+		dockerSrc,
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 		orca.New(orcaCLI),
 		lmstudio.New(lmsCLI, vmproc.Host{}, e.Getenv("HOME")),
@@ -230,7 +233,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	wireGate(d, cfg, log)
+	book := wireGate(d, cfg, log, dockerSrc)
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
@@ -246,6 +249,7 @@ func runDaemon(e Env) int {
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
+	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEvent, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()
@@ -326,7 +330,7 @@ func runShim(e Env, name string) int {
 		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
 	}
 	h := e.withDefaults()
-	g := gate(e, name, c, getenv)
+	g := gate(e, name, target, c, getenv)
 	if g.signal != nil {
 		// Die of it, as the real binary would have, so a shell loop
 		// around the call stops too.
@@ -341,7 +345,15 @@ func runShim(e Env, name string) int {
 	env = setEnv(env, shimSelvesVar, strings.Join(selves, string(filepath.ListSeparator)))
 	// argv[0] is the bare name, as the shell passes a command found on PATH:
 	// the shim's own path would point the real binary back at the shim dir.
-	argv := append([]string{name}, e.Args[1:]...)
+	args := e.Args[1:]
+	if g.lease != "" {
+		// The container carries its lease, so the daemon tells it from one
+		// started past the shim (#33).
+		if la, ok := shim.Labelled(name, args, protocol.LeaseLabel, g.lease); ok {
+			args = la
+		}
+	}
+	argv := append([]string{name}, args...)
 	// On success this never returns: the real binary takes over the
 	// process, with its PID, terminal, signals and exit code.
 	if err := h.exec(target, argv, env); err != nil {
@@ -420,27 +432,159 @@ func usage(w io.Writer) {
 // leases (#25) to d. Every tick derives the budget and attribution, settles
 // or expires leases against that snapshot, and lists the open ones in it.
 // Checks decide against the latest snapshot and the open leases.
-func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger) {
-	params := cfg.Budget.Params()
+func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) *lease.Book {
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
-	d.SetDerive(func(s *protocol.Snapshot) {
+	d.SetDerive(derive(book, cfg.Budget.Params()))
+	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
+	d.SetRelease(book.Release)
+	return book
+}
+
+// lookUpStarts resolves the containers a start names on the daemon's
+// Docker engine. Each one's ID is the lease's key, and a lease label on it
+// names the run or create this start takes over. Asked afresh every
+// check: whether it runs changes by the second (docker stop && docker
+// start). One not looked up (another engine) or not resolved may still
+// start: it counts as Unresolved, and costs.
+func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspector, socket string) {
+	targets := r.Targets
+	if len(targets) == 0 {
+		targets = []string{r.Target}
+	}
+	req.MultiTarget = r.MultiTarget && len(r.Targets) == 0 // an older shim's: the others unknown
+	// Trimmed here, as the docker CLI does (docker start " x" says "No such
+	// container: x"): Inspect takes a ref as given. And
+	// docker start db db is one container. The first stays first.
+	targets = slices.Clone(targets)
+	for i := range targets {
+		targets[i] = strings.TrimSpace(targets[i])
+	}
+	req.Target = targets[0]
+	seen := map[string]bool{}
+	targets = slices.DeleteFunc(targets, func(t string) bool {
+		dup := seen[t]
+		seen[t] = true
+		return dup
+	})
+	if inspector == nil || !sameSocket(r.Engine, socket) {
+		req.Unresolved = len(targets) - 1
+		return
+	}
+	type found struct {
+		ok, missing bool
+		policy.Start
+	}
+	got := make([]found, len(targets))
+	ctx, cancel := context.WithTimeout(context.Background(), inspectTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, lookUps) // docker start $(docker ps -aq): a few at a time
+	for i, t := range targets {
+		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			cid, labels, running, err := inspector.Inspect(ctx, t)
+			got[i] = found{err == nil, errors.Is(err, docker.ErrNoSuchContainer), policy.Start{ID: cid, TakesOver: protocol.LeaseOf(labels), Running: running}}
+		})
+	}
+	wg.Wait()
+	switch {
+	case got[0].ok:
+		req.ContainerID, req.TakesOver, req.Running = got[0].ID, got[0].TakesOver, got[0].Running
+	case got[0].missing:
+		req.Target = "" // no such container: Docker starts it not, and no name of it comes
+		req.FirstMissing = true
+	}
+	for _, f := range got[1:] {
+		switch {
+		case f.ok:
+			req.Others = append(req.Others, f.Start)
+		case f.missing: // starts nothing
+		default:
+			req.Unresolved++
+		}
+	}
+}
+
+// Eventer streams Docker's container starts and exits: the Docker source.
+type Eventer interface {
+	Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error
+}
+
+// followEvents feeds Docker's container events to fn until ctx ends (#67).
+// A stream that drops (Docker quit or restarting) is opened again after a
+// wait that doubles up to maxWait, and starts at a second again once a
+// stream delivered: meanwhile leases bind from readings alone.
+func followEvents(ctx context.Context, src Eventer, fn func(action, id, name string, labels map[string]string), wait func(context.Context, time.Duration)) {
+	const maxWait = 30 * time.Second
+	backoff := time.Second
+	for ctx.Err() == nil {
+		delivered := false
+		_ = src.Events(ctx, func(action, id string, attrs map[string]string) {
+			delivered = true
+			fn(action, id, attrs["name"], attrs)
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if delivered {
+			backoff = time.Second
+		}
+		wait(ctx, backoff)
+		backoff = min(2*backoff, maxWait)
+	}
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+// derive fills in what each tick computes from the sources: the budget,
+// attribution, and, once leases are settled, the open leases and the
+// containers and VMs that appeared without a check (#33).
+func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
+	return func(s *protocol.Snapshot) {
 		b := budget.Compute(s, params)
 		s.Budget = &b
 		at := attribution.Attribute(s)
 		s.Attribution = &at
 		book.Observe(s)
 		s.Leases = book.List()
-	})
-	d.SetCheck(gateCheck(book, cfg.PolicyConfig()))
-	d.SetRelease(book.Release)
+		s.Ungated = book.Ungated()
+	}
 }
 
-// gateCheck answers a check: it finds the calling worktree (#28), then
-// decides with the lease book.
-func gateCheck(book *lease.Book, pol policy.Config) daemon.CheckFunc {
+// Inspector resolves a container name or ID to its full ID and labels:
+// the Docker source.
+type Inspector interface {
+	Inspect(ctx context.Context, ref string) (id string, labels map[string]string, running bool, err error)
+}
+
+// inspectTimeout bounds the Docker lookup a start's check makes: well within
+// the shim's daemon timeout.
+const inspectTimeout = 200 * time.Millisecond
+
+// lookUps bounds the lookups a start of many containers makes at once.
+const lookUps = 8
+
+// gateCheckOn answers a check: it finds the calling worktree (#28), then
+// decides with the lease book. The daemon reads the Docker engine at
+// socket: only a start on that engine is looked up there.
+func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket string) daemon.CheckFunc {
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
-		d := book.Check(policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID}, s, pol)
+		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Idle: r.Idle, OnEngine: sameSocket(r.Engine, socket)}
+		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
+			lookUpStarts(&req, r, docker, socket)
+		}
+		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d
 	}

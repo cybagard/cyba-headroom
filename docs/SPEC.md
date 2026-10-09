@@ -79,7 +79,7 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 - [ ] One row per worktree: agent, state, containers + GB, Tart VMs + GB, CPU
 - [ ] Rows where the agent is waiting or done but still holds resources are marked
 - [ ] Unattributed row always shown when non-empty
-- [ ] Containers or VMs that appear without a matching lease (R10) are flagged as **ungated**: direct socket use, SDKs such as Testcontainers, or a broken PATH
+- [x] Containers or VMs that appear without a matching lease (R10) are flagged as **ungated** (#33): direct socket use, SDKs such as Testcontainers, or a broken PATH
 
 **R5 — Gate shim for `docker`, `podman` and `tart` (authoritative).** One global shim directory, put first on PATH by the Orca launch environment (R9). It is the only enforcement point; agent hooks and MCP are advisory.
 

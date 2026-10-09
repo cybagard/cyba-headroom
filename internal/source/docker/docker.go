@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -232,6 +234,13 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/containers/") {
+		// Docker's own answer, not any proxy's 404.
+		var e struct{ Message string }
+		if json.NewDecoder(resp.Body).Decode(&e) == nil && strings.Contains(strings.ToLower(e.Message), "no such container") {
+			return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET %s: %s", path, resp.Status)
 	}
@@ -246,4 +255,81 @@ type reading struct{ d protocol.Docker }
 func (r reading) Apply(s *protocol.Snapshot) {
 	d := r.d
 	s.Docker = &d
+}
+
+// ErrNoSuchContainer is Docker's word that a container does not exist: a
+// start of it starts nothing.
+var ErrNoSuchContainer = errors.New("no such container")
+
+// containerRef is a container name or ID as Docker forms them: only such a
+// reference that Docker does not find is known missing.
+var containerRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// Inspect resolves a container name, ID or ID prefix to its full ID, its
+// labels and whether it runs, as Docker resolves the target of a docker
+// start (#33). ref is taken as given: the caller trims it as the docker CLI
+// does, and anything but a plain name or ID is an error that is not
+// ErrNoSuchContainer.
+func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]string, bool, error) {
+	if !containerRef.MatchString(ref) {
+		// Unknown, not missing: Docker may read it otherwise, and a start
+		// of it costs.
+		return "", nil, false, fmt.Errorf("docker: not a container reference: %q", ref)
+	}
+	var c struct {
+		ID     string `json:"Id"`
+		Config struct {
+			Labels map[string]string
+		}
+		State struct {
+			Running bool
+		}
+	}
+	if err := s.get(ctx, "/containers/"+ref+"/json", &c); err != nil {
+		return "", nil, false, err
+	}
+	return c.ID, c.Config.Labels, c.State.Running, nil
+}
+
+// EventsPath streams container starts, stops and exits (#67).
+var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die"],"type":["container"]}`}}.Encode()
+
+// Events streams Docker's container start and die events to fn, with the
+// container's ID and attributes (its labels, and name), until ctx ends or
+// the stream drops: it always returns an error, and the caller reconnects.
+// Events are what a 5 s reading misses: a container that lives between
+// two readings.
+func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error {
+	if s.socket == "" {
+		return errors.New("docker: socket unknown")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+EventsPath, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("docker: GET /events: %s", resp.Status)
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev struct {
+			Type   string
+			Action string
+			Actor  struct {
+				ID         string
+				Attributes map[string]string
+			}
+		}
+		if err := dec.Decode(&ev); err != nil {
+			return fmt.Errorf("docker: events: %w", err)
+		}
+		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die") {
+			fn(ev.Action, ev.Actor.ID, ev.Actor.Attributes)
+		}
+	}
 }

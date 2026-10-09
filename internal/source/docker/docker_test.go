@@ -60,7 +60,11 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 		body, ok := routes[r.URL.RequestURI()]
 		mu.Unlock()
 		if !ok {
-			http.Error(w, `{"message":"no route"}`, http.StatusNotFound)
+			msg := `{"message":"no route"}`
+			if strings.HasPrefix(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/json") {
+				msg = `{"message":"No such container: x"}` // as Docker answers
+			}
+			http.Error(w, msg, http.StatusNotFound)
 			return
 		}
 		if code, ok := strings.CutPrefix(body, "!"); ok { // "!409": reply with that status
@@ -299,5 +303,70 @@ func TestStatsFetchedConcurrently(t *testing.T) {
 	}
 	if peak.Load() < 2 {
 		t.Fatalf("stats requests were sequential (peak %d in flight)", peak.Load())
+	}
+}
+
+func TestInspectResolvesAContainer(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		"/containers/db/json": `{"Id":"abc123","Config":{"Labels":{"dev.headroom.lease":"lease-1-2"}},"State":{"Running":true}}`,
+	})
+	s := docker.New(sock, nil)
+	id, labels, running, err := s.Inspect(context.Background(), "db")
+	if err != nil || id != "abc123" || labels["dev.headroom.lease"] != "lease-1-2" || !running {
+		t.Fatalf("Inspect = %q, %v, %v, %v", id, labels, running, err)
+	}
+	if _, _, _, err := s.Inspect(context.Background(), "gone"); err == nil {
+		t.Fatal("want an error for no such container")
+	}
+	for _, ref := range []string{"", "../images/json", "db?x=1", "a/b"} {
+		if _, _, _, err := s.Inspect(context.Background(), ref); err == nil {
+			t.Errorf("Inspect(%q): want an error, not a request", ref)
+		}
+	}
+}
+
+func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		docker.EventsPath: `{"Type":"container","Action":"start","Actor":{"ID":"abc","Attributes":{"name":"quick","dev.headroom.lease":"lease-1-2"}}}
+{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"name":"quick","exitCode":"0"}}}
+`,
+	})
+	var got []string
+	err := docker.New(sock, nil).Events(context.Background(), func(action, id string, attrs map[string]string) {
+		got = append(got, action+" "+id+" "+attrs["name"]+" "+attrs["dev.headroom.lease"])
+	})
+	if want := []string{"start abc quick lease-1-2", "die abc quick "}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+	if err == nil {
+		t.Fatal("a stream that ends must say so: the caller reconnects")
+	}
+}
+
+// Docker's word that no such container exists is told apart from a
+// failed lookup: a start of it starts nothing.
+func TestInspectSaysNoSuchContainer(t *testing.T) {
+	sock, _ := engine(t, map[string]string{})
+	s := docker.New(sock, nil)
+	if _, _, _, err := s.Inspect(context.Background(), "gone"); !errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Errorf("Inspect(gone) = %v, want ErrNoSuchContainer", err)
+	}
+	// Only a well-formed name or ID is known missing: anything Docker
+	// might read otherwise is unknown, and costs.
+	for _, ref := range []string{"x%", "a/b", "/db", "a b", "-x"} {
+		if _, _, _, err := s.Inspect(context.Background(), ref); err == nil || errors.Is(err, docker.ErrNoSuchContainer) {
+			t.Errorf("Inspect(%q) = %v, want an error that is not ErrNoSuchContainer", ref, err)
+		}
+	}
+	if _, _, _, err := docker.New(filepath.Join(shortDir(t), "none.sock"), nil).Inspect(context.Background(), "db"); errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Fatal("no engine is not no such container")
+	}
+}
+
+// A 404 that is not Docker's "No such container" (a proxy's) is unknown.
+func TestInspectTrustsOnlyDockersNotFound(t *testing.T) {
+	sock, _ := engine(t, map[string]string{"/containers/db/json": "!404"})
+	if _, _, _, err := docker.New(sock, nil).Inspect(context.Background(), "db"); err == nil || errors.Is(err, docker.ErrNoSuchContainer) {
+		t.Fatalf("err = %v", err)
 	}
 }

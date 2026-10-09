@@ -2,12 +2,19 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,6 +76,15 @@ func (e Env) withDefaults() Env {
 	if e.getwd == nil {
 		e.getwd = os.Getwd
 	}
+	if e.composeAsk == nil {
+		env, _ := e.envOf()
+		e.composeAsk = func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, env, "") }
+	}
+	if e.composeDry == nil {
+		env, _ := e.envOf()
+		e.composeDry = func(bin string, args []string) ([]byte, error) { return askComposeDry(bin, args, env) }
+	}
+
 	if e.fallbacks == nil {
 		e.fallbacks = shim.Fallbacks
 	}
@@ -91,7 +107,7 @@ func (e Env) withDefaults() Env {
 // nothing, calls already checked and calls to a remote engine are not asked
 // about; nor, failing open (R7), is anything when the config or the daemon
 // cannot answer.
-func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
+func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gated {
 	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() ||
 		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
 		return gated{proceed: true}
@@ -101,9 +117,49 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 		notGated(e, "config: "+oneLine(err), c.Command)
 		return gated{proceed: true}
 	}
+	if c.Kind == "container" && (c.Op == "run" || c.Op == "create") && shim.SetsLabel(e.Args[1:], protocol.LeaseLabel) {
+		// The shim's label must be the one Docker keeps: past an option it
+		// does not know, it goes first, and a later one would win and name
+		// another worktree's lease.
+		fmt.Fprintf(e.Stderr, "headroom: refused `%s`: the label %s is headroom's own\n", c.Command, protocol.LeaseLabel)
+		return gated{code: exitDenied}
+	}
 	h := e.withDefaults()
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
+	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
+	if name == "docker" {
+		req.Engine = dockerEndpointIn(getenv, c.ConfigDir, c.Endpoint)
+		if c.Kind != "tart" && req.Engine != c.Endpoint && shim.Remote(name, req.Engine, getenv) {
+			// A context (--context, DOCKER_CONTEXT, currentContext) whose
+			// engine is remote: its memory is not this Mac's.
+			return gated{proceed: true}
+		}
+	}
+	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
+	var idle func() bool
+	if c.Kind == "compose" && name == "docker" {
+		// Compose names the project (-p needs no asking; podman compose is
+		// not asked), and says whether a detached up starts anything.
+		// Bounded by composeTimeout, also when the daemon turns out to be
+		// down (R7).
+		if slices.Contains(c.ComposeFiles, "-") {
+			// Its file is on stdin, which the call needs: not asked.
+			req.Target = composeStdinProject(c, getenv, h.getwd)
+		} else {
+			req.Target = composeProject(bin, e.Args[1:], c.Target, h.composeAsk)
+			// Only a detached up: an attached up's dry run stops before
+			// Compose would start anything ("interactive run is not
+			// supported"), and a restart's lists each container as
+			// restarting, running or not.
+			if c.Op == "up" && c.ComposeDetached && composePlain(bin, e.Args[1:], h.composeAsk) {
+				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
+			}
+		}
+	}
+	// A run or create carries its lease as a label: runShim adds it the
+	// same way, so the two agree.
+	_, req.Labelled = shim.Labelled(name, e.Args[1:], protocol.LeaseLabel, "")
 	if c.Kind == "tart" {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
 		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {
@@ -122,6 +178,10 @@ func gate(e Env, name string, c shim.Call, getenv func(string) string) gated {
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
 	var deadline time.Time
 	for {
+		if idle != nil {
+			// Asked afresh each time: a wait may outlast what it said.
+			req.Idle = idle()
+		}
 		d, err := h.ask(cfg, req)
 		if h.wait != nil {
 			// A Ctrl-C during the ask cancels the call, even one now allowed.
@@ -198,6 +258,262 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 	}
 	r.Ancestors = ancestors()
 	return r
+}
+
+// composeProject is a compose call's project, as Compose itself names it
+// (#33): -p (target), else the name docker compose config gives, run with
+// the call's own global options (args: -f, --project-directory,
+// --env-file, --config, ...) in its own environment and working directory.
+// Compose labels each container with the project, so the name is the
+// lease's key. Asking Compose, rather than reading .env, override files and
+// name: the way it does, keeps the two from parting. "" when Compose cannot
+// say (the call will fail too): no key, failing closed.
+func composeProject(bin string, args []string, target string, ask func(bin string, args []string) ([]byte, error)) string {
+	if target != "" {
+		return target
+	}
+	cargs, ok := shim.ComposeConfig(args, false)
+	if !ok {
+		return ""
+	}
+	out, err := ask(bin, cargs)
+	var cfg struct {
+		Name string `json:"name"`
+	}
+	if err != nil || json.Unmarshal(out, &cfg) != nil {
+		return ""
+	}
+	return cfg.Name
+}
+
+// composePlain reports whether a compose call's dry run tells what it
+// starts. Not when Compose's dry run cannot see it: a model provider (a
+// service's provider or models, in any profile) runs for real even in a
+// dry run; a pull or build (--pull always, --build, a pull_policy other
+// than missing or never) is not done, so a newer image's recreate is not
+// shown. Config, with the call's own options, runs none of them.
+func composePlain(bin string, args []string, ask func(bin string, args []string) ([]byte, error)) bool {
+	for i, a := range args {
+		if a == "--build" || a == "--pull=always" || a == "--pull" && i+1 < len(args) && args[i+1] == "always" {
+			return false
+		}
+		// --build=true, =1, =T: a build. Only a false one builds nothing.
+		if v, ok := strings.CutPrefix(a, "--build="); ok {
+			if build, err := strconv.ParseBool(v); err != nil || build {
+				return false
+			}
+		}
+	}
+	cargs, ok := shim.ComposeConfig(args, true)
+	if !ok {
+		return false
+	}
+	out, err := ask(bin, cargs)
+	var cfg struct {
+		Models   json.RawMessage `json:"models"`
+		Services map[string]struct {
+			Provider   json.RawMessage `json:"provider"`
+			Models     json.RawMessage `json:"models"`
+			PullPolicy string          `json:"pull_policy"`
+		} `json:"services"`
+	}
+	if err != nil || json.Unmarshal(out, &cfg) != nil {
+		return false
+	}
+	plain := noJSON(cfg.Models)
+	for _, sv := range cfg.Services {
+		switch sv.PullPolicy {
+		case "", "missing", "if_not_present", "never":
+		default:
+			plain = false
+		}
+		plain = plain && noJSON(sv.Provider) && noJSON(sv.Models)
+	}
+	return plain
+}
+
+// noJSON reports whether a JSON value is absent, null or empty.
+func noJSON(v json.RawMessage) bool {
+	switch strings.TrimSpace(string(v)) {
+	case "", "null", "{}", "[]":
+		return true
+	}
+	return false
+}
+
+// ansi matches a terminal's colour codes.
+var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// composeIdle reports whether Compose's own dry run of the call (args,
+// with --dry-run added) says it creates, recreates and starts nothing:
+// compose up -d of a stack that runs as configured. Asking Compose, rather
+// than reading its config against what runs, leaves what it does (profiles,
+// replicas, --scale, pull policies, a changed file or image) to Compose.
+// false when it cannot say: the call holds its estimate.
+func composeIdle(bin string, args []string, dry func(bin string, args []string) ([]byte, error)) bool {
+	dryArgs, ok := shim.DryRun(args)
+	if !ok {
+		return false
+	}
+	out, err := dry(bin, dryArgs)
+	if err != nil {
+		return false
+	}
+	running := false
+	for line := range strings.Lines(ansi.ReplaceAllString(string(out), "")) {
+		// " Container app-db-1 Running", also after an older Compose's
+		// "DRY-RUN MODE -" or a tty's tick.
+		f := strings.Fields(line)
+		i := slices.Index(f, "Container")
+		if i < 0 || len(f) < i+3 {
+			continue
+		}
+		switch status := f[len(f)-1]; {
+		case status == "Running":
+			running = true
+		case strings.HasPrefix(status, "Creat"), strings.HasPrefix(status, "Recreat"),
+			strings.HasPrefix(status, "Start"), strings.HasPrefix(status, "Restart"):
+			return false
+		}
+		// Waiting, Healthy: a healthcheck it waits for starts nothing.
+	}
+	return running
+}
+
+// composeStdinProject names the project of compose -f - as Compose does
+// when its file is on stdin: -p, else COMPOSE_PROJECT_NAME, else the
+// project directory's name (--project-directory, else the working
+// directory). A name: in the piped file is not seen: that lease then does
+// not bind, and holds its cost (failing closed).
+func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (string, error)) string {
+	switch {
+	case c.Target != "":
+		return c.Target
+	case getenv("COMPOSE_PROJECT_NAME") != "":
+		return normalProject(getenv("COMPOSE_PROJECT_NAME"))
+	case filepath.IsAbs(c.ComposeProjectDir):
+		return normalProject(filepath.Base(c.ComposeProjectDir))
+	}
+	cwd, err := getwd()
+	if err != nil {
+		return ""
+	}
+	if c.ComposeProjectDir != "" {
+		cwd = filepath.Join(cwd, c.ComposeProjectDir)
+	}
+	return normalProject(filepath.Base(cwd))
+}
+
+// normalProject is a project name as Compose normalises it: lower case,
+// only letters, digits, - and _, and no leading - or _.
+func normalProject(s string) string {
+	return strings.TrimLeft(strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+			return c
+		case c >= 'A' && c <= 'Z':
+			return c + 'a' - 'A'
+		}
+		return -1
+	}, s), "_-")
+}
+
+// composeTimeout bounds docker compose config (30-40 ms on a plain stack):
+// it reads the compose files, as the call itself is about to, and delays a
+// call that fails open by at most this much.
+const composeTimeout = 2 * time.Second
+
+// askCompose runs docker compose config (args) at bin in env and dir ("":
+// this process's) and returns its JSON.
+func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
+	return cmd.Output()
+}
+
+// askComposeDry runs a compose call's dry run (args) at bin in env: its
+// plan is on stderr, with stdout.
+func askComposeDry(bin string, args, env []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	// Its plan as plain lines, whatever the call's environment asks for.
+	cmd.Env, cmd.WaitDelay = append(slices.Clone(env), "COMPOSE_PROGRESS=plain", "COMPOSE_ANSI=never"), 500*time.Millisecond
+	return cmd.CombinedOutput()
+}
+
+// dockerEndpointIn is the endpoint the docker CLI talks to: the call's
+// own -H, or its --context's; else DOCKER_HOST, else the context's
+// (DOCKER_CONTEXT, else currentContext in the config at configDir, from
+// --config, else DOCKER_CONFIG, else ~/.docker), else Docker's default
+// socket. "" when the context cannot be read, or the config directory is
+// relative.
+func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) string {
+	if strings.Contains(endpoint, "://") {
+		return endpoint // -H
+	}
+	if h := getenv("DOCKER_HOST"); h != "" && endpoint == "" {
+		return h
+	}
+	dir := configDir
+	if dir == "" {
+		dir = getenv("DOCKER_CONFIG")
+	}
+	if dir == "" {
+		dir = filepath.Join(getenv("HOME"), ".docker")
+	}
+	if !filepath.IsAbs(dir) {
+		return ""
+	}
+	name := endpoint // --context
+	if name == "" {
+		name = getenv("DOCKER_CONTEXT")
+	}
+	if name == "" {
+		var cfg struct {
+			CurrentContext string `json:"currentContext"`
+		}
+		// A config that cannot be read or parsed is the default context:
+		// the docker CLI warns and goes on with defaults too.
+		if b, err := os.ReadFile(filepath.Join(dir, "config.json")); err == nil {
+			_ = json.Unmarshal(b, &cfg)
+		}
+		name = cfg.CurrentContext
+	}
+	if name == "default" && getenv("DOCKER_HOST") != "" {
+		return getenv("DOCKER_HOST") // --context default: DOCKER_HOST's
+	}
+	if name == "" || name == "default" {
+		return "unix:///var/run/docker.sock"
+	}
+	sum := sha256.Sum256([]byte(name))
+	b, err := os.ReadFile(filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]), "meta.json"))
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Endpoints map[string]struct{ Host string }
+	}
+	if json.Unmarshal(b, &meta) != nil {
+		return ""
+	}
+	return meta.Endpoints["docker"].Host
+}
+
+// sameSocket reports whether a Docker endpoint (unix://path) is socket.
+func sameSocket(endpoint, socket string) bool {
+	p, ok := strings.CutPrefix(endpoint, "unix://")
+	if !ok || socket == "" {
+		return false
+	}
+	if filepath.Clean(p) == filepath.Clean(socket) {
+		return true
+	}
+	a, err1 := filepath.EvalSymlinks(p)
+	b, err2 := filepath.EvalSymlinks(socket)
+	return err1 == nil && err2 == nil && a == b
 }
 
 // notGated warns, in one line, that a call runs without a check (R7).

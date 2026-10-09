@@ -2,6 +2,7 @@ package shim
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -21,6 +22,28 @@ type Call struct {
 	// Target is the image, container, compose project (-p) or VM; "" if
 	// unknown. It is the raw argument: use Command for anything shown.
 	Target string
+	// ConfigDir is docker's --config: where it reads its context from.
+	ConfigDir string
+	// MultiTarget is set for a start or restart of several containers:
+	// Target is only the first.
+	MultiTarget bool
+	// Targets are all the containers a start or restart names.
+	Targets []string
+	// ComposeEnvFiles are a compose call's --env-files, in order, which
+	// Compose reads instead of the project's .env.
+	ComposeEnvFiles []string
+	// ComposeDetached is set for an up that detaches (-d, --wait): only its
+	// dry run shows what it starts.
+	ComposeDetached bool
+	// ComposeFiles are a compose call's -f files, and ComposeProjectDir its
+	// --project-directory, as given: the shim finds the project's name
+	// from them as Compose does (#33).
+	ComposeFiles      []string
+	ComposeProjectDir string
+	// Name is the container name given with --name, for run and create;
+	// "" if none. With Target it lets the daemon tell the call's container
+	// from others that appear at the same time (#33).
+	Name string
 	// MemoryBytes is the memory limit given with -m/--memory; 0 if none.
 	MemoryBytes uint64
 	// Endpoint is the engine chosen with --context, -H/--host,
@@ -34,34 +57,42 @@ type Call struct {
 func Parse(name string, args []string) Call {
 	switch name {
 	case "docker", "podman":
-		return parseEngine(name, args)
+		c, _ := parseEngine(name, args)
+		return c
 	case "tart":
 		return parseTart(args)
 	}
 	return Call{}
 }
 
-func parseEngine(name string, args []string) Call {
-	var c Call
+// parseEngine parses a docker or podman call. at is where a run or create
+// takes one more option last: before its image (and a "--" ahead of it), or
+// right after the subcommand when the image is not known; for compose,
+// right after "compose"; -1 otherwise.
+func parseEngine(name string, all []string) (c Call, at int) {
+	args := all
 	version := false
 	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
 		case "--context", "-H", "--host", "-c", "--connection", "--url":
 			c.Endpoint = v
+		case "--config":
+			c.ConfigDir = v
 		case "-v":
 			version = IsTrue(v) // docker -v and podman -v print the version
 		}
 	})
 	if res == askedHelp || version || len(args) == 0 {
-		return Call{}
+		return Call{}, -1
 	}
 	words := []string{name}
 	if args[0] == "container" {
 		words, args = append(words, "container"), args[1:]
 		if len(args) == 0 || args[0] == "compose" {
-			return Call{}
+			return Call{}, -1
 		}
 	}
+	opAt := len(all) - len(args) // args is what is left of all
 	c.Op = args[0]
 	var flags flagSet
 	switch c.Op {
@@ -71,16 +102,19 @@ func parseEngine(name string, args []string) Call {
 		flags = containerStart
 	case "compose":
 		if len(words) > 1 {
-			return Call{}
+			return Call{}, -1
 		}
-		return parseCompose(c.Endpoint, append(words, "compose"), args[1:])
+		return parseCompose(c.Endpoint, append(words, "compose"), args[1:]), opAt + 1
 	default:
-		return Call{}
+		return Call{}, -1
 	}
-	var mem string
+	var mem, cname string
 	seen := func(f, v string) {
-		if f == "-m" || f == "--memory" {
+		switch f {
+		case "-m", "--memory":
 			mem = v
+		case "--name":
+			cname = v
 		}
 	}
 	var pos []string
@@ -92,22 +126,145 @@ func parseEngine(name string, args []string) Call {
 		pos, res, guessed = scanAll(args[1:], flags, seen) // start db --help
 	}
 	if res == askedHelp {
-		return Call{}
+		return Call{}, -1
 	}
 	c.Kind, c.MemoryBytes = "container", parseBytes(mem)
+	at = -1
+	if c.Op == "run" || c.Op == "create" {
+		c.Name = cname
+		at = opAt + 1
+		if !guessed && len(pos) > 0 {
+			at = len(all) - len(pos) // pos is what is left: the image on
+			if res == endOfFlags {
+				at-- // before the "--" that ended the options (not a flag's value)
+			}
+		}
+	}
 	if !guessed && len(pos) > 0 {
 		c.Target = pos[0] // past a guess, it may be a flag's value
+		c.MultiTarget = (c.Op == "start" || c.Op == "restart") && len(pos) > 1
+		if c.MultiTarget {
+			c.Targets = pos
+		}
 	}
-	return c.named(append(words, c.Op))
+	return c.named(append(words, c.Op)), at
+}
+
+// Labelled returns a docker or podman run or create call's args with a
+// --label key=value added as its last option, so the container it creates
+// carries it: Docker keeps the last --label of a key, after --label-file. ok is false for any other call, which creates no
+// container (start, compose, tart) or none at all; args is not changed.
+func Labelled(name string, args []string, key, value string) (out []string, ok bool) {
+	if name != "docker" && name != "podman" {
+		return nil, false
+	}
+	c, at := parseEngine(name, args)
+	if c.Kind != "container" || at < 0 {
+		return nil, false
+	}
+	out = append(out, args[:at]...)
+	out = append(out, "--label", key+"="+value)
+	return append(out, args[at:]...), true
+}
+
+// SetsLabel reports whether args set the label key: --label key=v,
+// --label=key=v, -l key=v, -lkey=v, or -l in a cluster after run's
+// boolean shorthands (-qdl key=v), as the run and create table knows them;
+// an unknown one counts as boolean, so a newer one cannot hide it. The command after the image is scanned too: Labelled cannot
+// always tell where it starts, and a false match only refuses a call that
+// spells out headroom's own label.
+func SetsLabel(args []string, key string) bool {
+	names := func(v string) bool {
+		return strings.HasPrefix(v, key) && (len(v) == len(key) || v[len(key)] == '=')
+	}
+	for i, a := range args {
+		var v string
+		switch {
+		case a == "--label":
+			if i+1 < len(args) {
+				v = args[i+1]
+			}
+		case strings.HasPrefix(a, "--label="):
+			v = strings.TrimPrefix(a, "--label=")
+		case len(a) > 1 && a[0] == '-' && a[1] != '-':
+			// -l, -dl, -ldev.…: booleans, then l and its value. Any other
+			// flag that takes a value takes the rest of the cluster.
+			for j := 1; j < len(a); j++ {
+				f := "-" + a[j:j+1]
+				if f == "-l" {
+					v = strings.TrimPrefix(a[j+1:], "=")
+					if v == "" && j+1 == len(a) && i+1 < len(args) {
+						v = args[i+1]
+					}
+					break
+				}
+				if containerRun[f] {
+					break
+				}
+			}
+		}
+		if names(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// DryRun returns a docker compose call's args with --dry-run added as a
+// compose option, so Compose says what the call would do and does none of
+// it. ok is false for any other call, for a compose run (its one-off
+// container is always new), one whose file is on stdin (the call needs it)
+// and one that sets --dry-run itself.
+func DryRun(args []string) (out []string, ok bool) {
+	c, at := parseEngine("docker", args)
+	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
+		return nil, false
+	}
+	if slices.ContainsFunc(args, func(a string) bool { return a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") }) {
+		// It sets --dry-run itself, and the last value wins: with
+		// --dry-run=false after ours, the dry run would be the real call.
+		return nil, false
+	}
+	out = append(out, args[:at]...)
+	out = append(out, "--dry-run")
+	return append(out, args[at:]...), true
+}
+
+// ComposeConfig returns the args that ask Compose for a docker compose
+// call's project as JSON: the call's own global options (-p, -f,
+// --env-file, --config, --context), which Compose interpolates, then
+// config; with every profile's services if all. ok is false for any other
+// call.
+func ComposeConfig(args []string, all bool) (out []string, ok bool) {
+	c, at := parseEngine("docker", args)
+	if c.Kind != "compose" || at < 0 {
+		return nil, false
+	}
+	rest, res, _ := scanPast(args[at:], composeGlobal, isComposeCommand, nil)
+	if res == askedHelp || len(rest) == 0 {
+		return nil, false
+	}
+	out = slices.Clone(args[:len(args)-len(rest)])
+	if all {
+		out = append(out, "--profile", "*")
+	}
+	return append(out, "config", "--format", "json"), true
 }
 
 func parseCompose(endpoint string, words, args []string) Call {
-	var project string
-	dryRun, noUp := false, false
+	var project, projectDir string
+	var files, envFiles []string
+	dryRun, noUp, detached := false, false, false
 	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
 			project = v
+		case "--project-directory":
+			projectDir = v
+		case "--env-file":
+			envFiles = append(envFiles, v)
+		case "-f", "--file":
+			files = append(files, v)
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		}
@@ -127,10 +284,22 @@ func parseCompose(endpoint string, words, args []string) Call {
 			project = v
 		}
 		switch f {
+		case "--project-directory":
+			projectDir = v
+		case "--env-file":
+			envFiles = append(envFiles, v)
+		case "--file":
+			files = append(files, v)
+		case "-f":
+			if op != "run" && op != "restart" {
+				files = append(files, v) // some commands' own -f is something else
+			}
 		case "--dry-run":
 			dryRun = IsTrue(v)
 		case "--no-up":
 			noUp = IsTrue(v)
+		case "-d", "--detach", "--wait":
+			detached = detached || op == "up" && IsTrue(v)
 		}
 	}
 	if op == "run" {
@@ -142,7 +311,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
-	c := Call{Kind: "compose", Op: op, Target: project, Endpoint: endpoint}
+	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
+		ComposeEnvFiles: envFiles, ComposeDetached: detached, Endpoint: endpoint}
 	return c.named(append(words, op))
 }
 

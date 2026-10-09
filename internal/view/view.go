@@ -118,6 +118,12 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 			agents[w.ID] = w.Agents
 		}
 	}
+	// Worktrees ("" for unattributed) holding a container or VM that
+	// appeared without a check (#33).
+	ungated := map[string]bool{}
+	for _, u := range s.Ungated {
+		ungated[u.Worktree] = true
+	}
 	r.add(rowFormat, "WORKTREE", "AGENTS", "", "CONTAINERS", "TART VMS", "CPU", "AGENT MEM")
 	for _, w := range a.Worktrees {
 		ag := agents[w.ID]
@@ -130,12 +136,21 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 		if holds && !anyWorking(ag) {
 			mark = "⚑" // holds resources while no agent works (R4, #24)
 		}
+		if ungated[w.ID] {
+			// Holds something started without a check (R4, #33). One mark
+			// per row: two wide glyphs would shift the columns.
+			mark = "⚠"
+		}
 		r.add(rowFormat, short(name(w), 18), agentSummary(ag), mark,
 			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true), gbOrUnknown(w.AgentMemoryBytes))
 	}
 	u := a.Unattributed
 	if len(u.Containers)+len(u.TartVMs) > 0 {
-		r.add(rowFormat, "unattributed", "", "", containers(u), vms(u), cpu(u, nil, false), "")
+		mark := ""
+		if ungated[""] {
+			mark = "⚠"
+		}
+		r.add(rowFormat, "unattributed", "", mark, containers(u), vms(u), cpu(u, nil, false), "")
 		var items []string
 		for _, c := range u.Containers {
 			items = append(items, fmt.Sprintf("%s (%s)", Clean(c.Name), Clean(c.Reason)))
@@ -163,6 +178,17 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 		parts = append(parts, "1 idle worktree hidden (--all)")
 	default:
 		parts = append(parts, fmt.Sprintf("%d idle worktrees hidden (--all)", hidden))
+	}
+	if n := len(s.Ungated); n > 0 {
+		var names []string
+		for i, u := range s.Ungated {
+			if i == 3 {
+				names = append(names, "…")
+				break
+			}
+			names = append(names, short(Clean(u.Name), 40)) // a long name would wrap the footer
+		}
+		parts = append(parts, r.paint(yellow, fmt.Sprintf("%d ungated: %s (started without headroom; see headroom doctor)", n, strings.Join(names, ", "))))
 	}
 	names := make([]string, 0, len(s.Sources))
 	for n := range s.Sources {

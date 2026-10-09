@@ -105,6 +105,15 @@ func TestFromSnapshotKeepsModelIdleness(t *testing.T) {
 	}
 }
 
+func TestFromSnapshotKeepsUngated(t *testing.T) {
+	snap := fullSnapshot()
+	snap.Ungated = []protocol.Ungated{{Key: "container:abc", Name: "testcontainers-ryuk", Kind: "container", Worktree: "w1", Since: t0}}
+	u := samples.FromSnapshot(snap).Ungated
+	if len(u) != 1 || u[0].Name != "testcontainers-ryuk" || u[0].Kind != "container" || u[0].Worktree != "w1" {
+		t.Fatalf("ungated = %+v", u)
+	}
+}
+
 func TestOllamaNotRunningIsLeftOut(t *testing.T) {
 	snap := fullSnapshot()
 	snap.Ollama = &protocol.Ollama{Installed: true}

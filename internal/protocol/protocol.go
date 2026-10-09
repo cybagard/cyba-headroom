@@ -58,6 +58,41 @@ type CheckRequest struct {
 	// RealCwd is Cwd with symlinks resolved, when that differs: a worktree
 	// may be known by either spelling.
 	RealCwd string `json:"real_cwd,omitempty"`
+	// Target and Name are what the call starts: the image, container,
+	// compose project or VM, and a run's --name. The lease uses them to
+	// bind its own container (#33); they are never shown or logged.
+	Target string `json:"target,omitempty"`
+	Name   string `json:"name,omitempty"`
+	// Labelled is set when the shim adds the lease's ID to the container
+	// as LeaseLabel (a run or create): its lease binds that container only.
+	Labelled bool `json:"labelled,omitempty"`
+	// Op is the call's subcommand (run, create, start, restart, up, ...).
+	Op string `json:"op,omitempty"`
+	// Engine is the endpoint a docker call talks to, as its CLI resolves
+	// it (DOCKER_HOST, else the context's): the daemon looks a start's
+	// container up only when that is its own socket. "" when unknown.
+	Engine string `json:"engine,omitempty"`
+	// MultiTarget is set for a start or restart of several containers.
+	MultiTarget bool `json:"multi_target,omitempty"`
+	// Targets are all the containers a start or restart names, as given.
+	Targets []string `json:"targets,omitempty"`
+	// Idle is set for a compose call Compose's own dry run (--dry-run)
+	// said creates, recreates and starts nothing.
+	Idle bool `json:"idle,omitempty"`
+}
+
+// LeaseLabel carries a gated run's lease ID on its container, so the
+// daemon tells it from one started past the shim (#33).
+const LeaseLabel = "dev.headroom.lease"
+
+// LeaseOf is the lease a container's labels name: none for a container
+// Compose made (its config hash), as the shim labels only a run or create,
+// so a service's labels cannot name another worktree's lease.
+func LeaseOf(labels map[string]string) string {
+	if labels[ComposeConfigHashLabel] != "" {
+		return ""
+	}
+	return labels[LeaseLabel]
 }
 
 // How a check's worktree was found (Decision.IdentifiedBy).
@@ -100,6 +135,19 @@ type Lease struct {
 	Bytes    uint64    `json:"bytes"`
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires"`
+}
+
+// Ungated is a container or VM that appeared without a check through the
+// shim, so no lease was taken for it (R4, #33): started through the socket
+// or an SDK, by a login shell that put the real binary first, by an agent
+// not launched through headroom run, or while the daemon was down.
+type Ungated struct {
+	Key  string `json:"key"` // container:<id> or vm:<name>
+	Name string `json:"name"`
+	Kind string `json:"kind"` // container, compose or vm
+	// Worktree is the worktree it is attributed to; "" when none.
+	Worktree string    `json:"worktree,omitempty"`
+	Since    time.Time `json:"since"`
 }
 
 // Reason is one policy rule's verdict.
@@ -150,6 +198,9 @@ type Snapshot struct {
 	Attribution *Attribution `json:"attribution,omitempty"`
 	// Leases are the open reservations, oldest first (#25).
 	Leases []Lease `json:"leases,omitempty"`
+	// Ungated are containers and VMs that appeared without a check (R4,
+	// #33), oldest first.
+	Ungated []Ungated `json:"ungated,omitempty"`
 }
 
 // Attribution is what each worktree runs (R3).
@@ -171,6 +222,15 @@ const ComposeWorkingDirLabel = "com.docker.compose.project.working_dir"
 // ComposeProjectLabel is the label Docker Compose sets on a container to its
 // project name.
 const ComposeProjectLabel = "com.docker.compose.project"
+
+// Other labels Docker Compose sets on each container it makes: its
+// config's hash, whether it is a compose run's one-off ("True"), and its
+// service.
+const (
+	ComposeConfigHashLabel = "com.docker.compose.config-hash"
+	ComposeOneoffLabel     = "com.docker.compose.oneoff"
+	ComposeServiceLabel    = "com.docker.compose.service"
+)
 
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {
@@ -489,6 +549,9 @@ type SourceStatus struct {
 	At time.Time `json:"at"`
 	// Took is how long the latest attempt ran.
 	Took time.Duration `json:"took_ns"`
+	// Began is when the last good reading's attempt began: a change after
+	// it may be missing from the reading.
+	Began time.Time `json:"began,omitzero"`
 	// Err is the latest attempt's error, if it failed.
 	Err string `json:"error,omitempty"`
 	// Stale means the latest attempt failed and the snapshot holds the last

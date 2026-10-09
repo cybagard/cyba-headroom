@@ -2,10 +2,13 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,6 +33,7 @@ type shimRig struct {
 	ask      func(protocol.CheckRequest) (*protocol.Decision, error)
 	asked    []protocol.CheckRequest
 	execed   string
+	execArgv []string
 	execEnv  []string
 	sleeps   int
 	now      time.Time
@@ -39,6 +43,10 @@ type shimRig struct {
 	released []string
 	raised   os.Signal
 	pending  os.Signal // a signal that came during an ask
+	// composeAsk stands in for docker compose config.
+	composeAsk func(string, []string) ([]byte, error)
+	// composeDry stands in for docker compose --dry-run.
+	composeDry func(string, []string) ([]byte, error)
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -62,8 +70,8 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 	code = Run(Env{Args: argv, Stdout: io.Discard, Stderr: &errb,
 		Getenv:  func(string) string { return "" },
 		Environ: func() []string { return r.env },
-		exec: func(path string, _, env []string) error {
-			r.execed, r.execEnv = path, env
+		exec: func(path string, argv, env []string) error {
+			r.execed, r.execArgv, r.execEnv = path, argv, env
 			return r.execErr
 		},
 		release: func(_ config.Config, id string) error {
@@ -90,6 +98,18 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			return nil
 		},
 		raise: func(s os.Signal) { r.raised = s },
+		composeAsk: func(bin string, args []string) ([]byte, error) {
+			if r.composeAsk != nil {
+				return r.composeAsk(bin, args)
+			}
+			return nil, errors.New("no compose here")
+		},
+		composeDry: func(bin string, args []string) ([]byte, error) {
+			if r.composeDry != nil {
+				return r.composeDry(bin, args)
+			}
+			return nil, errors.New("no compose here")
+		},
 	})
 	return code, errb.String()
 }
@@ -306,7 +326,7 @@ func TestShimGateWaitInterrupted(t *testing.T) {
 // fit, one runs and the other is denied (R5, R10).
 func TestShimGateAgainstTheDaemon(t *testing.T) {
 	envMap, _ := serveDaemonWith(t, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	r.env = []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
@@ -353,7 +373,7 @@ func TestShimGateDebugNamesTheWorktree(t *testing.T) {
 // A call whose exec fails hands its lease back to the daemon.
 func TestShimGateReleaseAgainstTheDaemon(t *testing.T) {
 	envMap, d := serveDaemonWith(t, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
@@ -442,7 +462,7 @@ func (r tartReading) Apply(s *protocol.Snapshot) { s.Tart = &r.t }
 func TestShimGateMacOSSlotsAgainstTheDaemon(t *testing.T) {
 	tart := &fakeTart{vms: []protocol.TartVM{{Name: "a-mac", OS: "darwin"}, {Name: "b-mac", OS: "darwin"}}}
 	envMap, d := serveDaemonFrom(t, []daemon.Source{hostSource{}, tart}, func(d *daemon.Daemon) {
-		wireGate(d, config.Defaults("/x"), discardLog())
+		wireGate(d, config.Defaults("/x"), discardLog(), nil)
 	})
 	r := newShimRig(t)
 	tartHome := filepath.Join(r.dir, "tarthome")
@@ -521,5 +541,465 @@ func TestEnvOfReadsTheFirstOfDuplicates(t *testing.T) {
 	_, getenv := Env{Environ: func() []string { return []string{"A=1", "A=2"} }}.envOf()
 	if got := getenv("A"); got != "1" {
 		t.Fatalf("A = %q", got)
+	}
+}
+
+// An allowed run carries its lease, so the daemon tells its container from
+// one started past the shim (#33).
+func TestShimLabelsAllowedRuns(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	if code, stderr := r.run("docker", "run", "--rm", "alpine", "true"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	want := []string{"docker", "run", "--rm", "--label", protocol.LeaseLabel + "=lease-7", "alpine", "true"}
+	if !slices.Equal(r.execArgv, want) {
+		t.Fatalf("argv = %q, want %q", r.execArgv, want)
+	}
+	if !r.asked[0].Labelled {
+		t.Fatal("the check did not say the call is labelled")
+	}
+}
+
+func TestShimDoesNotLabelStart(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.run("docker", "start", "db")
+	if !slices.Equal(r.execArgv, []string{"docker", "start", "db"}) || r.asked[0].Labelled {
+		t.Fatalf("argv = %q, labelled %v", r.execArgv, r.asked[0].Labelled)
+	}
+}
+
+func TestDockerEndpointFollowsTheCLI(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{"DOCKER_CONFIG": dir}
+	get := func(k string) string { return env[k] }
+	context := func(name, host string) {
+		t.Helper()
+		sum := sha256.Sum256([]byte(name))
+		meta := filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"Name":"` + name + `","Endpoints":{"docker":{"Host":"` + host + `"}}}`
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	use := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"currentContext":"`+name+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///var/run/docker.sock" {
+		t.Fatalf("no config: %q, want Docker's default socket", got)
+	}
+	context("desktop-linux", "unix:///Users/dev/.docker/run/docker.sock")
+	use("desktop-linux")
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+		t.Fatalf("desktop-linux: %q", got)
+	}
+	use("missing")
+	if got := dockerEndpointIn(get, "", ""); got != "" {
+		t.Fatalf("a context with no metadata: %q, want unknown", got)
+	}
+	env["DOCKER_CONTEXT"] = "desktop-linux"
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+		t.Fatalf("DOCKER_CONTEXT: %q", got)
+	}
+	env["DOCKER_HOST"] = "unix:///x.sock"
+	if got := dockerEndpointIn(get, "", ""); got != "unix:///x.sock" {
+		t.Fatalf("DOCKER_HOST: %q", got)
+	}
+	// --context or -H on the call: before DOCKER_HOST, as the CLI takes it.
+	for endpoint, want := range map[string]string{
+		"desktop-linux":   "unix:///Users/dev/.docker/run/docker.sock",
+		"default":         "unix:///x.sock", // the default context is DOCKER_HOST
+		"unix:///y.sock":  "unix:///y.sock",
+		"tcp://host:2375": "tcp://host:2375",
+	} {
+		if got := dockerEndpointIn(get, "", endpoint); got != want {
+			t.Errorf("%s: %q, want %q", endpoint, got, want)
+		}
+	}
+}
+
+// docker --config DIR reads its context from DIR.
+func TestDockerEndpointHonoursConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	sum := sha256.Sum256([]byte("colima"))
+	meta := filepath.Join(dir, "contexts", "meta", hex.EncodeToString(sum[:]))
+	if err := os.MkdirAll(meta, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"unix:///c.sock"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"currentContext":"colima"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	get := func(k string) string {
+		if k == "HOME" {
+			return "/Users/dev"
+		}
+		return ""
+	}
+	if got := dockerEndpointIn(get, dir, ""); got != "unix:///c.sock" {
+		t.Fatalf("endpoint = %q", got)
+	}
+	c := shim.Parse("docker", []string{"--config", dir, "start", "x"})
+	if c.ConfigDir != dir {
+		t.Fatalf("ConfigDir = %q", c.ConfigDir)
+	}
+}
+
+// An unreadable config is the default context, as the docker CLI takes it
+// (it warns and goes on with defaults).
+func TestAnUnreadableDockerConfigIsTheDefaultContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil { // a directory: unreadable as a file
+		t.Fatal(err)
+	}
+	if got := dockerEndpointIn(func(string) string { return "" }, dir, ""); got != "unix:///var/run/docker.sock" {
+		t.Fatalf("endpoint = %q, want the default socket", got)
+	}
+}
+
+// A compose call's project is what Compose itself names it: docker compose
+// config, run with the call's own -f, --project-directory and --env-file,
+// in its own environment and directory. -p needs no asking.
+func TestComposeProjectAsksCompose(t *testing.T) {
+	var asked [][]string
+	ask := func(bin string, args []string) ([]byte, error) {
+		asked = append(asked, append([]string{bin}, args...))
+		return []byte(`{"name":"shop","services":{"web":{},"db":{}}}`), nil
+	}
+	call := []string{"compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "up", "-d"}
+	if got := composeProject("/usr/local/bin/docker", call, "", ask); got != "shop" {
+		t.Fatalf("project = %q", got)
+	}
+	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
+	if len(asked) != 1 || !slices.Equal(asked[0], want) {
+		t.Fatalf("asked %q, want %q", asked, want)
+	}
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, "p", ask); got != "p" || len(asked) != 1 {
+		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
+	}
+	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	if got := composeProject("/usr/local/bin/docker", []string{"compose", "up"}, "", failing); got != "" {
+		t.Fatalf("Compose could not say: %q, want no key", got)
+	}
+}
+
+// The real thing, when Docker Compose is here: it names a project from an
+// override file and an interpolated .env, as no reimplementation kept up.
+func TestComposeProjectFromRealCompose(t *testing.T) {
+	bin, err := exec.LookPath("docker")
+	if err != nil || exec.Command(bin, "compose", "version").Run() != nil {
+		t.Skip("no docker compose")
+	}
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("compose.yaml", "services:\n  web:\n    image: alpine\n")
+	write("compose.override.yaml", "name: ${STACK}-shop\n")
+	write(".env", "STACK=blue\n")
+	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
+	if got := composeProject(bin, []string{"compose", "up"}, "", ask); got != "blue-shop" {
+		t.Fatalf("project = %q, want blue-shop", got)
+	}
+}
+
+func TestComposeProjectForwardsDockersConfig(t *testing.T) {
+	var asked []string
+	ask := func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"x"}`), nil }
+	composeProject("/d", []string{"--config", "/work/.docker", "compose", "up"}, "", ask)
+	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
+// Compose's config is asked only when it must name the project: not for
+// -p, not for podman. Its dry run is asked for an up or restart.
+func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	asked, dry := 0, 0
+	r.composeAsk = func(string, []string) ([]byte, error) { asked++; return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+	r.run("docker", "compose", "-p", "shop", "run", "web")
+	if asked != 0 || dry != 0 || r.asked[0].Target != "shop" {
+		t.Fatalf("asked %d, dry %d, target %q", asked, dry, r.asked[0].Target)
+	}
+	r.run("docker", "compose", "up", "-d")
+	if asked != 2 || dry != 1 || r.asked[1].Target != "x" || !r.asked[1].Idle { // name, then providers
+		t.Fatalf("asked %d, dry %d, %+v", asked, dry, r.asked[1])
+	}
+	r.run("podman", "compose", "up", "-d")
+	if asked != 2 || dry != 1 {
+		t.Fatalf("podman: asked %d, dry %d", asked, dry)
+	}
+}
+
+// compose -f - reads its file from stdin, which the shim must not consume:
+// the project is what Compose names it then, COMPOSE_PROJECT_NAME or the
+// project directory's name (the working directory's).
+func TestComposeProjectOfStdin(t *testing.T) {
+	wd := func() (string, error) { return "/Users/dev/src/My_App", nil }
+	none := func(string) string { return "" }
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, none, wd); got != "my_app" {
+		t.Fatalf("project = %q, want my_app", got)
+	}
+	env := func(k string) string {
+		if k == "COMPOSE_PROJECT_NAME" {
+			return "Piped"
+		}
+		return ""
+	}
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, env, wd); got != "piped" {
+		t.Fatalf("project = %q, want piped", got)
+	}
+	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}, ComposeProjectDir: "/srv/_api"}, none, wd); got != "api" {
+		t.Fatalf("project = %q, want api", got)
+	}
+}
+
+// Compose's dry run decides: an up is idle only when every container it
+// names already runs.
+func TestComposeIdleIsComposesOwnPlan(t *testing.T) {
+	for out, want := range map[string]bool{
+		" Container app-db-1 Running \n Container app-web-1 Running \n": true,
+		// depends_on service_healthy, or --wait: waiting starts nothing.
+		" Container app-db-1 Running \n Container app-web-1 Running \n Container app-db-1 Waiting \n Container app-db-1 Healthy \n": true,
+		// Older Compose v2 prefixes its plain lines; a tty one colours them.
+		"DRY-RUN MODE -  Container app-db-1 Running \n":                                          true,
+		"\x1b[32m\u2714\x1b[0m Container app-db-1 \x1b[32mRunning\x1b[0m\n":                      true,
+		"DRY-RUN MODE -  Container app-db-1 Starting \n":                                         false,
+		" Container app-db-1 Running \n Container app-web-1 Recreate \n":                         false,
+		" Network app_default Created \n Container app-db-1 Creating \n":                         false,
+		" Container app-db-1 Restarting \n Container app-db-1 Started \n":                        false,
+		" Image busybox Pulling \n Container app-db-1 Running \n Container app-db-2 Starting \n": false,
+		"":                   false,
+		"no such service: x": false,
+	} {
+		dry := func(_ string, args []string) ([]byte, error) {
+			if !slices.Contains(args, "--dry-run") {
+				t.Fatalf("args %q", args)
+			}
+			return []byte(out), nil
+		}
+		if got := composeIdle("/d", []string{"compose", "up", "-d"}, dry); got != want {
+			t.Errorf("%q: idle = %v, want %v", out, got, want)
+		}
+	}
+	failing := func(string, []string) ([]byte, error) {
+		return []byte(" Container a Running \n"), errors.New("exit status 1")
+	}
+	if composeIdle("/d", []string{"compose", "up"}, failing) {
+		t.Fatal("a failed dry run says nothing")
+	}
+}
+
+// BUDGET_WAIT: each ask asks Compose again. A stack that stopped during the
+// wait is no idle up.
+func TestAWaitingComposeUpAsksComposeEachTime(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "BUDGET_WAIT=1")
+	plans := []string{" Container x-a-1 Running \n", " Container x-a-1 Starting \n"}
+	r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { p := plans[0]; plans = plans[1:]; return []byte(p), nil }
+	n := 0
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		if n++; n < 2 {
+			return &protocol.Decision{Retry: true, Message: "headroom: not starting it: memory pressure",
+				Reasons: []protocol.Reason{{Code: "pressure", Text: "memory pressure", Retry: true}}}, nil
+		}
+		return allow(protocol.CheckRequest{})
+	}
+	r.run("docker", "compose", "up", "-d")
+	if len(r.asked) != 2 || !r.asked[0].Idle || r.asked[1].Idle {
+		t.Fatalf("asked %+v: want idle, then not", r.asked)
+	}
+}
+
+// A project with model providers is never dry-run: Compose's dry run stubs
+// the Docker API but runs a provider for real.
+func TestComposeWithProvidersIsNotDryRun(t *testing.T) {
+	for _, cfg := range []string{
+		`{"name":"x","services":{"llm":{"provider":{"type":"model"}}}}`,
+		`{"name":"x","services":{"app":{"models":["llm"]}},"models":{"llm":{"model":"ai/smollm2"}}}`,
+		`{"name":"x","models":{"llm":{"model":"ai/smollm2"}}}`,
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(cfg), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run("docker", "compose", "-p", "x", "up", "-d")
+		if dry != 0 || r.asked[0].Idle || r.asked[0].Target != "x" {
+			t.Errorf("%s: dry run %d times, %+v", cfg, dry, r.asked[0])
+		}
+	}
+}
+
+// An attached up's dry run stops before Compose would start anything
+// ("interactive run is not supported in dry-run mode"), and a restart's
+// lists every container: only a detached up is dry-run.
+func TestAnAttachedUpIsNotDryRun(t *testing.T) {
+	for args, want := range map[string]int{"up": 0, "up --abort-on-container-exit": 0, "up -d": 1, "up --wait": 1, "restart": 0} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run(append([]string{"docker", "compose"}, strings.Fields(args)...)...)
+		if dry != want {
+			t.Errorf("%s: dry run %d times, want %d", args, dry, want)
+		}
+	}
+}
+
+// The config the shim reads for a dry run is the call's own project: its
+// global flags (-p, -f, --env-file, --config) as given, which Compose
+// interpolates (include: ${COMPOSE_PROJECT_NAME}.yml).
+func TestComposeConfigIsTheCallsOwnProject(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	var asked []string
+	r.composeAsk = func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"evil"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { return []byte(" Container evil-a-1 Running \n"), nil }
+	r.run("docker", "--config", "/work/.docker", "compose", "-p", "evil", "-f", "c.yml", "up", "-d", "web")
+	want := []string{"--config", "/work/.docker", "compose", "-p", "evil", "-f", "c.yml", "--profile", "*", "config", "--format", "json"}
+	if !slices.Equal(asked, want) {
+		t.Fatalf("config asked with %q, want %q", asked, want)
+	}
+}
+
+// A pull or build the dry run does not do may recreate: no dry run.
+func TestAPullOrBuildIsNotDryRun(t *testing.T) {
+	for _, tc := range []struct {
+		args, cfg string
+	}{
+		{"up -d --pull always", `{"name":"x"}`},
+		{"up -d --pull=always", `{"name":"x"}`},
+		{"up -d --build", `{"name":"x"}`},
+		{"up -d --build=true", `{"name":"x"}`},
+		{"up -d --build=1", `{"name":"x"}`},
+		{"up -d --build=T", `{"name":"x"}`},
+		{"up -d --build=yes", `{"name":"x"}`}, // Compose rejects it: unsure
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"always"}}}`},
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"daily"}}}`},
+		{"up -d", `{"name":"x","services":{"a":{"pull_policy":"build"}}}`},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dry := 0
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(tc.cfg), nil }
+		r.composeDry = func(string, []string) ([]byte, error) { dry++; return []byte(" Container x-a-1 Running \n"), nil }
+		r.run(append([]string{"docker", "compose"}, strings.Fields(tc.args)...)...)
+		if dry != 0 || r.asked[0].Idle {
+			t.Errorf("%s %s: dry run %d times, idle %v", tc.args, tc.cfg, dry, r.asked[0].Idle)
+		}
+	}
+}
+
+// --build=false builds nothing: the dry run tells.
+func TestBuildFalseIsDryRun(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { return []byte(" Container x-a-1 Running \n"), nil }
+	r.run("docker", "compose", "up", "-d", "--build=false")
+	if !r.asked[0].Idle {
+		t.Fatalf("%+v", r.asked[0])
+	}
+}
+
+// A failing all-profiles config costs the name nothing: it comes from the
+// call's own profiles.
+func TestTheNameDoesNotNeedEveryProfile(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	r.composeAsk = func(_ string, args []string) ([]byte, error) {
+		if slices.Contains(args, "*") {
+			return nil, errors.New("env file ./prod.env not found")
+		}
+		return []byte(`{"name":"shop"}`), nil
+	}
+	r.run("docker", "compose", "up", "-d")
+	if r.asked[0].Target != "shop" || r.asked[0].Idle {
+		t.Fatalf("%+v", r.asked[0])
+	}
+}
+
+// The lease label is headroom's: a call that sets it could pass another
+// worktree's lease off as its own (past an unknown flag, the shim's label
+// goes first, and a later one wins).
+func TestARunThatSetsTheLeaseLabelIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--new-flag", "x", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"create", "-l=dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "--label", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "--label=dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-dl", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-ldev.headroom.lease=lease-abc-7", "alpine"},
+		{"create", "-ql", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-tqdl", "dev.headroom.lease=lease-abc-7", "alpine"},
+		{"run", "-Zl", "dev.headroom.lease=lease-abc-7", "alpine"}, // a shorthand the table lacks
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		code, stderr := r.run(append([]string{"docker"}, args...)...)
+		if code != exitDenied || r.execed != "" || len(r.asked) != 0 || !strings.Contains(stderr, "dev.headroom.lease") {
+			t.Errorf("%q: code %d, execed %q, asked %d, stderr %q", args, code, r.execed, len(r.asked), stderr)
+		}
+	}
+}
+
+// Only a label is refused: the string elsewhere sets none.
+func TestTheLeaseLabelNameElsewhereIsAllowed(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--rm", "alpine", "grep", "dev.headroom.lease", "/x"},
+		{"run", "-e", "NOTE=dev.headroom.lease", "alpine"},
+		{"run", "-el", "dev.headroom.lease", "alpine"}, // -e's value is "l"
+		{"run", "--label", "note=x", "alpine", "echo", "dev.headroom.lease"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 || r.execed == "" {
+			t.Errorf("%q: code %d, stderr %q", args, code, stderr)
+		}
+	}
+}
+
+// A context whose engine is remote: its memory is not this Mac's, so the
+// call is not asked about, as with -H tcp://….
+func TestARemoteContextIsNotGated(t *testing.T) {
+	for _, args := range [][]string{
+		{"--context", "builder", "run", "alpine"},
+		{"run", "alpine"}, // currentContext
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		sum := sha256.Sum256([]byte("builder"))
+		meta := filepath.Join(r.dir, "dc", "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"tcp://build.example:2376"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(r.dir, "dc", "config.json"), []byte(`{"currentContext":"builder"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"))
+		if code, _ := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
+			t.Errorf("%q: code %d, asked %d, execed %q", args, code, len(r.asked), r.execed)
+		}
 	}
 }

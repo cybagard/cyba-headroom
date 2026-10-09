@@ -187,7 +187,7 @@ func (d *Daemon) Tick(ctx context.Context) {
 			s.status.Stale = true
 		default:
 			s.last = res.r
-			s.status = protocol.SourceStatus{At: d.now(), Took: res.took}
+			s.status = protocol.SourceStatus{At: d.now(), Took: res.took, Began: start}
 		}
 		if s.last != nil {
 			s.last.Apply(next)

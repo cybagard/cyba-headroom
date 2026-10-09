@@ -243,12 +243,22 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// worktree's open lease holds or waits for (docker stop && docker
 	// start): that lease still covers them, and its worktree is charged for
 	// them. A manual call's lease is charged nothing, so it covers nothing.
+	// The leases that cover them wait for them again, but only once this
+	// start is allowed (renew): a denied one, or a BUDGET_WAIT polling it,
+	// must not keep them open.
+	var covering []*entry
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
-		return t.Running || b.covered(t.ID, now)
+		if t.Running {
+			return true
+		}
+		cs := b.covered(t.ID)
+		covering = append(covering, cs...)
+		return len(cs) > 0
 	})
 	if known && len(starts) == 0 {
 		// Allowed, and no new lease. Not when others went unresolved:
 		// they are no lease's.
+		b.renew(covering, now)
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
 	// The project's running services in the caller's worktree: a compose
@@ -314,6 +324,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if !d.Allow {
 		return d
 	}
+	b.renew(covering, now)
 	if s != nil && b.latest == nil {
 		// Before the first Observe, the check's own reading is the
 		// baseline, of each source it has one of.
@@ -910,20 +921,27 @@ func kindOf(key string) string {
 	return "container"
 }
 
-// covered reports whether a worktree's open lease holds container id, or
+// covered returns each worktree's open lease that holds container id, or
 // waits for it: two docker start db at once, the first's lease covers it.
-// Not one it holds (entry.held): it reserves nothing for that one. The
-// lease that covers it waits for it again: its timeout starts afresh.
-func (b *Book) covered(id string, now time.Time) bool {
+// Not one that holds it as entry.held: it reserves nothing for that one.
+// It renews none of them: Check does, once the start is allowed (renew).
+func (b *Book) covered(id string) []*entry {
 	k := "container:" + id
-	found := false
+	var out []*entry
 	for _, e := range b.open {
 		if e.Worktree != "" && (e.bound[k] && !e.held[k] || slices.Contains(e.containerIDs, id)) {
-			found = true
-			e.Expires = later(e.Expires, now.Add(b.timeout))
+			out = append(out, e)
 		}
 	}
-	return found
+	return out
+}
+
+// renew starts the timeout of each lease that covers an allowed start
+// afresh: it waits for that container again.
+func (b *Book) renew(covering []*entry, now time.Time) {
+	for _, e := range covering {
+		e.Expires = later(e.Expires, now.Add(b.timeout))
+	}
 }
 
 func later(a, b time.Time) time.Time {

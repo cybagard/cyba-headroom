@@ -646,3 +646,90 @@ func TestATartLeaseBindsAVMRunByAWrapper(t *testing.T) {
 		t.Fatalf("the wrapped VM did not settle its lease: %+v", d)
 	}
 }
+
+// coveredDB is a book whose w1 run lease (2 GiB, timeout at t0+2m) holds db,
+// stopped since: a start of db is covered by it.
+func coveredDB(t *testing.T) (*lease.Book, *clock, *protocol.Snapshot, string) {
+	t.Helper()
+	b, c, _ := book(t)
+	b.Observe(snap())
+	run := b.Check(req("w1", 2*gib), snap(), cfg)
+	s := withRun(snap(), "db", "w1", gib/8, run.LeaseID)
+	b.Observe(s)
+	return b, c, s, run.LeaseID
+}
+
+// expiry is when lease id times out, or the zero time when it is not open.
+func expiry(b *lease.Book, id string) time.Time {
+	for _, l := range b.List() {
+		if l.ID == id {
+			return l.Expires
+		}
+	}
+	return time.Time{}
+}
+
+// docker start db big: db is covered, big does not fit.
+func startDBAndBig() policy.Request {
+	return policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db big", CostBytes: 7 * gib,
+		Target: "db", ContainerID: "db", Others: []policy.Start{{ID: "big"}}}
+}
+
+// A denied start renews no lease, even one that covers part of it (#88).
+func TestADeniedStartDoesNotRenewTheLeaseThatCoversIt(t *testing.T) {
+	b, c, s, id := coveredDB(t)
+	c.t = t0.Add(time.Minute)
+	if d := b.Check(startDBAndBig(), s, cfg); d.Allow {
+		t.Fatalf("start of db big: %+v, want a denial", d)
+	}
+	if got, want := expiry(b, id), t0.Add(2*time.Minute); !got.Equal(want) {
+		t.Fatalf("the covering lease expires at %v, want %v", got, want)
+	}
+}
+
+// A BUDGET_WAIT polls the same denied start: the lease that covers part of
+// it still ends at its own timeout (#88).
+func TestPollingADeniedStartLetsTheCoveringLeaseExpire(t *testing.T) {
+	b, c, s, id := coveredDB(t)
+	for c.t = t0.Add(30 * time.Second); c.t.Before(t0.Add(2 * time.Minute)); c.t = c.t.Add(30 * time.Second) {
+		if d := b.Check(startDBAndBig(), s, cfg); d.Allow {
+			t.Fatalf("poll at %v: %+v, want a denial", c.t, d)
+		}
+		if got, want := expiry(b, id), t0.Add(2*time.Minute); !got.Equal(want) {
+			t.Fatalf("poll at %v: the covering lease expires at %v, want %v", c.t, got, want)
+		}
+	}
+	c.t = t0.Add(2*time.Minute + time.Second)
+	b.Observe(s)
+	if got := expiry(b, id); !got.IsZero() {
+		t.Fatalf("the covering lease is open past its timeout, until %v", got)
+	}
+}
+
+// An allowed start renews the lease that covers it, on either way it is
+// allowed: the lease waits for that container again.
+func TestAnAllowedStartRenewsTheLeaseThatCoversIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    policy.Request
+	}{
+		// Its lease holds it: allowed with no new lease.
+		{"covered", policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", CostBytes: gib,
+			Target: "db", ContainerID: "db"}},
+		// db is covered, small fits: allowed with a lease for small.
+		{"decided", policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db small", CostBytes: gib,
+			Target: "db", ContainerID: "db", Others: []policy.Start{{ID: "small"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c, s, id := coveredDB(t)
+			c.t = t0.Add(time.Minute)
+			d := b.Check(tc.r, s, cfg)
+			if !d.Allow || (d.LeaseID == "") != (tc.name == "covered") {
+				t.Fatalf("%s: %+v", tc.r.Command, d)
+			}
+			if got, want := expiry(b, id), t0.Add(3*time.Minute); !got.Equal(want) {
+				t.Fatalf("the covering lease expires at %v, want %v", got, want)
+			}
+		})
+	}
+}

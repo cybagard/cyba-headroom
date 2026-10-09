@@ -459,7 +459,8 @@ func absIn(dir, p string) string {
 // expandUser is env file path p with a leading ~ replaced by home, as
 // docker/compose's normalizeProjectOptions expands each --env-file
 // (cmd/compose/compose.go, e11dce5) with compose-go's paths.ExpandUser
-// (paths/home.go, 32d8d5d): any p starting with ~, ~user too, is home
+// (paths/home.go, 32d8d5d) for the project load, after setEnvWithDotEnv
+// has read it unexpanded: any p starting with ~, ~user too, is home
 // joined with the rest; without a HOME, p is kept.
 func expandUser(p, home string) string {
 	if !strings.HasPrefix(p, "~") || home == "" {
@@ -593,9 +594,12 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 // composeEnvFileProject is COMPOSE_PROJECT_NAME as the env files Compose
 // loads set it (#85), read within left; ok is false when none sets it to a
 // value the shim can know, or the time ran out. The files: the call's
-// --env-files, else COMPOSE_ENV_FILES (comma-separated), a leading ~ the
-// home directory (expandUser), relative to the working directory cwd, a
-// later one winning; else .env in each of dirs,
+// --env-files, else COMPOSE_ENV_FILES (comma-separated), relative to the
+// working directory cwd, a later one winning, read twice when one starts
+// with ~: first as they are (setEnvWithDotEnv, so a ~ is a directory in
+// cwd), then with a leading ~ the home directory (normalizeProjectOptions,
+// expandUser), the first read's name winning, as setEnvWithDotEnv puts it
+// in the process environment; else .env in each of dirs,
 // the first that sets it winning, unless COMPOSE_DISABLE_ENV_FILE is true.
 // A file Compose fails on (envFileValue's error) leaves the name unknown,
 // whatever the others set: an --env-file that does not exist or is a
@@ -622,24 +626,29 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 	if len(files) == 0 {
 		files = strings.FieldsFunc(getenv("COMPOSE_ENV_FILES"), func(r rune) bool { return r == ',' })
 	}
+	var pre []string // the files setEnvWithDotEnv reads, when not files
 	if len(files) > 0 {
 		dirs = nil
-		files = slices.Clone(files)
+		pre, files = slices.Clone(files), slices.Clone(files)
 		for i, f := range files {
-			files[i] = absIn(cwd, expandUser(f, getenv("HOME")))
+			pre[i], files[i] = absIn(cwd, f), absIn(cwd, expandUser(f, getenv("HOME")))
+		}
+		if slices.Equal(pre, files) {
+			pre = nil
 		}
 	} else if off, _ := strconv.ParseBool(getenv("COMPOSE_DISABLE_ENV_FILE")); off {
 		return "", false
 	}
 	found, done := within(left, func() (name string) {
-		// The --env-files: the last that sets it.
-		for _, f := range files {
+		// The --env-files: the last that sets it, pre's beating files'.
+		preSet := false
+		for i, f := range slices.Concat(pre, files) {
 			v, set, err := envFileValue(f, "COMPOSE_PROJECT_NAME")
 			if err != nil {
 				return ""
 			}
-			if set {
-				name = v
+			if set && (i < len(pre) || !preSet) {
+				name, preSet = v, i < len(pre)
 			}
 		}
 		// The .env files: the first that sets it.

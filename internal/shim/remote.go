@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // Remote reports whether a container call goes to an engine on another
@@ -34,6 +35,9 @@ func Remote(name, endpoint string, getenv func(string) string) bool {
 
 // lookupIP resolves a host name; a test replaces it.
 var lookupIP = net.DefaultResolver.LookupIPAddr
+
+// resolveTimeout bounds how long a call waits for lookupIP.
+const resolveTimeout = 200 * time.Millisecond
 
 // ownAddress reports whether ip is one of this machine's interface addresses.
 func ownAddress(ip net.IP) bool {
@@ -72,9 +76,11 @@ func thisMac(host string, tcp bool) bool {
 	if !tcp {
 		return false
 	}
-	addrs, err := lookupIP(context.Background(), host)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	defer cancel()
+	addrs, err := lookupIP(ctx, host)
 	if err != nil {
-		return false
+		return true // gated, rather than a local call skipped as remote
 	}
 	for _, a := range addrs {
 		if ownIP(a.IP) {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemote(t *testing.T) {
@@ -109,5 +110,30 @@ func TestARemoteTCPHostStaysRemote(t *testing.T) {
 		if !Remote("docker", endpoint, func(string) string { return "" }) {
 			t.Errorf("Remote(docker, %q) = false, want remote", endpoint)
 		}
+	}
+}
+
+// A tcp host that does not resolve, or not in time, is this Mac's: the
+// shim gates it rather than skip a local call, and waits about 200 ms
+// for a slow resolver (#118).
+func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
+	resolving(t, nil)
+	if Remote("docker", "tcp://no-such-box:2375", func(string) string { return "" }) {
+		t.Error("an unresolved host is remote, want this Mac's")
+	}
+	lookupIP = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return []net.IPAddr{{IP: net.ParseIP("203.0.113.7")}}, nil
+		}
+	}
+	start := time.Now()
+	if Remote("docker", "tcp://slow-box:2375", func(string) string { return "" }) {
+		t.Error("a host that resolves too late is remote, want this Mac's")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the shim waited %v for the resolver, want about 200ms", took)
 	}
 }

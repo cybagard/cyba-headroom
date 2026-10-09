@@ -592,35 +592,35 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := dockerEndpointIn(get, "", ""); got != "unix:///var/run/docker.sock" {
+	if got := dockerEndpointIn(get, shim.Call{}); got != "unix:///var/run/docker.sock" {
 		t.Fatalf("no config: %q, want Docker's default socket", got)
 	}
 	context("desktop-linux", "unix:///Users/dev/.docker/run/docker.sock")
 	use("desktop-linux")
-	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, shim.Call{}); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("desktop-linux: %q", got)
 	}
 	use("missing")
-	if got := dockerEndpointIn(get, "", ""); got != "" {
+	if got := dockerEndpointIn(get, shim.Call{}); got != "" {
 		t.Fatalf("a context with no metadata: %q, want unknown", got)
 	}
 	env["DOCKER_CONTEXT"] = "desktop-linux"
-	if got := dockerEndpointIn(get, "", ""); got != "unix:///Users/dev/.docker/run/docker.sock" {
+	if got := dockerEndpointIn(get, shim.Call{}); got != "unix:///Users/dev/.docker/run/docker.sock" {
 		t.Fatalf("DOCKER_CONTEXT: %q", got)
 	}
 	env["DOCKER_HOST"] = "unix:///x.sock"
-	if got := dockerEndpointIn(get, "", ""); got != "unix:///x.sock" {
+	if got := dockerEndpointIn(get, shim.Call{}); got != "unix:///x.sock" {
 		t.Fatalf("DOCKER_HOST: %q", got)
 	}
 	// --context or -H on the call: before DOCKER_HOST, as the CLI takes it.
-	for endpoint, want := range map[string]string{
-		"desktop-linux":   "unix:///Users/dev/.docker/run/docker.sock",
-		"default":         "unix:///x.sock", // the default context is DOCKER_HOST
-		"unix:///y.sock":  "unix:///y.sock",
-		"tcp://host:2375": "tcp://host:2375",
+	for flags, want := range map[string]string{
+		"--context desktop-linux": "unix:///Users/dev/.docker/run/docker.sock",
+		"--context default":       "unix:///x.sock", // the default context is DOCKER_HOST
+		"-H unix:///y.sock":       "unix:///y.sock",
+		"-H tcp://host:2375":      "tcp://host:2375",
 	} {
-		if got := dockerEndpointIn(get, "", endpoint); got != want {
-			t.Errorf("%s: %q, want %q", endpoint, got, want)
+		if got := dockerEndpointIn(get, shim.Parse("docker", strings.Fields(flags+" run alpine"))); got != want {
+			t.Errorf("%s: %q, want %q", flags, got, want)
 		}
 	}
 }
@@ -635,7 +635,7 @@ func TestABareHostIsTCP(t *testing.T) {
 		"localhost:2375":     "tcp://localhost:2375",
 		"build.example:2376": "tcp://build.example:2376",
 	} {
-		if got := dockerEndpointIn(get, "", endpoint); got != want {
+		if got := dockerEndpointIn(get, shim.Call{Host: endpoint, HasHost: true}); got != want {
 			t.Errorf("-H %s: %q, want %q", endpoint, got, want)
 		}
 	}
@@ -661,7 +661,7 @@ func TestDockerEndpointHonoursConfigDir(t *testing.T) {
 		}
 		return ""
 	}
-	if got := dockerEndpointIn(get, dir, ""); got != "unix:///c.sock" {
+	if got := dockerEndpointIn(get, shim.Call{ConfigDir: dir}); got != "unix:///c.sock" {
 		t.Fatalf("endpoint = %q", got)
 	}
 	c := shim.Parse("docker", []string{"--config", dir, "start", "x"})
@@ -677,7 +677,7 @@ func TestAnUnreadableDockerConfigIsTheDefaultContext(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil { // a directory: unreadable as a file
 		t.Fatal(err)
 	}
-	if got := dockerEndpointIn(func(string) string { return "" }, dir, ""); got != "unix:///var/run/docker.sock" {
+	if got := dockerEndpointIn(func(string) string { return "" }, shim.Call{ConfigDir: dir}); got != "unix:///var/run/docker.sock" {
 		t.Fatalf("endpoint = %q, want the default socket", got)
 	}
 }
@@ -1113,5 +1113,80 @@ func TestARemoteContextMaySetTheLeaseLabel(t *testing.T) {
 		if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
 			t.Errorf("%q: code %d, asked %d, execed %q, stderr %q", args, code, len(r.asked), r.execed, stderr)
 		}
+	}
+}
+
+// -H "" is the default socket, as the docker CLI reads it (ParseHost in
+// docker/cli's opts/hosts.go trims it and takes DefaultHost), not
+// DOCKER_HOST: the call is asked about, and its lease label refused.
+func TestAnEmptyHostIsThisMacs(t *testing.T) {
+	for _, args := range [][]string{
+		{"-H", "", "run", "alpine"},
+		{"-H=", "run", "-l", "dev.headroom.lease=x", "alpine"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"), "DOCKER_HOST=ssh://dev@build.example")
+		code, _ := r.run(append([]string{"docker"}, args...)...)
+		if labelled := slices.Contains(args, "-l"); labelled && code != exitDenied || !labelled && len(r.asked) != 1 {
+			t.Errorf("%q: code %d, asked %d, want gated", args, code, len(r.asked))
+		}
+	}
+}
+
+// A bare -H name is tcp://name:2375, as the docker CLI dials it
+// (parseDockerDaemonHost and ParseTCPAddr in docker/cli's opts/hosts.go),
+// never a context of that name.
+func TestABareHostNameIsTCP(t *testing.T) {
+	for _, c := range []struct {
+		args  []string
+		gated bool
+	}{
+		{[]string{"-H", "localhost", "run", "-l", "dev.headroom.lease=x", "alpine"}, true},
+		{[]string{"-H", "build.example", "run", "alpine"}, false},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dc := filepath.Join(r.dir, "dc")
+		for _, ctx := range []string{"localhost", "build.example"} {
+			sum := sha256.Sum256([]byte(ctx))
+			meta := filepath.Join(dc, "contexts", "meta", hex.EncodeToString(sum[:]))
+			if err := os.MkdirAll(meta, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			host := map[string]string{"localhost": "ssh://dev@build.example", "build.example": "unix:///var/run/docker.sock"}[ctx]
+			if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"`+host+`"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+dc)
+		code, _ := r.run(append([]string{"docker"}, c.args...)...)
+		if gated := code == exitDenied || len(r.asked) == 1; gated != c.gated {
+			t.Errorf("%q: code %d, asked %d, want gated %v", c.args, code, len(r.asked), c.gated)
+		}
+	}
+	if got := dockerEndpointIn(func(string) string { return "" }, shim.Parse("docker", []string{"-H", "build.example", "run", "alpine"})); got != "tcp://build.example:2375" {
+		t.Errorf("-H build.example: %q, want tcp://build.example:2375", got)
+	}
+}
+
+// docker --config DIR --context X compose reads X from DIR, as Compose
+// does: it runs as a docker CLI plugin, under the CLI's global options.
+func TestComposeReadsItsContextFromTheCallsConfig(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	for dir, host := range map[string]string{"a": "ssh://dev@build.example", "b": "unix:///var/run/docker.sock"} {
+		sum := sha256.Sum256([]byte("foo"))
+		meta := filepath.Join(r.dir, dir, "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"`+host+`"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "a"))
+	if code, _ := r.run("docker", "--config", filepath.Join(r.dir, "b"), "--context", "foo", "compose", "-p", "proj", "up"); code != 0 || len(r.asked) != 1 {
+		t.Errorf("code %d, asked %d, want gated", code, len(r.asked))
 	}
 }

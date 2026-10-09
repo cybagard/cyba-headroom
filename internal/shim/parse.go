@@ -46,10 +46,14 @@ type Call struct {
 	Name string
 	// MemoryBytes is the memory limit given with -m/--memory; 0 if none.
 	MemoryBytes uint64
-	// Endpoint is the engine chosen with --context, -H/--host,
-	// -c/--connection or --url; "" for the default. A remote engine's
-	// memory is not this Mac's. It is raw: it may hold a user name.
-	Endpoint string
+	// Host is the engine given with -H/--host or --url, and HasHost whether
+	// one was: docker reads -H "" as its default socket, not DOCKER_HOST.
+	// Context is the one named with --context or -c/--connection. A remote
+	// engine's memory is not this Mac's. Both are raw: they may hold a user
+	// name.
+	Host    string
+	HasHost bool
+	Context string
 }
 
 // Parse tells what the call name args (argv[1:]) would start. It is pure and
@@ -74,8 +78,10 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	version := false
 	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
-		case "--context", "-H", "--host", "-c", "--connection", "--url":
-			c.Endpoint = v
+		case "-H", "--host", "--url":
+			c.Host, c.HasHost = v, true
+		case "--context", "-c", "--connection":
+			c.Context = v
 		case "--config":
 			c.ConfigDir = v
 		case "-v":
@@ -104,7 +110,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		if len(words) > 1 {
 			return Call{}, -1
 		}
-		return parseCompose(c.Endpoint, append(words, "compose"), args[1:]), opAt + 1
+		return parseCompose(c, append(words, "compose"), args[1:]), opAt + 1
 	default:
 		return Call{}, -1
 	}
@@ -251,7 +257,9 @@ func ComposeConfig(args []string, all bool) (out []string, ok bool) {
 	return append(out, "config", "--format", "json"), true
 }
 
-func parseCompose(endpoint string, words, args []string) Call {
+// parseCompose parses a compose call; engine holds the docker call's global
+// options, which Compose, a CLI plugin, runs under.
+func parseCompose(engine Call, words, args []string) Call {
 	var project, projectDir string
 	var files, envFiles []string
 	dryRun, noUp, detached := false, false, false
@@ -312,7 +320,8 @@ func parseCompose(endpoint string, words, args []string) Call {
 		return Call{} // starts nothing
 	}
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, ComposeDetached: detached, Endpoint: endpoint}
+		ComposeEnvFiles: envFiles, ComposeDetached: detached,
+		ConfigDir: engine.ConfigDir, Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context}
 	return c.named(append(words, op))
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -115,14 +116,14 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	// or the call's labels matter. Docker's is its CLI's (#90); an unknown
 	// one ("") is this Mac's, never DOCKER_HOST, which the CLI ignores when
 	// the call names a context.
-	engine, remote := c.Endpoint, false
+	engine, remote := "", false
 	switch {
 	case c.Kind == "tart":
 	case name == "docker":
-		engine = dockerEndpointIn(getenv, c.ConfigDir, c.Endpoint)
+		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote(name, engine, getenv)
 	default:
-		remote = shim.Remote(name, c.Endpoint, getenv)
+		remote = shim.Remote(name, cmp.Or(c.Host, c.Context), getenv)
 	}
 	if remote {
 		return gated{proceed: true}
@@ -454,25 +455,32 @@ func askComposeDry(bin string, args, env []string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// dockerEndpointIn is the endpoint the docker CLI talks to: the call's
-// own -H (a bare host:port is TCP), or its --context's; else DOCKER_HOST,
+// dockerEndpointIn is the endpoint the docker CLI talks to for call c: its
+// own -H (trimmed; "" is the default socket, and one with no scheme is TCP,
+// on port 2375 if it names none), or its --context's; else DOCKER_HOST,
 // else the context's (DOCKER_CONTEXT, else currentContext in the config at
-// configDir, from --config, else DOCKER_CONFIG, else ~/.docker), else
+// c.ConfigDir, from --config, else DOCKER_CONFIG, else ~/.docker), else
 // Docker's default socket. That is the CLI's order: resolveContextName in
-// docker/cli's cli/command/cli.go, and parseDockerDaemonHost in its
-// opts/hosts.go for -H. "" (unknown) when the context cannot be read, or
-// the config directory is relative.
-func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) string {
-	if strings.Contains(endpoint, "://") {
-		return endpoint // -H
+// docker/cli's cli/command/cli.go, and ParseHost, parseDockerDaemonHost and
+// ParseTCPAddr in its opts/hosts.go for -H. "" (unknown) when the context
+// cannot be read, or the config directory is relative.
+func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
+	if c.HasHost {
+		h := strings.TrimSpace(c.Host)
+		switch {
+		case h == "":
+			return "unix:///var/run/docker.sock"
+		case strings.Contains(h, "://"):
+			return h
+		case !strings.Contains(h, ":"):
+			h += ":2375"
+		}
+		return "tcp://" + h
 	}
-	if strings.Contains(endpoint, ":") {
-		return "tcp://" + endpoint // -H host:port: a context name has no ':'
-	}
-	if h := getenv("DOCKER_HOST"); h != "" && endpoint == "" {
+	if h := getenv("DOCKER_HOST"); h != "" && c.Context == "" {
 		return h
 	}
-	dir := configDir
+	dir := c.ConfigDir
 	if dir == "" {
 		dir = getenv("DOCKER_CONFIG")
 	}
@@ -482,7 +490,7 @@ func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) st
 	if !filepath.IsAbs(dir) {
 		return ""
 	}
-	name := endpoint // --context
+	name := c.Context
 	if name == "" {
 		name = getenv("DOCKER_CONTEXT")
 	}

@@ -821,6 +821,7 @@ func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
 		{"the first -f file's directory's .env", []string{"compose", "-f", "web/compose.yaml", "up"}, nil, "", "from-web"},
 		{"COMPOSE_FILE's directory's .env", []string{"compose", "up"}, map[string]string{"COMPOSE_FILE": "web/compose.yaml"}, "", "from-web"},
 		{"--env-file, relative to the working directory", []string{"compose", "--project-directory", "plain", "--env-file", "x.env", "up"}, nil, "", "from-x"},
+		{"a missing --env-file: unknown", []string{"compose", "--project-directory", "plain", "--env-file", "x.env", "--env-file", "missing.env", "up"}, nil, "", "plain"},
 		{"the found compose file's .env", []string{"compose", "up"}, nil, "stack/deeper", "from-stack"},
 		{"the working directory's .env before the found one's", []string{"compose", "up"}, nil, "stack/own", "from-own"},
 		// The first .env that sets it wins, even to a name the shim cannot know.
@@ -1070,6 +1071,26 @@ func TestComposeProjectOfStdin(t *testing.T) {
 	}
 }
 
+// compose -f - with no working directory: the project directory is still
+// known when Compose's GetWorkingDir needs none, an absolute
+// --project-directory or first -f file.
+func TestComposeProjectOfStdinWithoutAWorkingDirectory(t *testing.T) {
+	wd := func() (string, error) { return "", errors.New("getwd: no such file or directory") }
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"compose", "--project-directory", "/srv/_api", "-f", "-", "up", "-d"}, "api"},
+		{[]string{"compose", "-f", "-", "-f", "/srv/web/base.yml", "up", "-d"}, "web"},
+		{[]string{"compose", "--project-directory", "api", "-f", "-", "up", "-d"}, ""},
+		{[]string{"compose", "-f", "-", "up", "-d"}, ""},
+	} {
+		if got := composeStdinProject(shim.Parse("docker", tc.args), noEnv, wd); got != tc.want {
+			t.Errorf("%q: project = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
 // compose -f - takes COMPOSE_PROJECT_NAME from the env files Compose loads
 // (#85): the --env-files, relative to the working directory, a later one
 // winning; else .env in the project directory.
@@ -1090,6 +1111,20 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 	write("y.env", "OTHER=1\nCOMPOSE_PROJECT_NAME=from-y\n")
 	write("none.env", "OTHER=1\n")
 	write("sub/.env", "COMPOSE_PROJECT_NAME=from-sub\n")
+	write("locked.env", "COMPOSE_PROJECT_NAME=from-locked\n")
+	if err := os.Chmod(filepath.Join(app, "locked.env"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(app, "~"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write("~/p.env", "COMPOSE_PROJECT_NAME=from-cwd-tilde\n")
+	write("~/t.env", "COMPOSE_PROJECT_NAME=from-cwd-tilde\n")
+	for _, f := range []string{"p.env", "h.env"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("COMPOSE_PROJECT_NAME=from-home\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	wd := func() (string, error) { return app, nil }
 	for _, tc := range []struct {
 		name string
@@ -1104,7 +1139,26 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 		{"an earlier --env-file, when a later one does not set it", []string{"compose", "--env-file", "x.env", "--env-file", "none.env", "-f", "-", "up", "-d"}, nil, "from-x"},
 		{"--env-file relative to the working directory, not the project's", []string{"compose", "--project-directory", "sub", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "from-x"},
 		{"an --env-file that does not set it: the directory's name, not .env", []string{"compose", "--env-file", "none.env", "-f", "-", "up", "-d"}, nil, "app"},
-		{"an unreadable --env-file is skipped", []string{"compose", "--env-file", "missing.env", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "from-x"},
+		// Compose fails on an --env-file it cannot read ("couldn't find env
+		// file"): unknown, whatever the others set.
+		{"a missing --env-file: unknown", []string{"compose", "--env-file", "missing.env", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "app"},
+		{"a missing --env-file after one that sets it: unknown", []string{"compose", "--env-file", "x.env", "--env-file", "missing.env", "-f", "-", "up", "-d"}, nil, "app"},
+		{"an --env-file that cannot be read: unknown", []string{"compose", "--env-file", "x.env", "--env-file", "locked.env", "-f", "-", "up", "-d"}, nil, "app"},
+		{"an --env-file that is a directory: unknown", []string{"compose", "--env-file", "x.env", "--env-file", "sub", "-f", "-", "up", "-d"}, nil, "app"},
+		{"a missing COMPOSE_ENV_FILES entry: unknown", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_ENV_FILES": "x.env,missing.env"}, "app"},
+		// Compose reads a ~ path first as it is, in the working directory
+		// (setEnvWithDotEnv), then in the home directory (paths.ExpandUser):
+		// it needs both, and the first's name wins.
+		{"~/p.env in both the working and the home directory: the working directory's", []string{"compose", "--env-file=~/p.env", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root}, "from-cwd-tilde"},
+		{"--env-file=~/h.env only in the home directory: unknown", []string{"compose", "--env-file=~/h.env", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root}, "app"},
+		{"a COMPOSE_ENV_FILES entry ~/h.env only in the home directory: unknown", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root, "COMPOSE_ENV_FILES": "x.env,~/h.env"}, "app"},
+		{"--env-file=~/t.env only in the working directory: unknown", []string{"compose", "--env-file=~/t.env", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root}, "app"},
+		{"~/h.env without a HOME: relative, so missing", []string{"compose", "--env-file=~/h.env", "-f", "-", "up", "-d"}, nil, "app"},
 		{"COMPOSE_ENV_FILES instead of .env", []string{"compose", "-f", "-", "up", "-d"},
 			map[string]string{"COMPOSE_ENV_FILES": "x.env,y.env"}, "from-y"},
 		{"--env-file before COMPOSE_ENV_FILES", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"},
@@ -1208,8 +1262,8 @@ func TestComposeEnvFileReadIsBounded(t *testing.T) {
 
 // An env file is read as compose-go's dotenv parser reads it; each want is
 // what Docker Compose 5.5.1 named the project (with OTHER=o in its
-// environment), except that a value Compose interpolates is unknown, and
-// the directory's name follows.
+// environment), except that a value Compose interpolates, and a file
+// Compose fails on, are unknown, and the directory's name follows.
 func TestComposeEnvFileSyntaxAsCompose(t *testing.T) {
 	app := filepath.Join(t.TempDir(), "app")
 	if err := os.Mkdir(app, 0o755); err != nil {
@@ -1237,6 +1291,13 @@ func TestComposeEnvFileSyntaxAsCompose(t *testing.T) {
 		{"COMPOSE_PROJECT_NAME=$OTHER\n", "app"},
 		{"COMPOSE_PROJECT_NAME=\"${OTHER}-a\"\n", "app"},
 		{"COMPOSE_PROJECT_NAME=named\nCOMPOSE_PROJECT_NAME=$OTHER\n", "app"},
+		// An export with nothing after it but spaces: Compose fails ("zero
+		// length string"), so unknown here. Before a newline, or with no
+		// space, it is a statement of its own.
+		{"COMPOSE_PROJECT_NAME=x\nexport ", "app"},
+		{"COMPOSE_PROJECT_NAME=x\nexport\t \r", "app"},
+		{"COMPOSE_PROJECT_NAME=x\nexport \n", "x"},
+		{"COMPOSE_PROJECT_NAME=x\nexport", "x"},
 	} {
 		if err := os.WriteFile(filepath.Join(app, ".env"), []byte(tc.env), 0o644); err != nil {
 			t.Fatal(err)

@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"context"
 	"net"
 	"os"
 	"strings"
@@ -52,6 +53,42 @@ func TestRemote(t *testing.T) {
 		if got := Remote(c.name, c.endpoint, func(k string) string { return env[k] }); got != c.want {
 			t.Errorf("Remote(%s, %q, DOCKER_HOST=%q, CONTAINER_HOST=%q) = %v, want %v",
 				c.name, c.endpoint, c.dockerHost, c.containerHost, got, c.want)
+		}
+	}
+}
+
+// resolving makes lookupIP answer from names for the test, and fail for
+// any other name.
+func resolving(t *testing.T, names map[string]string) {
+	t.Helper()
+	old := lookupIP
+	t.Cleanup(func() { lookupIP = old })
+	lookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if ip, ok := names[host]; ok {
+			return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+}
+
+// A tcp:// host is this Mac's when it resolves to one of its addresses, as
+// the docker CLI dials it: 127.1, a bare ::1, a name for 127.0.0.1 (#118).
+func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
+	resolving(t, map[string]string{"127.1": "127.0.0.1", "dev-box": "127.0.0.1", "dev-box6": "::1"})
+	for _, c := range []struct{ endpoint, dockerHost string }{
+		{"tcp://127.1:2375", ""},
+		{"127.1:2375", ""},
+		{"", "tcp://127.1:2375"},
+		{"::1", ""},
+		{"tcp://::1", ""},
+		{"", "::1"},
+		{"ssh://dev@::1", ""},
+		{"tcp://dev-box:2375", ""},
+		{"tcp://dev-box6:2375", ""},
+	} {
+		env := map[string]string{"DOCKER_HOST": c.dockerHost}
+		if Remote("docker", c.endpoint, func(k string) string { return env[k] }) {
+			t.Errorf("Remote(docker, %q, DOCKER_HOST=%q) = true, want this Mac's", c.endpoint, c.dockerHost)
 		}
 	}
 }

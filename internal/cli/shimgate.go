@@ -169,7 +169,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		lookupEnv := lookupIn(env)
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
-			req.Target, req.Guessed = composeStdinProject(c, lookupEnv, h.getwd)
+			req.Target = composeStdinProject(c, lookupEnv, h.getwd)
 		} else {
 			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
@@ -541,24 +541,22 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 // environment, else from the env files (composeEnvFileProject), else the
 // project directory's name (--project-directory, else the directory of the
 // first -f file that is not -, else the working directory; compose-go's
-// cli/options.go, GetWorkingDir). Only that last one is a guess (#84): a
-// name: in the piped file, which the shim cannot read, beats it but none of
-// the others (withNamePrecedenceLoad). A guess that misses binds nothing
-// and ends quietly (#85).
-func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string, guessed bool) {
+// cli/options.go, GetWorkingDir). A name: in the piped file is not seen:
+// that lease then does not bind, and holds its cost (failing closed).
+func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string) {
 	getenv := getenvOf(lookupEnv)
 	switch {
 	case c.Target != "":
-		return c.Target, false
+		return c.Target
 	case getenv("COMPOSE_PROJECT_NAME") != "":
-		return normalProject(getenv("COMPOSE_PROJECT_NAME")), false
+		return normalProject(getenv("COMPOSE_PROJECT_NAME"))
 	}
 	cwd, err := getwd()
 	if err != nil {
 		if filepath.IsAbs(c.ComposeProjectDir) {
 			project = normalProject(filepath.Base(c.ComposeProjectDir))
 		}
-		return project, project != ""
+		return project
 	}
 	dir := cwd
 	if c.ComposeProjectDir != "" {
@@ -567,10 +565,9 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
 	}
 	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout); ok {
-		return normalProject(name), false
+		return normalProject(name)
 	}
-	project = normalProject(filepath.Base(dir))
-	return project, project != ""
+	return normalProject(filepath.Base(dir))
 }
 
 // composeEnvFileProject is COMPOSE_PROJECT_NAME as the env files Compose

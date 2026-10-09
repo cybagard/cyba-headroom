@@ -13,7 +13,7 @@ If the hook throws, the call does not run, and the model receives the thrown mes
 
 Two more results matter for #41 (see the questions at the end):
 - **An unexpected throw in the hook also blocks the call.**
-- **`kilo --pure` loads no plugins**, so the hook can only ever be advisory. The shim still gates the call.
+- **`kilo run --pure` loads no plugins** (the only form tested), so the hook can only ever be advisory. The shim still gates the call.
 
 No Kilo-side timeout on the hook was seen or tested.
 
@@ -66,10 +66,10 @@ The binary also names a `permission.ask` hook and a `shell.env` hook. They were 
 This spike answers whether Kilo can be hooked. How the plugin should ask headroom is #41's design. These are the facts it starts from, and the questions its plan has to answer.
 
 **Facts** (from `internal/cli/check.go`, `internal/lease/lease.go` and the earlier spikes):
-- An allowed `headroom check` takes a lease whenever a worktree is identified for it (`Book.Check` in `internal/lease/lease.go`). That happens for any command, `echo ok` included, at the default container cost when no cost is given. `check` never releases the lease. How a lease lives and ends is set out in the package comment of `internal/lease/lease.go`. So a pre-check through today's `check` would reserve each gated call a second time, and reserve memory for calls that start nothing.
+- An allowed `headroom check` takes a lease whenever a worktree is identified for it (`Book.Check` in `internal/lease/lease.go`). That happens for any command, `echo ok` included, at its kind's default cost when no cost is given (`check` defaults to `--kind container`). `check` never releases the lease. How a lease lives and ends is set out in the package comment of `internal/lease/lease.go`. So a pre-check through today's `check` would reserve each gated call a second time, and reserve memory for calls that start nothing.
 - `check` has no parser. It joins its arguments, defaults to `--kind container` and asks about any command, so under pressure it would deny `echo ok`. It sends the raw command, while the shim sends only `shim.Call.Command`, without flags that may hold secrets.
 - `check` answers once. It exits 0 on allow and 75 on deny. It exits 1 when the config cannot be loaded or the daemon is unreachable or fails, and 2 on a usage error. Unlike the shim, it does not wait under `BUDGET_WAIT`.
-- `--worktree` takes a worktree ID, not a path. Without it, `check` identifies the caller as the shim does, through `callerRequest` in `internal/cli/shimgate.go`, but from its own process, not the tool shell's. `HEADROOM_WORKTREE` (set by `headroom run`) and `ORCA_WORKTREE_ID` (set by Orca) are both in the agent's environment, which Kilo and its tool shells inherit (`orca-launch-env.md`, `tool-shell-path.md`).
+- `--worktree` takes a worktree ID, not a path. Without it, `check` identifies the caller as the shim does, through `callerRequest` in `internal/cli/shimgate.go`, but from its own process, not the tool shell's. Orca sets `ORCA_WORKTREE_ID` in the agent's environment, and Kilo and its tool shells inherit it (`orca-launch-env.md`, `tool-shell-path.md`). `HEADROOM_WORKTREE` is an optional override that nothing in headroom sets (`orca-launch-env.md`); `headroom run` only puts the shims first on PATH. Outside Orca, with neither set, `check` falls back to cwd and ancestors (question 3).
 - The hook was awaited on every tool call observed (`bash`, `task`). If that holds for all tools, every call pays for whatever the hook does.
 
 **Questions for #41's plan:**

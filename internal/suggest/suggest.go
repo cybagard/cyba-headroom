@@ -423,13 +423,13 @@ func (a *Aggregator) ollamaAdvice() []string {
 }
 
 // overTwoDays returns, sorted, the models in m with at least an hour on at
-// least two days, with each model's count of such days and its total time.
+// least two days, with each model's count of such days and its time on them.
 func overTwoDays(m map[modelDay]time.Duration) (keys []string, days map[string]int, total map[string]time.Duration) {
 	days, total = map[string]int{}, map[string]time.Duration{}
 	for k, d := range m {
-		total[k.key] += d
 		if d >= time.Hour {
 			days[k.key]++
+			total[k.key] += d
 		}
 	}
 	for k, n := range days {

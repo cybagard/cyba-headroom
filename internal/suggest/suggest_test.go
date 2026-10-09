@@ -435,3 +435,13 @@ func TestModelAdviceNeedsAnHourADay(t *testing.T) {
 		}
 	}
 }
+
+// The advice's hours are those of the days that counted.
+func TestModelAdviceCountsTheHoursOfCountedDays(t *testing.T) {
+	a := advice(aggregate(idleOn(func(d int) int { return []int{120, 120, 30}[d] })))
+	for _, want := range []string{"unused for 4.0 h on 2 days", "no expiry for 4.0 h on 2 days"} {
+		if !strings.Contains(a, want) {
+			t.Errorf("advice lacks %q:\n%s", want, a)
+		}
+	}
+}

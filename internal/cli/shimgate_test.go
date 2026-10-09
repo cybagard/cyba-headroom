@@ -976,3 +976,30 @@ func TestTheLeaseLabelNameElsewhereIsAllowed(t *testing.T) {
 		}
 	}
 }
+
+// A context whose engine is remote: its memory is not this Mac's, so the
+// call is not asked about, as with -H tcp://….
+func TestARemoteContextIsNotGated(t *testing.T) {
+	for _, args := range [][]string{
+		{"--context", "builder", "run", "alpine"},
+		{"run", "alpine"}, // currentContext
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		sum := sha256.Sum256([]byte("builder"))
+		meta := filepath.Join(r.dir, "dc", "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"tcp://build.example:2376"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(r.dir, "dc", "config.json"), []byte(`{"currentContext":"builder"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"))
+		if code, _ := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
+			t.Errorf("%q: code %d, asked %d, execed %q", args, code, len(r.asked), r.execed)
+		}
+	}
+}

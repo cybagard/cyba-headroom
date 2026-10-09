@@ -104,6 +104,9 @@ type entry struct {
 	// is not what the lease waits for.
 	bound, held map[string]bool
 	used        uint64
+	// found is set once it held a stack: one it lets go of when it stops
+	// (Book.release) still appeared, so the lease ends quietly.
+	found bool
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
@@ -242,7 +245,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// start): that lease still covers them, and its worktree is charged for
 	// them. A manual call's lease is charged nothing, so it covers nothing.
 	starts = slices.DeleteFunc(slices.Clone(starts), func(t policy.Start) bool {
-		return t.Running || b.covered(t.ID)
+		return t.Running || b.covered(t.ID, now)
 	})
 	if known && len(starts) == 0 {
 		// Allowed, and no new lease. Not when others went unresolved:
@@ -366,6 +369,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				}
 				e.bound[k], e.held[k] = true, o.held[k]
 			}
+			e.found = e.found || o.found
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
@@ -394,7 +398,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		for _, x := range stack {
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
-				e.held[x.key] = true
+				e.held[x.key], e.found = true, true
 			}
 		}
 	}
@@ -680,6 +684,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	b.latest, b.observed = &cp, now
 
 	for _, e := range b.open {
+		for k := range e.held {
+			_, ok := present[k]
+			startedSince := b.seen[k].at.After(began) && !b.seen[k].gone // during the reading, so it may lack it
+			if !ok && readable(s, e.waitsFor()) && !startedSince {
+				b.release(k)
+			}
+		}
+	}
+	for _, e := range b.open {
 		var used uint64
 		unsure := false
 		for k := range e.bound {
@@ -784,20 +797,23 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			b.seen[r.key] = v
 		}
 	case "start":
-		stopped := b.seen[r.key].stopped
+		last := b.seen[r.key]
+		stopped := last.stopped
 		b.seen[r.key] = seen{at: now}
 		if b.boundAnywhere(r.key) {
 			return
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
+		checkedSinceCrash := e != nil && last.gone && e.Created.After(last.at)
 		switch {
 		case e == nil:
 			return
-		case b.prev[r.key] && !stopped && !e.labelled && !slices.Contains(e.containerIDs, id):
+		case b.prev[r.key] && !stopped && !checkedSinceCrash && !e.labelled && !slices.Contains(e.containerIDs, id):
 			// A container the last reading held, started again without
 			// a stop (a restart policy's restart): no name's or project's.
-			// After docker or compose stop it is a start like any.
+			// After docker or compose stop it is a start like any, and so
+			// after a crash it is for a call checked since (compose up).
 			return
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run
@@ -810,6 +826,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.judge(r, gated, now)
 	case "die":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
+		b.release(r.key)
 		b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 			if !e.bound[r.key] || !e.over() {
 				return false
@@ -832,7 +849,7 @@ func (b *Book) expire(now time.Time) {
 		switch {
 		case now.Before(e.Expires):
 			return false
-		case len(e.bound) > 0:
+		case len(e.bound) > 0 || e.found:
 			b.log.Debug("lease ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
 		case e.idle:
@@ -896,16 +913,40 @@ func kindOf(key string) string {
 
 // covered reports whether a worktree's open lease holds container id, or
 // waits for it: two docker start db at once, the first's lease covers it.
-// Not one it holds (entry.held): it reserves nothing for that one.
-func (b *Book) covered(id string) bool {
+// Not one it holds (entry.held): it reserves nothing for that one. The
+// lease that covers it waits for it again: its timeout starts afresh.
+func (b *Book) covered(id string, now time.Time) bool {
 	k := "container:" + id
-	return slices.ContainsFunc(b.open, func(e *entry) bool {
-		return e.Worktree != "" && (e.bound[k] && !e.held[k] || slices.Contains(e.containerIDs, id))
-	})
+	found := false
+	for _, e := range b.open {
+		if e.Worktree != "" && (e.bound[k] && !e.held[k] || slices.Contains(e.containerIDs, id)) {
+			found = true
+			e.Expires = later(e.Expires, now.Add(b.timeout))
+		}
+	}
+	return found
+}
+
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func (b *Book) boundAnywhere(key string) bool {
 	return slices.ContainsFunc(b.open, func(e *entry) bool { return e.bound[key] })
+}
+
+// release lets go of a held container that is gone: it was never this
+// lease's to start, so a start of it is a new call's.
+func (b *Book) release(key string) {
+	for _, e := range b.open {
+		if e.held[key] {
+			delete(e.bound, key)
+			delete(e.held, key)
+		}
+	}
 }
 
 // live reports whether id is an open or lapsed lease's.

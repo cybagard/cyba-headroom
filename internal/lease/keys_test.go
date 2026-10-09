@@ -1366,3 +1366,67 @@ func TestAStartsContainerIDBeatsTheProjectsName(t *testing.T) {
 		}
 	}
 }
+
+// A start covered by a lease near its timeout renews it: the lease waits
+// for that container again, which may be a while warming up.
+func TestACoveredStartRenewsItsLease(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	b.ContainerEvent("start", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	c.t = c.t.Add(110 * time.Second)
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, snap(), cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("start: %+v", d)
+	}
+	c.t = c.t.Add(20 * time.Second)
+	b.Observe(withComposeContainer(snap(), "db", "w1", gib/2))
+	if r := reserved(b); r == 0 {
+		t.Fatalf("nothing reserved for db, still warming")
+	}
+}
+
+// A container an up found running, then stopped: it is no longer the up's,
+// so a checked docker start of it binds its own lease, with no false
+// "never appeared".
+func TestAStartOfAStoppedHeldContainerBindsItsOwnLease(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	s := withComposeContainer(snap(), "db", "w1", gib)
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
+	b.ContainerEvent("stop", "db", "db", lab)
+	b.ContainerEvent("die", "db", "db", lab)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start db", Target: "db", ContainerID: "db", CostBytes: gib}, snap(), cfg)
+	b.ContainerEvent("start", "db", "db", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withComposeContainer(snap(), "db", "w1", gib), c.t))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatal(log.String())
+	}
+}
+
+// A crash, then compose up within one reading: the up was checked after
+// the crash, so its start is the up's, not a restart policy's.
+func TestAnUpAfterACrashBindsTheContainerItStarts(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	s := read(withComposeContainer(snap(), "db", "w1", gib), c.t)
+	b.Observe(s)
+	b.Observe(s)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "db", "db", lab) // a crash: no stop
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
+	b.ContainerEvent("start", "db", "db", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withComposeContainer(snap(), "db", "w1", gib), c.t))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatal(log.String())
+	}
+}

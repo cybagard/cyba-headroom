@@ -130,6 +130,11 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
 	if name == "docker" {
 		req.Engine = dockerEndpointIn(getenv, c.ConfigDir, c.Endpoint)
+		if c.Kind != "tart" && req.Engine != c.Endpoint && shim.Remote(name, req.Engine, getenv) {
+			// A context (--context, DOCKER_CONTEXT, currentContext) whose
+			// engine is remote: its memory is not this Mac's.
+			return gated{proceed: true}
+		}
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool

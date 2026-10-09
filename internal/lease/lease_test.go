@@ -733,3 +733,105 @@ func TestAnAllowedStartRenewsTheLeaseThatCoversIt(t *testing.T) {
 		})
 	}
 }
+
+// guessed is a compose up whose project the shim guessed: Compose's config
+// failed, so the name is Compose's default, which may not be the one it
+// uses (#84).
+func guessed(wt, project string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: project, Guessed: true, OnEngine: true}
+}
+
+// A guess that misses: the up's stack comes up under another name (name:
+// in its file). Its container is ungated, as with no key, and the lease
+// ends quietly at its timeout: it never says its stack never appeared.
+func TestAGuessThatMissesEndsQuietly(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(guessed("w1", "proj"), snap(), cfg)
+	s := withComposeProject(snap(), "x-web-1", "w1", "x", gib/4)
+	b.Observe(s)
+	if !strings.Contains(log.String(), "ungated") {
+		t.Fatalf("x-web-1 bound the guess: %s", log)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// A guess naming another worktree's same-named stack binds none of it:
+// neither one that worktree checked (its own lease binds it) nor one started
+// unchecked, there or unattributed (still ungated), nor by Docker's event,
+// which says nothing of whose it is. The guess still holds its cost.
+func TestAGuessBindsNoStackOfAnotherWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		checked bool   // w2 checked its up
+		wt      string // the container's worktree
+	}{
+		{"w2's checked stack", true, "w2"},
+		{"w2's unchecked stack", false, "w2"},
+		{"an unattributed stack", false, ""},
+	} {
+		b, _, log := book(t)
+		b.Observe(snap())
+		if tc.checked {
+			b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+		}
+		b.Check(guessed("w1", "api"), snap(), cfg)
+		// Docker's event first: it says nothing of whose the container is.
+		b.ContainerEvent("start", "api-web-1", "api-web-1", map[string]string{"com.docker.compose.project": "api"})
+		b.Observe(withComposeProject(snap(), "api-web-1", tc.wt, "api", gib/4))
+		for _, l := range b.List() {
+			want := gib
+			if l.Worktree == "w2" {
+				want = gib - gib/4
+			}
+			if l.Bytes != want {
+				t.Errorf("%s: %s reserves %d MiB, want %d", tc.name, l.Worktree, l.Bytes>>20, want>>20)
+			}
+		}
+		if ungated := strings.Contains(log.String(), "ungated"); ungated == tc.checked {
+			t.Errorf("%s: ungated logged %v; log: %s", tc.name, ungated, log)
+		}
+	}
+}
+
+// A guess takes no lease over, not even its own worktree's of the same
+// project (compose -f typo.yml up in app/): that lease keeps its
+// containers, its reservation and its timeout.
+func TestAGuessTakesNoLeaseOver(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	s := withComposeProject(snap(), "app-web-1", "w1", "app", gib/2)
+	b.Observe(s)
+	before := expiry(b, d.LeaseID)
+	c.t = c.t.Add(time.Minute)
+	b.Check(guessed("w1", "app"), s, cfg)
+	if got := expiry(b, d.LeaseID); !got.Equal(before) {
+		t.Fatalf("the up's lease expires at %v, want %v: the guess took it over", got, before)
+	}
+	if r := reserved(b); r != 2*gib-gib/2+gib {
+		t.Fatalf("reserved %d MiB, want the up's remainder and the guess's estimate", r>>20)
+	}
+}
+
+// A guess that hits: the up's containers, in its own worktree, bind its
+// lease. None is ungated, and the lease ends quietly.
+func TestAGuessThatHitsBindsItsStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(snap())
+	b.Check(guessed("w1", "app"), snap(), cfg)
+	s := withComposeProject(withComposeProject(snap(), "app-web-1", "w1", "app", gib/4), "app-db-1", "w1", "app", gib/4)
+	b.Observe(s)
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB, want the estimate less what its containers use", r>>20)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(s)
+	if strings.Contains(log.String(), "ungated") || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}

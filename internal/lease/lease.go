@@ -647,11 +647,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				// across its check (#87). Held, so it binds without its
 				// use counting as what the lease waits for, and it keeps
 				// its verdict.
-				e.held[r.key] = true
+				e.held[r.key], e.found = true, true
 			} else {
 				b.judge(r, gated, now)
 			}
-		} else {
+		} else if !b.prev[r.key] {
 			unbound = append(unbound, r)
 		}
 	}
@@ -1009,7 +1009,8 @@ func (b *Book) boundAnywhere(key string) bool {
 // goneAfter fresh readings in a row (#87). A container missing from one is
 // missing, not gone: its stats failed, or a restart backoff spans the
 // reading. Only one gone lets go of its held state, ends its lease, and
-// leaves prev, so that when it is back it is new.
+// leaves prev, so that when it is back it is new. One only missing, back,
+// binds a lease held (Observe): it may never have stopped.
 func (b *Book) gone(k string) bool { return b.missed[k] >= goneAfter(k) }
 
 // goneAfter is how many fresh readings in a row k must be missing from to

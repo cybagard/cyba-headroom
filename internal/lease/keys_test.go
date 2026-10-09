@@ -34,7 +34,7 @@ func TestComposeUpAfterStopBindsByItsProject(t *testing.T) {
 
 // The same with no events (the stream down): A1 is only missing from the
 // stop's reading, so when it is back the up checked since holds it. It
-// binds, so nothing is logged as never appeared.
+// binds, so nothing is logged as never appeared, even once A1 stops again.
 func TestComposeUpWithinAReadingOfAStopBindsWithoutEvents(t *testing.T) {
 	b, c, log := book(t)
 	app := func(s *protocol.Snapshot) *protocol.Snapshot {
@@ -47,8 +47,12 @@ func TestComposeUpWithinAReadingOfAStopBindsWithoutEvents(t *testing.T) {
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // docker compose up -d: the same containers
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // docker compose stop, two readings
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap())
 	c.t = c.t.Add(3 * time.Minute)
-	b.Observe(app(snap()))
+	b.Observe(snap())
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("the up's lease never bound A1: %s", log)
 	}

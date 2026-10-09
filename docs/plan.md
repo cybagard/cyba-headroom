@@ -12,7 +12,7 @@ Exit criterion: attribution and the Orca launch environment are confirmed to rea
 - [x] #8 **Spike: does injected PATH survive in Claude CLI and Kilo tool shells?**
 - [x] #9 **Spike: container memory reporting vs. VM RSS (Docker Desktop, Podman)**
 - [x] #10 **Decide language and packaging (Python vs Go)**
-- [ ] #11 **Spike: Kilo CLI before-tool-execution hook?**
+- [x] #11 **Spike: Kilo CLI before-tool-execution hook?**
 
 ## [#2](https://github.com/cybagard/cyba-headroom/issues/2) Phase 2: Observe — daemon, budget model, attribution, --watch (R1–R4)
 

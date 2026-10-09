@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -625,13 +626,31 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 	return found, done && found != ""
 }
 
+// envFileMax is the most of an env file the shim reads (#85): a .env is a
+// few lines, and one that never ends (a link to /dev/zero) must not cost
+// the shim memory in its own gate.
+const envFileMax = 64 << 10
+
 // envFileValue is key's value in env file path, and whether the file sets
 // it: "" for a value the shim cannot know (envValue). A file that cannot be
-// read or parsed sets nothing.
+// read or parsed sets nothing, nor does one that is not a regular file (a
+// device, a FIFO: stat, unlike open, does not wait on one). One longer than
+// envFileMax sets a value the shim cannot know.
 func envFileValue(path, key string) (string, bool) {
-	b, err := os.ReadFile(path)
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "", false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, envFileMax+1))
+	switch {
+	case err != nil:
+		return "", false
+	case len(b) > envFileMax:
+		return "", true
 	}
 	return envValue(string(b), key)
 }

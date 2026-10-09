@@ -1139,6 +1139,50 @@ func TestComposeProjectOfStdinWithAnotherFile(t *testing.T) {
 	}
 }
 
+// An env file is read only if it is a regular file, and only up to
+// envFileMax (#85): a .env linked to /dev/zero, or a FIFO, costs nothing and
+// never blocks; one past the limit sets a name the shim cannot know. Either
+// way, the project is the directory's, a guess.
+func TestComposeEnvFileReadIsBounded(t *testing.T) {
+	app := filepath.Join(t.TempDir(), "app")
+	if err := os.Mkdir(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotenv := filepath.Join(app, ".env")
+	wd := func() (string, error) { return app, nil }
+	pad := strings.Repeat("# padding\n", envFileMax/10+1)
+	for _, tc := range []struct {
+		name string
+		make func() error
+	}{
+		{"named past the limit", func() error {
+			return os.WriteFile(dotenv, []byte(pad+"COMPOSE_PROJECT_NAME=late\n"), 0o644)
+		}},
+		{"named, then past the limit", func() error {
+			return os.WriteFile(dotenv, []byte("COMPOSE_PROJECT_NAME=early\n"+pad), 0o644)
+		}},
+		{"a FIFO", func() error { return syscall.Mkfifo(dotenv, 0o644) }},
+		{"a link to /dev/zero", func() error { return os.Symlink("/dev/zero", dotenv) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.RemoveAll(dotenv); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.make(); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			got, guessed := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, noEnv, wd)
+			if took := time.Since(start); took > time.Second {
+				t.Errorf("took %v", took)
+			}
+			if got != "app" || !guessed {
+				t.Errorf("project = %q, guessed %v, want app, guessed", got, guessed)
+			}
+		})
+	}
+}
+
 // An env file is read as compose-go's dotenv parser reads it; each want is
 // what Docker Compose 5.5.1 named the project (with OTHER=o in its
 // environment), except that a value Compose interpolates is unknown, and

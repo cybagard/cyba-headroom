@@ -175,6 +175,7 @@ type verdict struct {
 	// owner is the worktree the last reading that attributed it named: an
 	// event says nothing of whose a container is (#89).
 	owner string
+	lease string // the worktree of the lease it last bound
 	// crashed is set when it died without a stop, until a reading shows
 	// it again.
 	crashed bool
@@ -426,6 +427,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
 				e.held[x.key], e.found = true, true
+				b.boundBy(x, e)
 			}
 		}
 	}
@@ -612,6 +614,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, b.unmark(r), true) == e {
 				e.bind(r)
 				b.judge(r, gated, now)
+				b.boundBy(r, e)
 				bound[r.key] = true
 			}
 		}
@@ -662,6 +665,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			} else {
 				b.judge(r, gated, now)
 			}
+			b.boundBy(r, e)
 		} else {
 			unbound = append(unbound, r)
 		}
@@ -895,6 +899,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		}
 		e.bind(r)
 		b.judge(r, gated, now)
+		b.boundBy(r, e)
 	case "die":
 		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
 		if v := b.verdicts[r.key]; v != nil {
@@ -1047,19 +1052,28 @@ func goneAfter(k string) int {
 
 // bindsAfterCrash reports whether e may bind r, back after a crash (a
 // restart policy's restart): a lease keyed by r's label or ID, or a
-// project's only in the worktree the readings last put r in. Another
-// worktree may use the name (#89).
+// project's only in r's owner's worktree. Another worktree may use the
+// name (#89), so a container of no known worktree binds none.
 func (b *Book) bindsAfterCrash(r resource, e *entry) bool {
-	return e.labelled || slices.Contains(e.containerIDs, r.id) || e.Kind != "compose" || b.owner(r.key) == e.Worktree
+	o := b.owner(r)
+	return e.labelled || slices.Contains(e.containerIDs, r.id) || e.Kind != "compose" || o != "" && o == e.Worktree
 }
 
-// owner is the worktree the last reading that attributed k named, "" if
-// none did.
-func (b *Book) owner(k string) string {
-	if v := b.verdicts[k]; v != nil {
-		return v.owner
+// owner is the worktree r is in: as this reading attributes it, else as
+// the last reading that attributed it did, else that of the lease it last
+// bound; "" if none says.
+func (b *Book) owner(r resource) string {
+	if v := b.verdicts[r.key]; v != nil {
+		return cmp.Or(r.worktree, v.owner, v.lease)
 	}
-	return ""
+	return r.worktree
+}
+
+// boundBy records that r bound e.
+func (b *Book) boundBy(r resource, e *entry) {
+	if v := b.verdicts[r.key]; v != nil {
+		v.lease = e.Worktree
+	}
 }
 
 // release lets go of a held container that is gone: it was never this
@@ -1218,7 +1232,7 @@ func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
 	if old := b.verdicts[r.key]; old != nil {
-		v.owner = old.owner // an event's r is unattributed
+		v.owner, v.lease = old.owner, old.lease // an event's r is unattributed
 	}
 	v.owner = cmp.Or(r.worktree, v.owner)
 	b.verdicts[r.key] = v

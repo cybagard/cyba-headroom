@@ -1202,6 +1202,31 @@ func TestARestartAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {
 	}
 }
 
+// A container no reading attributed (no Orca reading, or its compose
+// directory and mounts in no worktree) is the worktree's whose lease it
+// bound: after a crash, its restart binds that worktree's up.
+func TestARestartAfterACrashOfAnUnattributedContainerBindsTheWorktreeItBound(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "", 4*gib), c.t))
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", lab)
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withComposeContainer(snap(), "a1", "", 4*gib), c.t))
+	}
+	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+	}
+}
+
 // As above, with readings between the crash and the restart: the reading
 // that shows the container back binds nothing of w2's either.
 func TestAContainerBackAfterACrashBindsNoLeaseOfAnotherWorktree(t *testing.T) {
@@ -1253,6 +1278,28 @@ func TestAContainerBackAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t)) // no event: the reading shows it
+	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+	}
+}
+
+// The reading that shows a container back after a crash names its owner,
+// over the readings before: a container w2's before its crash, w1's now,
+// binds w1's up.
+func TestAContainerBackAfterACrashIsWhoseItsReadingSays(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w2", 4*gib), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "a1", "a1", map[string]string{protocol.ComposeProjectLabel: "app"})
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	}
 	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
 	}

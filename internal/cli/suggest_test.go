@@ -14,8 +14,9 @@ import (
 )
 
 // writeSamples writes hours of working samples (5 s apart, 6 GiB in use
-// outside every component) for each of the given days before now.
-func writeSamples(t *testing.T, dir string, daysAgo []int, hours float64) {
+// outside every component) for each of the given days before now, each
+// changed by edit if given.
+func writeSamples(t *testing.T, dir string, daysAgo []int, hours float64, edit ...func(*samples.Sample)) {
 	t.Helper()
 	sdir := filepath.Join(dir, "samples")
 	_ = os.MkdirAll(sdir, 0o700)
@@ -29,6 +30,9 @@ func writeSamples(t *testing.T, dir string, daysAgo []int, hours float64) {
 				Host:      &samples.Host{TotalBytes: 64 << 30, Pressure: "normal", FreePercent: 70},
 				Budget:    &protocol.Budget{TotalBytes: 64 << 30, UnaccountedBytes: &un, HeadroomBytes: &hr},
 				Worktrees: []samples.Worktree{{ID: "w", Path: "/Users/dev/w/a", Agents: []string{"working"}}}}
+			for _, f := range edit {
+				f(&s)
+			}
 			line, _ := json.Marshal(s)
 			b.Write(line)
 			b.WriteByte('\n')
@@ -148,5 +152,22 @@ func TestSecondWriteKeepsTheOriginalBackup(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the hand-written config is lost; backups %v", baks)
+	}
+}
+
+// A value above the config's limit is not written; the others are.
+func TestWriteLeavesOutAValueAboveTheLimit(t *testing.T) {
+	dir, env := suggestEnv(t)
+	writeSamples(t, dir, []int{3, 2, 1}, 2, func(s *samples.Sample) {
+		absurd := uint64(1 << 62)
+		s.Ollama = &samples.Ollama{FootprintBytes: &absurd}
+	})
+	code, out, stderr := run(t, env, "headroom", "suggest", "--write")
+	if code != 0 || !strings.Contains(out, "# ollama_idle_gb: not usable") {
+		t.Fatalf("exit %d, stderr %s, out:\n%s", code, stderr, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if !strings.Contains(string(b), "host_baseline_gb = 6") || strings.Contains(string(b), "ollama_idle_gb") {
+		t.Fatalf("config:\n%s", b)
 	}
 }

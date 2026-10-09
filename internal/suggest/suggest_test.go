@@ -401,3 +401,71 @@ func TestOllamaModelsUnknownAreLeftOut(t *testing.T) {
 		t.Fatalf("advice from an unknown model list: %s", a)
 	}
 }
+
+// idleOn is threeDays with one model idle for the first minutes(day) of
+// each day's 2 h: LM Studio's unused with no TTL, and Ollama's loaded with
+// no expiry.
+func idleOn(minutes func(day int) int) []samples.Sample {
+	return threeDays(func(s *samples.Sample, i int) {
+		if i >= minutes(int(s.T.Sub(day0).Hours()/24))*12 { // 12 samples a minute
+			return
+		}
+		last := s.T.Add(-2 * time.Hour)
+		s.LMStudio = &samples.LMStudio{FootprintBytes: u64(13 * gib), Models: []samples.Model{
+			{Key: "big-model", SizeBytes: 12 * gib, Status: "idle", LastUsedAt: &last}}}
+		s.Ollama = &samples.Ollama{FootprintBytes: u64(13 * gib), Models: []samples.OllamaModel{{Name: "big-model", SizeBytes: 12 * gib}}}
+	})
+}
+
+// A day counts toward the model advice from one hour of it.
+func TestModelAdviceNeedsAnHourADay(t *testing.T) {
+	for _, c := range []struct {
+		minutes []int
+		named   bool
+	}{
+		{[]int{120, 60, 0}, true},
+		{[]int{120, 59, 0}, false},
+		{[]int{120, 30, 0}, false},
+	} {
+		a := advice(aggregate(idleOn(func(d int) int { return c.minutes[d] })))
+		for _, tool := range []string{`LM Studio: "big-model"`, `Ollama: "big-model"`} {
+			if strings.Contains(a, tool) != c.named {
+				t.Errorf("%v min a day: %s named = %v, want %v; advice:\n%s", c.minutes, tool, !c.named, c.named, a)
+			}
+		}
+	}
+}
+
+// The advice's hours are those of the days that counted.
+func TestModelAdviceCountsTheHoursOfCountedDays(t *testing.T) {
+	a := advice(aggregate(idleOn(func(d int) int { return []int{120, 120, 30}[d] })))
+	for _, want := range []string{"unused for 4.0 h on 2 days", "no expiry for 4.0 h on 2 days"} {
+		if !strings.Contains(a, want) {
+			t.Errorf("advice lacks %q:\n%s", want, a)
+		}
+	}
+}
+
+// A value the config would reject is not usable: --write leaves it out, and
+// the min_headroom replay keeps the current one.
+func TestValueAboveTheConfigLimitIsNotUsable(t *testing.T) {
+	withIdle := func(footprint uint64) []samples.Sample {
+		return threeDays(func(s *samples.Sample, i int) {
+			if footprint > 0 && i%2 == 0 {
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(footprint)}
+			}
+			if i%100 == 1 && i < 500 { // warn onsets, Ollama running
+				s.Host.Pressure = "warn"
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(gib), Models: []samples.OllamaModel{{Name: "m", SizeBytes: gib}}}
+			}
+		})
+	}
+	r := aggregate(withIdle(1 << 62))
+	if v := value(t, r, "ollama_idle_gb"); v.OK || !strings.Contains(v.Why, "not usable") || !strings.Contains(v.Why, "above the config's limit of 1024 GB") {
+		t.Fatalf("ollama idle = %+v", v)
+	}
+	with, without := value(t, r, "min_headroom_gb"), value(t, aggregate(withIdle(0)), "min_headroom_gb")
+	if !with.OK || with != without {
+		t.Fatalf("min headroom with the absurd idle %+v, without %+v", with, without)
+	}
+}

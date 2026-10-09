@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -303,7 +304,18 @@ func (a *Aggregator) Result() Result {
 		return v
 	}
 
-	r.Values = append(r.Values, gate(a.hostBaseline()), gate(a.dockerOverhead()), gate(a.lmStudioIdle()), gate(a.ollamaIdle()))
+	// A budget value the config would reject is not usable: --write would
+	// fail on it, and the replay must not reserve it.
+	limit := func(v Value) Value {
+		if v.OK && v.GB > config.MaxBudgetGB {
+			v.OK = false
+			v.Why = fmt.Sprintf("not usable: %s GB is above the config's limit of %d GB", strconv.FormatFloat(v.GB, 'f', -1, 64), config.MaxBudgetGB)
+		}
+		return v
+	}
+	for _, v := range []Value{a.hostBaseline(), a.dockerOverhead(), a.lmStudioIdle(), a.ollamaIdle()} {
+		r.Values = append(r.Values, limit(gate(v)))
+	}
 	r.Values = append(r.Values, gate(a.minHeadroom(a.params(r.Values))), gate(a.perWorktreeCap()))
 	r.Advice = append(r.Advice, a.pressureAdvice()...)
 	r.Advice = append(r.Advice, a.concurrencyAdvice()...)
@@ -423,13 +435,13 @@ func (a *Aggregator) ollamaAdvice() []string {
 }
 
 // overTwoDays returns, sorted, the models in m with at least an hour on at
-// least two days, with each model's count of such days and its total time.
+// least two days, with each model's count of such days and its time on them.
 func overTwoDays(m map[modelDay]time.Duration) (keys []string, days map[string]int, total map[string]time.Duration) {
 	days, total = map[string]int{}, map[string]time.Duration{}
 	for k, d := range m {
-		total[k.key] += d
 		if d >= time.Hour {
 			days[k.key]++
+			total[k.key] += d
 		}
 	}
 	for k, n := range days {

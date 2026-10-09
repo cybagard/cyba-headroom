@@ -48,11 +48,10 @@ type mcont struct {
 	startedBy                string    // the lease of the call that last started it, "" if none
 	startedAt                time.Time // when its call was checked
 	crashed                  time.Time // when it last crashed, zero once it stopped or started
-	crashTick                int       // the readings before it crashed
-	crashHeld                bool      // it was held when it crashed
 	heldBy                   string    // the up that found it running bound to no lease, "" once it stopped or started
 	boundBy                  string    // the lease that started it, or the up that took that one over
 	missing                  bool      // left out of this reading
+	missedAt                 int       // the last reading it was left out of
 	read                     int       // the last reading it was in
 	multi                    bool      // its call started others too (docker start a b)
 }
@@ -82,10 +81,8 @@ type model struct {
 // run only when HEADROOM_MODEL_OPEN is 1 (all) or lists the issue
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
-	87:  "a held container missing from one reading (or restarted after one) comes back new and binds the up's lease as counted",
 	89:  "a restart by policy binds another worktree's same-named compose lease (a container labelled with another worktree's project: #109's shared name, or a dressed run)",
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
-	110: "a container not held, missing from one reading (or restarted after one), ends its lease or binds an up's as counted (#87's cause)",
 	111: "a crashed container stays bound to a two-container start's lease: a compose up restarting it binds nothing",
 	112: "an up taking over its stack's lease while that lease's services warm holds the larger estimate, not both",
 }
@@ -148,7 +145,7 @@ func (m *model) start(x *mcont, by string) {
 	if by != "covered" && !m.bound(x) {
 		x.boundBy = by
 	}
-	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy = true, 0, by, m.c.t, by == "", time.Time{}, false, ""
+	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, false, "", 0
 	if by != "" {
 		m.starts[by]++
 	}
@@ -281,7 +278,7 @@ func (m *model) stop(x *mcont, crash bool) {
 	}
 	m.event("die", x)
 	if crash {
-		x.crashed, x.crashTick, x.crashHeld = m.c.t, m.ticks, m.held(x)
+		x.crashed = m.c.t
 	} else {
 		x.crashed = time.Time{}
 	}
@@ -303,7 +300,7 @@ func (m *model) isOpen(id string) bool {
 // a start event and no call. It was checked if its first start was, and its
 // call's reservation is long spent.
 func (m *model) restart(x *mcont) {
-	x.running, x.cur, x.startedBy, x.startedAt, x.crashed = true, 0, "", m.c.t, time.Time{}
+	x.running, x.cur, x.startedBy, x.startedAt, x.crashed, x.missedAt = true, 0, "", m.c.t, time.Time{}, 0
 	m.event("start", x)
 }
 
@@ -582,36 +579,26 @@ func (m *model) run(ops []op) {
 			}
 		case 16:
 			// A running container left out of one reading: its stats failed,
-			// or a restart backoff spans it.
+			// or a restart backoff spans it. Left out of the last one too, it
+			// is gone: the book lets go of it (lease.go).
 			x := m.pick(func(x *mcont) bool { return x.running })
 			if x == nil {
 				break
 			}
-			issue := 110
-			if m.held(x) {
-				issue = 87
-			}
-			if !m.on(issue) {
-				m.tick()
-			} else {
-				x.missing = true
-				m.step("%s missing from the reading", x.id)
-				m.tick()
-				x.missing, x.heldBy = false, "" // the reading let go of it (lease.go)
+			twice := x.missedAt == m.ticks && m.ticks > 0
+			x.missing = true
+			m.step("%s missing from the reading", x.id)
+			m.tick()
+			x.missing, x.missedAt = false, m.ticks
+			if twice {
+				x.heldBy = ""
 			}
 		case 17:
 			// Docker's restart policy restarts a crashed container, with a
-			// backoff of at most a minute. One whose backoff spans a reading
-			// is #87's if it was held, else #110's; one labelled with another
-			// worktree's project is #89's (nameTaken). A removed container
-			// stays down.
-			ok := func(x *mcont) bool {
-				spanned := 110
-				if x.crashHeld {
-					spanned = 87
-				}
-				return (x.crashTick == m.ticks || m.on(spanned)) && (m.on(89) || !nameTaken(x))
-			}
+			// backoff of at most a minute, which may span readings. One
+			// labelled with another worktree's project is #89's (nameTaken).
+			// A removed container stays down.
+			ok := func(x *mcont) bool { return m.on(89) || !nameTaken(x) }
 			if x := m.pick(func(x *mcont) bool {
 				return !x.gone && !x.crashed.IsZero() && m.c.t.Sub(x.crashed) <= time.Minute && ok(x)
 			}); x != nil {
@@ -708,9 +695,6 @@ func TestTheLeaseModel(t *testing.T) {
 // reading while that up's lease holds it; an up of the stack starts c2;
 // c1 comes back.
 func TestTheLeaseModelOn87(t *testing.T) {
-	if !(&model{open: openIssues()}).on(87) {
-		t.Skip("open: #87")
-	}
 	ops := []op{
 		{0, 0, 0},  // w1: compose up p1, starts c1 and c2
 		{10, 0, 0}, // tick

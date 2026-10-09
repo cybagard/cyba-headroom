@@ -340,7 +340,9 @@ func TestComposeOutlivesAOneShotFirstContainer(t *testing.T) {
 	b, _, _ := book(t)
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 3 * gib, Target: "app"}, snap(), cfg)
 	b.Observe(withComposeContainer(snap(), "migrate", "w1", gib/10))
-	b.Observe(snap()) // migrate exited; db and app not up yet
+	// migrate exited, its die says (#87); db and app not up yet.
+	b.ContainerEvent("die", "migrate", "migrate", map[string]string{"com.docker.compose.project": "app"})
+	b.Observe(snap())
 	if r := reserved(b); r != 3*gib {
 		t.Fatalf("reserved %d, want the full 3 GiB until the services come up", r)
 	}
@@ -362,6 +364,105 @@ func TestAContainerMissingFromOneSnapshotKeepsItsLease(t *testing.T) {
 	ls := b.List()
 	if len(ls) != 2 {
 		t.Fatalf("c2 came back and took the other lease: %+v", ls)
+	}
+}
+
+// heldDB is a book whose up holds db, running with 3 GiB, and reserves
+// 1 GiB for the services it starts.
+func heldDB(t *testing.T) (*lease.Book, *clock, *protocol.Snapshot, policy.Request) {
+	t.Helper()
+	b, c, _ := book(t)
+	s := withComposeContainer(snap(), "db", "w1", 3*gib)
+	b.Observe(read(s, c.t))
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
+	b.Check(up, s, cfg)
+	return b, c, s, up
+}
+
+// observe gives b a fresh reading of s, 5 s after the last.
+func observe(b *lease.Book, c *clock, s *protocol.Snapshot) {
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(s, c.t))
+}
+
+// A held container missing from one reading (its stats failed, or a
+// restart backoff spans it) is missing, not gone (#87): it stays held, so
+// when it is back its memory is not counted as what the up waits for.
+func TestAHeldContainerMissingFromOneReadingStaysHeld(t *testing.T) {
+	b, c, s, _ := heldDB(t)
+	observe(b, c, snap()) // db missing
+	observe(b, c, s)      // db back
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB once db is back, want 1024", r>>20)
+	}
+}
+
+// A held container missing from two readings in a row is gone: let go of,
+// it counts as new when it is back.
+func TestAHeldContainerMissingFromTwoReadingsIsReleased(t *testing.T) {
+	b, c, s, _ := heldDB(t)
+	observe(b, c, snap())
+	observe(b, c, snap())
+	observe(b, c, s)
+	if r := reserved(b); r != 0 {
+		t.Fatalf("reserved %d MiB once db is back, want 0", r>>20)
+	}
+}
+
+// A held container Docker says died is gone at once, with no reading to
+// wait for.
+func TestAHeldContainerThatDiedIsReleasedAtOnce(t *testing.T) {
+	b, c, s, _ := heldDB(t)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	observe(b, c, snap())
+	observe(b, c, s)
+	if r := reserved(b); r != 0 {
+		t.Fatalf("reserved %d MiB once db is back, want 0", r>>20)
+	}
+}
+
+// A takeover keeps a held container that is missing from the check's
+// reading: the book, not that reading, says when it is gone.
+func TestATakeoverKeepsAHeldContainerMissingFromOneReading(t *testing.T) {
+	b, c, s, up := heldDB(t)
+	observe(b, c, snap())
+	c.t = c.t.Add(time.Second)
+	b.Check(up, snap(), cfg)
+	observe(b, c, s)
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB once db is back, want 1024", r>>20)
+	}
+}
+
+// A run's only container missing from one reading does not end its lease
+// while it warms (#110); missing from a second, it is gone, and so is the
+// lease.
+func TestALeaseOutlivesOneReadingWithoutItsContainer(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	observe(b, c, withRun(snap(), "c1", "w1", gib, d.LeaseID))
+	observe(b, c, snap())
+	if len(b.List()) != 1 {
+		t.Fatal("one reading without c1 ended its lease")
+	}
+	observe(b, c, snap())
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("two readings without c1 left its lease open: %+v", ls)
+	}
+}
+
+// A container missing from one reading keeps its last known use, as a
+// failed read does: what it uses is still in the host's reading.
+func TestAContainerMissingFromOneReadingKeepsItsUse(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	observe(b, c, withRun(snap(), "c1", "w1", 3*gib/2, d.LeaseID))
+	observe(b, c, snap())
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB while c1 is missing, want 512", r>>20)
 	}
 }
 

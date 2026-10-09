@@ -19,12 +19,42 @@ func TestComposeUpAfterStopBindsByItsProject(t *testing.T) {
 	}
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
-	b.Observe(snap()) // docker compose stop
+	// docker compose stop: its events say A1 is gone, not just missing (#87).
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.ContainerEvent("stop", "A1", "app-db-1", lab)
+	b.ContainerEvent("die", "A1", "app-db-1", lab)
+	b.Observe(snap())
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // docker compose up -d: the same containers
 	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
 		t.Fatalf("leases = %+v, want the up's lease bound to its container", l)
+	}
+}
+
+// The same with no events (the stream down): A1 is only missing from the
+// stop's reading, so when it is back the up checked since holds it. It
+// binds, so nothing is logged as never appeared, even once A1 stops again.
+func TestComposeUpWithinAReadingOfAStopBindsWithoutEvents(t *testing.T) {
+	b, c, log := book(t)
+	app := func(s *protocol.Snapshot) *protocol.Snapshot {
+		return addContainer(s, protocol.Container{ID: "A1", Name: "app-db-1", MemoryBytes: gib / 2,
+			Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: "/Users/dev/src/a"}}, "w1")
+	}
+	b.Observe(app(snap()))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // docker compose stop
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(app(snap())) // docker compose up -d: the same containers
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap()) // docker compose stop, two readings
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(snap())
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(snap())
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("the up's lease never bound A1: %s", log)
 	}
 }
 
@@ -89,7 +119,10 @@ func TestComposeUpAgainTakesOverTheOpenLease(t *testing.T) {
 	b.Check(up, snap(), cfg)
 	b.Observe(app(snap()))
 	c.t = c.t.Add(5 * time.Second)
-	b.Observe(snap()) // compose stop
+	// compose stop: its events say A1 is gone, not just missing (#87).
+	b.ContainerEvent("stop", "A1", "a-web-1", map[string]string{"com.docker.compose.project": "a"})
+	b.ContainerEvent("die", "A1", "a-web-1", map[string]string{"com.docker.compose.project": "a"})
+	b.Observe(snap())
 	b.Check(up, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(app(snap())) // compose up -d again
@@ -555,7 +588,9 @@ func TestAComposeRunLeaseEndsWithItsContainer(t *testing.T) {
 	b.Observe(snap())
 	b.Check(run("w1", "p"), snap(), cfg)
 	b.Observe(oneoff("r1", "p", "w1")(snap()))
-	b.Observe(snap()) // exited, removed
+	// Exited, removed: its die says r1 is gone, not just missing (#87).
+	b.ContainerEvent("die", "r1", "r1", map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"})
+	b.Observe(snap())
 	if l := b.List(); len(l) != 0 {
 		t.Fatalf("leases = %+v", l)
 	}
@@ -1186,7 +1221,10 @@ func TestATakeOverKeepsCoveringTheContainersItTook(t *testing.T) {
 	idle := up
 	idle.Idle = true
 	b.Check(idle, s, cfg)
-	b.Observe(snap()) // docker stop db
+	// docker stop db: its events say db is gone, not just missing (#87).
+	b.ContainerEvent("stop", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.Observe(snap())
 	if r := reserved(b); r != 2*gib {
 		t.Fatalf("reserved %d MiB with db stopped, want 2048", r>>20)
 	}
@@ -1204,7 +1242,10 @@ func TestAHeldContainerStoppedSinceCountsWhenItIsBack(t *testing.T) {
 	b.Observe(s)
 	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
 	b.Check(up, s, cfg) // db held
-	b.Observe(snap())   // compose stop
+	// compose stop: its events say db is gone, not just missing (#87).
+	b.ContainerEvent("stop", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.ContainerEvent("die", "db", "db", map[string]string{protocol.ComposeProjectLabel: "app"})
+	b.Observe(snap())
 	c.t = c.t.Add(time.Second)
 	b.Check(up, snap(), cfg)
 	b.Observe(s) // the same db again

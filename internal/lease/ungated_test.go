@@ -215,6 +215,24 @@ func TestAContainerMissingForATickIsNotUngated(t *testing.T) {
 	}
 }
 
+// After a stall past the lease timeout, a reading without x lets its
+// verdict go: when x is back it is judged again, and with no lease it is
+// ungated.
+func TestAContainerBackAfterAStallIsUngated(t *testing.T) {
+	b, c, log := book(t)
+	x := func() *protocol.Snapshot { return addContainer(snap(), protocol.Container{ID: "X", Name: "x"}, "w1") }
+	b.Observe(read(x(), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(x(), c.t))
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t)) // x missing
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(x(), c.t)) // x back
+	if got := ungatedKeys(b); len(got) != 1 || !strings.Contains(log.String(), "ungated") {
+		t.Fatalf("ungated = %v, want x warned: %s", got, log)
+	}
+}
+
 func TestComposeServicesOnLaterTicksAreGated(t *testing.T) {
 	for name, wt := range map[string]string{"manual": "", "worktree": "w1"} {
 		t.Run(name, func(t *testing.T) {

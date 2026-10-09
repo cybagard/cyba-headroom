@@ -27,14 +27,17 @@ const target = gib // what each container grows to
 
 const timeout = 2 * time.Minute // the book's (book)
 
-// plenty is the headroom readings report unless memory runs short (op 14):
-// with it, every check must be allowed.
+// plenty is the headroom readings report unless memory runs short (ops 14
+// and 15): with it, every check must be allowed.
 const plenty = int64(1024 * gib)
 
 // lowReadings is how many readings memory stays short after op 14 lowers
-// headroom: one, so most calls are checked with plenty, and a BUDGET_WAIT
-// call (op 15) is denied until the reading after it.
+// headroom: one, so most calls are checked with plenty.
 const lowReadings = 1
+
+// waitReadings is how many readings memory stays short while a BUDGET_WAIT
+// call (op 15) polls: it is denied, and asked again after each.
+const waitReadings = 3
 
 type mcont struct {
 	id, project, service, wt string
@@ -47,8 +50,10 @@ type mcont struct {
 	crashed                  time.Time // when it last crashed, zero once it stopped or started
 	crashTick                int       // the readings before it crashed
 	crashHeld                bool      // it was held when it crashed
-	heldBy                   string    // the up that found it running, "" once it stopped or started
+	heldBy                   string    // the up that found it running bound to no lease, "" once it stopped or started
+	boundBy                  string    // the lease that started it, or the up that took that one over
 	missing                  bool      // left out of this reading
+	read                     int       // the last reading it was in
 	multi                    bool      // its call started others too (docker start a b)
 }
 
@@ -140,6 +145,9 @@ func (m *model) snapshot() *protocol.Snapshot {
 func (m *model) event(action string, x *mcont) { m.b.ContainerEvent(action, x.id, x.id, x.labels) }
 
 func (m *model) start(x *mcont, by string) {
+	if by != "covered" && !m.bound(x) {
+		x.boundBy = by
+	}
 	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy = true, 0, by, m.c.t, by == "", time.Time{}, false, ""
 	if by != "" {
 		m.starts[by]++
@@ -227,16 +235,32 @@ func (m *model) composeUp(st stack) bool {
 	}) {
 		return true // left out: it takes over a lease whose services warm (#112)
 	}
-	d := m.check(policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose -p " + project + " up -d",
+	cmd := "docker compose -p " + project + " up -d"
+	taken := map[string]bool{} // its stack's leases it takes over, those not past their timeout
+	for _, l := range m.b.List() {
+		if l.Worktree == wt && m.leases[l.ID] == cmd && l.Expires.After(m.c.t) {
+			taken[l.ID] = true
+		}
+	}
+	d := m.check(policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: cmd,
 		CostBytes: cost, Target: project, OnEngine: true, Idle: idle})
 	if !d.Allow {
 		return false
 	}
 	m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
+	for _, x := range m.of(project, wt) {
+		if taken[x.boundBy] {
+			x.boundBy = d.LeaseID
+		}
+	}
 	for _, sv := range []string{"a", "b"} {
 		x := have[sv]
-		if x != nil && x.running {
-			x.heldBy = d.LeaseID // it found it running
+		switch {
+		case x == nil || !x.running:
+		case taken[x.heldBy]:
+			x.heldBy = d.LeaseID // it stays held
+		case !m.bound(x) && x.read == m.ticks && !m.flick:
+			x.heldBy = d.LeaseID // the last reading found it running in wt, no lease's
 		}
 		if x == nil {
 			x = m.newCont(project, sv, wt, map[string]string{protocol.ComposeProjectLabel: project,
@@ -264,10 +288,15 @@ func (m *model) stop(x *mcont, crash bool) {
 	x.running, x.heldBy = false, ""
 }
 
-// held reports whether x is held: an up found it running, and that up's
-// lease is open.
-func (m *model) held(x *mcont) bool {
-	return x.heldBy != "" && slices.ContainsFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == x.heldBy })
+// held reports whether x is held: an up found it running and bound to no
+// lease (lease.go), and that up's lease is open.
+func (m *model) held(x *mcont) bool { return m.isOpen(x.heldBy) }
+
+// bound reports whether a lease binds x, held or not.
+func (m *model) bound(x *mcont) bool { return m.held(x) || m.isOpen(x.boundBy) }
+
+func (m *model) isOpen(id string) bool {
+	return id != "" && slices.ContainsFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == id })
 }
 
 // restart is Docker's restart policy bringing a crashed container back, as
@@ -393,6 +422,11 @@ func (m *model) tick() {
 	}
 	m.ticks++
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
+	for _, x := range m.conts {
+		if x.running && !x.missing {
+			x.read = m.ticks
+		}
+	}
 	m.step("tick %s (flicker %v)", m.c.t.Format("15:04:05"), m.flick)
 	m.b.Observe(m.snapshot())
 	m.invariants()
@@ -519,13 +553,31 @@ func (m *model) run(ops []op) {
 			m.tick()
 		case 15:
 			// A call with BUDGET_WAIT=1: denied, it asks again after each
-			// reading, until it is allowed or gives up.
+			// reading, until it is allowed or gives up. Memory runs short
+			// for waitReadings readings, then is as it was.
 			call := m.call([]int{0, 5, 7}[o.b%3], o)
 			if call == nil {
 				break
 			}
-			m.step("BUDGET_WAIT")
-			for i := 0; !call() && i < 3; i++ {
+			was, wasLow := m.headroom, m.low
+			m.headroom, m.low = 0, waitReadings
+			m.step("BUDGET_WAIT, headroom 0 MiB")
+			m.tick()
+			short := true
+			restore := func() {
+				m.headroom, m.low, short = was, wasLow, false
+				m.step("headroom %d MiB again", m.headroom>>20)
+			}
+			for i := 0; !call() && i < waitReadings; i++ {
+				if i == waitReadings-1 {
+					restore()
+				}
+				m.tick()
+			}
+			if short {
+				// Allowed while memory runs short (covered, idle): the next
+				// reading says it is as it was.
+				restore()
 				m.tick()
 			}
 		case 16:
@@ -545,7 +597,7 @@ func (m *model) run(ops []op) {
 				x.missing = true
 				m.step("%s missing from the reading", x.id)
 				m.tick()
-				x.missing = false
+				x.missing, x.heldBy = false, "" // the reading let go of it (lease.go)
 			}
 		case 17:
 			// Docker's restart policy restarts a crashed container, with a

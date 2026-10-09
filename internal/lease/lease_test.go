@@ -835,3 +835,25 @@ func TestAGuessThatHitsBindsItsStack(t *testing.T) {
 		t.Fatalf("log: %s", log)
 	}
 }
+
+// A guess that hits while another worktree's checked up names the same
+// project: each binds the container its own worktree runs, the guess too.
+func TestAGuessThatHitsKeepsItsOwnContainerFromAnotherWorktree(t *testing.T) {
+	b, _, log := book(t)
+	b.Observe(snap())
+	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+	b.Check(guessed("w1", "api"), snap(), cfg)
+	b.Observe(withComposeProject(snap(), "api-web-1", "w1", "api", gib/4))
+	for _, l := range b.List() {
+		want := gib
+		if l.Worktree == "w1" {
+			want = gib - gib/4
+		}
+		if l.Bytes != want {
+			t.Errorf("%s reserves %d MiB, want %d", l.Worktree, l.Bytes>>20, want>>20)
+		}
+	}
+	if strings.Contains(log.String(), "ungated") {
+		t.Errorf("log: %s", log)
+	}
+}

@@ -118,9 +118,9 @@ type entry struct {
 	// VM appears, the run failed.
 	pid int
 	// guessed is set for a compose lease whose project the shim guessed
-	// (policy.Request.Guessed): it binds only its own worktree's containers
-	// that no surer key binds, takes no lease over, and ends quietly when
-	// the guess missed (#84).
+	// (policy.Request.Guessed): it binds only containers the reading
+	// attributes to its own worktree, takes no lease over, and ends quietly
+	// when the guess missed (#84).
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
@@ -998,11 +998,9 @@ func (b *Book) unmark(r resource) resource {
 // rank is how sure e's key for r is: a label, then a start's container ID,
 // then a compose project's name (or a start's first target, by its name,
 // not resolved), then a name, or a compose run's lease for a service
-// (after any up's), then a guessed project's name.
+// (after any up's).
 func rank(e *entry, r resource) int {
 	switch {
-	case e.guessed:
-		return 4 // a guessed project's name: any other key first
 	case e.labelled:
 		return 0
 	case slices.Contains(e.containerIDs, r.id):

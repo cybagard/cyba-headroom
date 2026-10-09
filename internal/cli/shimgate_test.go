@@ -1617,18 +1617,19 @@ func TestABareHostNameIsTCP(t *testing.T) {
 		gated bool
 	}{
 		{[]string{"-H", "localhost", "run", "-l", "dev.headroom.lease=x", "alpine"}, true},
-		{[]string{"-H", "build.example", "run", "alpine"}, false},
+		// A remote tcp name must resolve now (#118), so the test uses a documentation address.
+		{[]string{"-H", "203.0.113.5", "run", "alpine"}, false},
 	} {
 		r := newShimRig(t)
 		r.ask = allow
 		dc := filepath.Join(r.dir, "dc")
-		for _, ctx := range []string{"localhost", "build.example"} {
+		for _, ctx := range []string{"localhost", "203.0.113.5"} {
 			sum := sha256.Sum256([]byte(ctx))
 			meta := filepath.Join(dc, "contexts", "meta", hex.EncodeToString(sum[:]))
 			if err := os.MkdirAll(meta, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			host := map[string]string{"localhost": "ssh://dev@build.example", "build.example": "unix:///var/run/docker.sock"}[ctx]
+			host := map[string]string{"localhost": "ssh://dev@build.example", "203.0.113.5": "unix:///var/run/docker.sock"}[ctx]
 			if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"`+host+`"}}}`), 0o600); err != nil {
 				t.Fatal(err)
 			}

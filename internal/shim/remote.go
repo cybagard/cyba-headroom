@@ -14,7 +14,8 @@ import (
 // a host other than this one. The endpoint is the call's own
 // (the last of Call.Host and Call.Context), else the engine's variable: DOCKER_HOST for docker,
 // CONTAINER_HOST for podman. Named contexts and connections count as local,
-// and so do podman machine's ssh://…@127.0.0.1 and this Mac's own names.
+// and so do podman machine's ssh://…@127.0.0.1, this Mac's own names and
+// a tcp host that resolves to this Mac (see thisMac).
 func Remote(name, endpoint string, getenv func(string) string) bool {
 	if endpoint == "" {
 		endpoint = getenv(map[string]string{"docker": "DOCKER_HOST", "podman": "CONTAINER_HOST"}[name])
@@ -28,7 +29,10 @@ func Remote(name, endpoint string, getenv func(string) string) bool {
 	}
 	host := u.Hostname()
 	if ip := net.ParseIP(u.Host); ip != nil {
-		host = u.Host // an unbracketed IPv6 address, which Hostname splits
+		// An unbracketed IPv6 address, which Hostname splits: the docker CLI
+		// reads -H ::1 as tcp://[::1]:2375 (ParseTCPAddr in docker/cli
+		// v29.0.0's opts/hosts.go).
+		host = u.Host
 	}
 	return !thisMac(host, u.Scheme == "tcp")
 }
@@ -59,9 +63,13 @@ func ownIP(ip net.IP) bool {
 }
 
 // thisMac reports whether host names this machine. A tcp host is resolved
-// as the docker CLI dials it, with Go's resolver: getaddrinfo on macOS,
-// which reads 127.1 as 127.0.0.1. An ssh host is not: the CLI hands it to
-// the ssh binary, whose config may alias it.
+// as the docker CLI dials it: with a net.Dialer (ConfigureTransport in
+// docker/go-connections v0.6.0's sockets/sockets.go), so Go's resolver,
+// which on macOS is getaddrinfo even without cgo and reads 127.1 as
+// 127.0.0.1. One that does not resolve within resolveTimeout is this Mac's.
+// An ssh host is not resolved: the CLI hands it to the ssh binary
+// (getConnectionHelper in docker/cli v29.0.0's cli/connhelper/connhelper.go),
+// whose config may alias it.
 func thisMac(host string, tcp bool) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ownIP(ip)

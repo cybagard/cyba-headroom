@@ -108,8 +108,29 @@ func (e Env) withDefaults() Env {
 // about; nor, failing open (R7), is anything when the config or the daemon
 // cannot answer.
 func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gated {
-	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() ||
-		(c.Kind != "tart" && shim.Remote(name, c.Endpoint, getenv)) {
+	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() {
+		return gated{proceed: true}
+	}
+	// The engine, once and first: a remote one proceeds before the config
+	// or the call's labels matter. Docker's is its CLI's (#90); an unknown
+	// one ("") is this Mac's, never DOCKER_HOST, which the CLI ignores when
+	// the call names a context.
+	engine, remote := "", false
+	switch {
+	case c.Kind == "tart":
+	case name == "docker":
+		engine = dockerEndpointIn(getenv, c)
+		remote = engine != "" && shim.Remote(name, engine, getenv)
+	default:
+		// Podman's is the last engine flag, as before #90 (its own order
+		// is #71).
+		endpoint := c.Context
+		if c.HostLast {
+			endpoint = c.Host
+		}
+		remote = shim.Remote(name, endpoint, getenv)
+	}
+	if remote {
 		return gated{proceed: true}
 	}
 	cfg, err := config.Load(getenv)
@@ -129,12 +150,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
 	if name == "docker" {
-		req.Engine = dockerEndpointIn(getenv, c.ConfigDir, c.Endpoint)
-		if c.Kind != "tart" && req.Engine != c.Endpoint && shim.Remote(name, req.Engine, getenv) {
-			// A context (--context, DOCKER_CONTEXT, currentContext) whose
-			// engine is remote: its memory is not this Mac's.
-			return gated{proceed: true}
-		}
+		req.Engine = engine
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool
@@ -444,20 +460,32 @@ func askComposeDry(bin string, args, env []string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// dockerEndpointIn is the endpoint the docker CLI talks to: the call's
-// own -H, or its --context's; else DOCKER_HOST, else the context's
-// (DOCKER_CONTEXT, else currentContext in the config at configDir, from
-// --config, else DOCKER_CONFIG, else ~/.docker), else Docker's default
-// socket. "" when the context cannot be read, or the config directory is
-// relative.
-func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) string {
-	if strings.Contains(endpoint, "://") {
-		return endpoint // -H
+// dockerEndpointIn is the endpoint the docker CLI talks to for call c: its
+// own -H (trimmed; "" is the default socket, and one with no scheme is TCP,
+// on port 2375 if it names none), or its --context's; else DOCKER_HOST,
+// else the context's (DOCKER_CONTEXT, else currentContext in the config at
+// c.ConfigDir, from --config, else DOCKER_CONFIG, else ~/.docker), else
+// Docker's default socket. That is the CLI's order: resolveContextName in
+// docker/cli's cli/command/cli.go, and ParseHost, parseDockerDaemonHost and
+// ParseTCPAddr in its opts/hosts.go for -H. "" (unknown) when the context
+// cannot be read, or the config directory is relative.
+func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
+	if c.HasHost {
+		h := strings.TrimSpace(c.Host)
+		switch {
+		case h == "":
+			return "unix:///var/run/docker.sock"
+		case strings.Contains(h, "://"):
+			return h
+		case !strings.Contains(h, ":"):
+			h += ":2375"
+		}
+		return "tcp://" + h
 	}
-	if h := getenv("DOCKER_HOST"); h != "" && endpoint == "" {
+	if h := getenv("DOCKER_HOST"); h != "" && c.Context == "" {
 		return h
 	}
-	dir := configDir
+	dir := c.ConfigDir
 	if dir == "" {
 		dir = getenv("DOCKER_CONFIG")
 	}
@@ -467,7 +495,7 @@ func dockerEndpointIn(getenv func(string) string, configDir, endpoint string) st
 	if !filepath.IsAbs(dir) {
 		return ""
 	}
-	name := endpoint // --context
+	name := c.Context
 	if name == "" {
 		name = getenv("DOCKER_CONTEXT")
 	}

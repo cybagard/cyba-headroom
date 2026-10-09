@@ -181,33 +181,65 @@ func decide(by string, ids []string) (Match, bool) {
 }
 
 // pathMatches returns the distinct worktrees the paths lie in, in order.
+// A path in a .git within its worktree is set aside when the other paths
+// point at no worktree of another repo: a repo's .git is shared by
+// every linked worktree of the repo, and a container (or VM) of a linked
+// one mounts the main checkout's so git works, which says nothing about
+// which (#94). With nothing else, it still names its repo (a git daemon).
 func (m *Matcher) pathMatches(paths []string) []string {
-	var ids []string
+	var ids, git []string
 	for _, p := range paths {
-		if id := m.owner(p); id != "" && !slices.Contains(ids, id) {
+		id, inGit := m.owner(p)
+		switch {
+		case id == "":
+		case inGit:
+			if !slices.Contains(git, id) {
+				git = append(git, id)
+			}
+		case !slices.Contains(ids, id):
 			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return git
+	}
+	for _, g := range git {
+		if slices.ContainsFunc(ids, func(id string) bool { return !sameRepo(id, g) }) {
+			return append(ids, g) // another repo too: ambiguous
 		}
 	}
 	return ids
 }
 
+// sameRepo reports whether two worktree IDs (<repoId>::<path>) are of one
+// repo. An ID without a repo is its own.
+func sameRepo(a, b string) bool {
+	ra, _, oka := strings.Cut(a, "::")
+	rb, _, okb := strings.Cut(b, "::")
+	return oka && okb && ra == rb
+}
+
 // owner is the deepest worktree that p equals or lies under, on whole path
-// segments; "" if none. Relative paths say nothing about the host.
-func (m *Matcher) owner(p string) string {
+// segments, "" if none, and whether p is or lies in a .git within it (its
+// own, or a nested repo's). Relative paths say nothing about the host.
+func (m *Matcher) owner(p string) (id string, inGit bool) {
 	p = key(p)
 	if p == "" {
-		return ""
+		return "", false
 	}
-	best, bestLen := "", -1
+	bestLen := -1
 	for _, w := range m.wts {
 		if w.path == "" || len(w.path) <= bestLen {
 			continue
 		}
 		if p == w.path || strings.HasPrefix(p, w.path+"/") {
-			best, bestLen = w.id, len(w.path)
+			id, bestLen = w.id, len(w.path)
 		}
 	}
-	return best
+	if id != "" {
+		inGit = strings.Contains(p[bestLen:]+"/", "/.git/")
+	}
+	return id, inGit
 }
 
 // key is p in comparable form: canonical and lower-case, since macOS

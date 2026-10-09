@@ -21,8 +21,8 @@
 
 **R3 — Worktree attribution.** The worktree path is the join key.
 
-- [x] Containers attributed by compose project label or bind-mount path (#20). Launching process cwd needs the shim's labels or leases (#26, #28, #25)
-- [x] Tart VMs attributed by naming convention (VM name contains the worktree's directory name as whole words; the name must be unique among live worktrees, at least four characters, and not a generic word such as `main` or `test`), by the cwd of the process that launched `tart run`, or by its `--dir` host paths. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
+- [x] Containers attributed by compose project label or bind-mount path (#20). A mount (or `--dir`) in a `.git` is set aside when another path matches a worktree and every such worktree is of the same repo; on its own it names its repo: a linked worktree mounts the main checkout's `.git` so git works (#94). Launching process cwd needs the shim's labels or leases (#26, #28, #25)
+- [x] Tart VMs attributed by naming convention (VM name contains the worktree's directory name as whole words; the name must be unique among the live worktree names, at least four characters, and not a generic word such as `main` or `test`), by the cwd of the process that launched `tart run`, or by its `--dir` host paths, with the same `.git` rule as container mounts. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
 - [x] Anything that matches no live worktree, or more than one, appears under **unattributed**, with the reason
 - [x] Given a container started from worktree `fix-login`, when the view refreshes, then it appears under `fix-login` (attribution, #20; view, #21)
 

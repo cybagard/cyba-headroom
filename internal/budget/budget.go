@@ -147,7 +147,7 @@ func docker(d *protocol.Docker, p Params) protocol.BudgetComponent {
 func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 	var sizes uint64
 	for _, m := range l.Models {
-		sizes += m.SizeBytes
+		sizes = addSize(sizes, m.SizeBytes)
 	}
 	return modelServer("lmstudio", l.Running, l.FootprintBytes, p.LMStudioIdleBytes, sizes)
 }
@@ -157,9 +157,24 @@ func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 func ollama(o *protocol.Ollama, p Params) protocol.BudgetComponent {
 	var sizes uint64
 	for _, m := range o.Models {
-		sizes += m.SizeBytes
+		sizes = addSize(sizes, m.SizeBytes)
 	}
 	return modelServer("ollama", o.Running, o.FootprintBytes, p.OllamaIdleBytes, sizes)
+}
+
+// maxSizes bounds a model server's summed model sizes, as policy's maxBytes
+// bounds a request: far above any Mac's memory, so a bogus size (another
+// user's process may answer /api/ps) only shrinks headroom and the budget's
+// arithmetic cannot wrap.
+const maxSizes = uint64(1) << 42
+
+// addSize adds a model's size to sizes (at most maxSizes), saturating at
+// maxSizes.
+func addSize(sizes, size uint64) uint64 {
+	if size >= maxSizes-sizes {
+		return maxSizes
+	}
+	return sizes + size
 }
 
 // modelServer reserves a model server's idle size plus its loaded models'

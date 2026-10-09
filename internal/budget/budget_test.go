@@ -204,6 +204,40 @@ func TestOllamaReservesLoadedModels(t *testing.T) {
 	}
 }
 
+// A bogus size, e.g. from another user's process answering /api/ps, can
+// only shrink headroom: the sum saturates instead of wrapping.
+func TestModelSizesSaturate(t *testing.T) {
+	const bound = uint64(1) << 42
+	cases := map[string][]uint64{
+		"one size near 2^64":     {18446742974197923840},
+		"sum overflows":          {1 << 63, 1 << 63},
+		"sum overflows past one": {1<<64 - 1, 2 * gib},
+	}
+	for name, sizes := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := busyMac()
+			s.Ollama.Models, s.LMStudio.Models = nil, nil
+			for _, size := range sizes {
+				s.Ollama.Models = append(s.Ollama.Models, protocol.OllamaModel{SizeBytes: size})
+				s.LMStudio.Models = append(s.LMStudio.Models, protocol.LoadedModel{SizeBytes: size})
+			}
+			s.Ollama.FootprintBytes, s.LMStudio.FootprintBytes = nil, nil
+			b := budget.Compute(s, budget.Params{HostBaselineBytes: 8 * gib, OllamaIdleBytes: gib, LMStudioIdleBytes: gib})
+			for _, name := range []string{"ollama", "lmstudio"} {
+				if c := component(t, b, name); c.ReservedBytes != bound+gib {
+					t.Errorf("%s reserved = %d, want %d", name, c.ReservedBytes, bound+gib)
+				}
+			}
+			if b.HeadroomBytes == nil {
+				t.Fatal("headroom unknown, want negative")
+			}
+			if *b.HeadroomBytes >= 0 {
+				t.Fatalf("headroom = %d, want negative", *b.HeadroomBytes)
+			}
+		})
+	}
+}
+
 func i64(v int64) *int64 { return &v }
 
 // busyMac is a 64 GiB Mac with every source reporting.

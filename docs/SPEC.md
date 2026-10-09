@@ -68,7 +68,7 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 
 **R3 — Worktree attribution.** The worktree path is the join key.
 
-- [ ] Containers attributed by compose project label, bind-mount path or launching process cwd
+- [ ] Containers attributed by compose project label, bind-mount path or launching process cwd. A mount in a worktree's `.git` counts only when no other mount points at a worktree (#94)
 - [ ] Tart VMs attributed by naming convention (VM name contains the worktree name), by the cwd of the process that launched `tart run`, or by its `--dir` host paths. (`tart run` itself changes cwd to the VM bundle, so its own cwd says nothing; see #15.)
 - [ ] Anything that matches no live worktree appears under **unattributed**
 - [ ] Given a container started from worktree `fix-login`, when the view refreshes, then it appears under `fix-login`

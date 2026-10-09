@@ -17,6 +17,8 @@ var wts = []attribution.Worktree{
 	{ID: "ci", Path: "/Users/dev/w/ci"},
 	{ID: "test", Path: "/Users/dev/w/test"},
 	{ID: "case", Path: "/Users/dev/w/Fix-Login"},
+	{ID: "gitwt", Path: "/Users/dev/w/gitwt"},
+	{ID: "feat", Path: "/Users/dev/w/gitwt/.git/wt/feat"},
 }
 
 func TestMatchPaths(t *testing.T) {
@@ -42,7 +44,11 @@ func TestMatchPaths(t *testing.T) {
 		"linked's own .git file":     {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/.git", "/Users/dev/w/project-b/.git"}}, attribution.Match{Reason: attribution.Ambiguous}},
 		"nested worktree's .git":     {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/sub/wt/.git", "/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
 		".GIT, trailing slash":       {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.GIT/", "/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
-		// Only mounts: a compose dir inside .git still decides.
+		// A worktree that lives inside another checkout's .git is itself.
+		"worktree inside a .git": {attribution.Keys{Mounts: []string{"/Users/dev/w/gitwt/.git/wt/feat", "/Users/dev/w/project-a"}}, attribution.Match{Reason: attribution.Ambiguous}},
+		// Tart's --dir too: a VM sharing the main .git and a linked worktree.
+		"shared dir .git": {attribution.Keys{SharedDirs: []string{"/Users/dev/w/project-b/.git", "/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.BySharedDir}},
+		// Only mounts and shared dirs: a compose dir inside .git still decides.
 		"compose dir in .git":  {attribution.Keys{ComposeDir: "/Users/dev/w/project-b/.git/x", Mounts: []string{"/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "b", By: attribution.ByComposeDir}},
 		".github still counts": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.github"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
 		"case-insensitive":     {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},

@@ -91,13 +91,14 @@ func (m *Matcher) Match(k Keys) Match {
 	for _, ev := range []struct {
 		by    string
 		paths []string
+		many  bool // several paths: a .git among them may be set aside
 	}{
-		{ByComposeDir, nonEmpty(k.ComposeDir)},
-		{ByLaunchCwd, nonEmpty(k.LaunchCwd)},
-		{ByMount, m.notGit(k.Mounts)},
-		{BySharedDir, k.SharedDirs},
+		{ByComposeDir, nonEmpty(k.ComposeDir), false},
+		{ByLaunchCwd, nonEmpty(k.LaunchCwd), false},
+		{ByMount, k.Mounts, true},
+		{BySharedDir, k.SharedDirs, true},
 	} {
-		if r, ok := decide(ev.by, m.pathMatches(ev.paths)); ok {
+		if r, ok := decide(ev.by, m.pathMatches(ev.paths, ev.many)); ok {
 			return r
 		}
 	}
@@ -180,60 +181,54 @@ func decide(by string, ids []string) (Match, bool) {
 	return Match{WorktreeID: ids[0], By: by}, true
 }
 
-// notGit is mounts without those in a worktree's .git, unless that leaves
-// none that point at a worktree. A repo's .git is shared by every linked
-// worktree of the repo: a container mounts the main checkout's so git
-// works in a linked one, and that says nothing about which (#94). With
-// nothing else, it still names its repo (a git daemon).
-func (m *Matcher) notGit(mounts []string) []string {
-	var rest []string
-	for _, p := range mounts {
-		if !m.inGitDir(p) {
-			rest = append(rest, p)
-		}
-	}
-	if len(m.pathMatches(rest)) == 0 {
-		return mounts
-	}
-	return rest
-}
-
-// inGitDir reports whether p is a worktree's .git or lies inside it.
-func (m *Matcher) inGitDir(p string) bool {
-	p = key(p)
-	return p != "" && slices.ContainsFunc(m.wts, func(w prepared) bool {
-		return w.path != "" && (p == w.path+"/.git" || strings.HasPrefix(p, w.path+"/.git/"))
-	})
-}
-
 // pathMatches returns the distinct worktrees the paths lie in, in order.
-func (m *Matcher) pathMatches(paths []string) []string {
-	var ids []string
+// With setAside, a path in its worktree's .git counts only when no other
+// path points at a worktree: a repo's .git is shared by every linked
+// worktree of the repo, and a container (or VM) of a linked one mounts the
+// main checkout's so git works, which says nothing about which (#94). With
+// nothing else, it still names its repo (a git daemon).
+func (m *Matcher) pathMatches(paths []string, setAside bool) []string {
+	var ids, git []string
 	for _, p := range paths {
-		if id := m.owner(p); id != "" && !slices.Contains(ids, id) {
+		id, inGit := m.owner(p)
+		switch {
+		case id == "":
+		case inGit && setAside:
+			if !slices.Contains(git, id) {
+				git = append(git, id)
+			}
+		case !slices.Contains(ids, id):
 			ids = append(ids, id)
 		}
+	}
+	if len(ids) == 0 {
+		return git
 	}
 	return ids
 }
 
 // owner is the deepest worktree that p equals or lies under, on whole path
-// segments; "" if none. Relative paths say nothing about the host.
-func (m *Matcher) owner(p string) string {
+// segments, "" if none, and whether p is that worktree's .git or lies in
+// it. Relative paths say nothing about the host.
+func (m *Matcher) owner(p string) (id string, inGit bool) {
 	p = key(p)
 	if p == "" {
-		return ""
+		return "", false
 	}
-	best, bestLen := "", -1
+	bestLen := -1
 	for _, w := range m.wts {
 		if w.path == "" || len(w.path) <= bestLen {
 			continue
 		}
 		if p == w.path || strings.HasPrefix(p, w.path+"/") {
-			best, bestLen = w.id, len(w.path)
+			id, bestLen = w.id, len(w.path)
 		}
 	}
-	return best
+	if id != "" {
+		rest := strings.TrimPrefix(p[bestLen:], "/")
+		inGit = rest == ".git" || strings.HasPrefix(rest, ".git/")
+	}
+	return id, inGit
 }
 
 // key is p in comparable form: canonical and lower-case, since macOS

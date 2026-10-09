@@ -20,6 +20,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/shim"
@@ -694,12 +695,7 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 	}
 	call := []string{"compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "up", "-d"}
 	// Compose's name wins over its defaults, which it has already weighed.
-	env := func(k string) string {
-		if k == "COMPOSE_PROJECT_NAME" {
-			return "other"
-		}
-		return ""
-	}
+	env := envMap(map[string]string{"COMPOSE_PROJECT_NAME": "other"})
 	wd := func() (string, error) { return "/Users/dev/src/project-a", nil }
 	if got := composeProject("/usr/local/bin/docker", call, shim.Parse("docker", call), env, wd, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
@@ -718,8 +714,16 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 }
 
 // noEnv and noWd are a call with no environment and no working directory.
-func noEnv(string) string   { return "" }
-func noWd() (string, error) { return "", errors.New("no working directory") }
+func noEnv(string) (string, bool) { return "", false }
+func noWd() (string, error)       { return "", errors.New("no working directory") }
+
+// envMap is a call's environment, m.
+func envMap(m map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := m[k]
+		return v, ok
+	}
+}
 
 // When Compose cannot name the project (its config fails or times out), the
 // project is the one Compose names by default: COMPOSE_PROJECT_NAME, else
@@ -763,7 +767,7 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 		{"the working directory, with its own compose file", []string{"compose", "up"}, nil, stack, "myapp"},
 	} {
 		c := shim.Parse("docker", tc.args)
-		getenv := func(k string) string { return tc.env[k] }
+		getenv := envMap(tc.env)
 		if tc.wd == "" {
 			tc.wd = "/Users/dev/src/project-a"
 		}
@@ -772,6 +776,66 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 			if got := composeProject("/usr/local/bin/docker", tc.args, c, getenv, wd, ask); got != tc.want {
 				t.Errorf("%s, config %s: project = %q, want %q", tc.name, how, got, tc.want)
 			}
+		}
+	}
+}
+
+// When Compose's config fails, the fallback reads COMPOSE_PROJECT_NAME from
+// the env files as Compose does (#85): the --env-files, else .env in the
+// project directory; with no -f or --project-directory, the working
+// directory's .env, then that of the compose file found in a parent, the
+// first winning. The name is still a guess.
+func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("stack/compose.yaml", "services: {}\n")
+	write("stack/.env", "COMPOSE_PROJECT_NAME=from-stack\n")
+	write("stack/deeper/x", "")
+	write("stack/own/.env", "COMPOSE_PROJECT_NAME=from-own\n")
+	write("stack/empty/.env", "COMPOSE_PROJECT_NAME=\n")
+	write("stack/unknown/.env", "COMPOSE_PROJECT_NAME=$UNSET_X\n")
+	write("plain/.env", "COMPOSE_PROJECT_NAME=from-plain\n")
+	write("web/compose.yaml", "services: {}\n")
+	write("web/.env", "COMPOSE_PROJECT_NAME=from-web\n")
+	write("x.env", "COMPOSE_PROJECT_NAME=from-x\n")
+	write("dollar/.env", "COMPOSE_PROJECT_NAME=$OTHER\n")
+	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		wd   string
+		want string
+	}{
+		{"the working directory's .env", []string{"compose", "up"}, nil, "plain", "from-plain"},
+		{"--project-directory's .env", []string{"compose", "--project-directory", "plain", "up"}, nil, "", "from-plain"},
+		{"the first -f file's directory's .env", []string{"compose", "-f", "web/compose.yaml", "up"}, nil, "", "from-web"},
+		{"COMPOSE_FILE's directory's .env", []string{"compose", "up"}, map[string]string{"COMPOSE_FILE": "web/compose.yaml"}, "", "from-web"},
+		{"--env-file, relative to the working directory", []string{"compose", "--project-directory", "plain", "--env-file", "x.env", "up"}, nil, "", "from-x"},
+		{"the found compose file's .env", []string{"compose", "up"}, nil, "stack/deeper", "from-stack"},
+		{"the working directory's .env before the found one's", []string{"compose", "up"}, nil, "stack/own", "from-own"},
+		// The first .env that sets it wins, even to a name the shim cannot know.
+		{"the working directory's .env, set empty, before the found one's", []string{"compose", "up"}, nil, "stack/empty", "stack"},
+		{"the working directory's .env, interpolated, before the found one's", []string{"compose", "up"}, nil, "stack/unknown", "stack"},
+		{"the process environment beats .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "plain", "env"},
+		{"an empty COMPOSE_PROJECT_NAME in the environment: the directory's, not .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": ""}, "plain", "plain"},
+		{"an interpolated name: the directory's", []string{"compose", "up"}, nil, "dollar", "dollar"},
+	} {
+		c := shim.Parse("docker", tc.args)
+		getenv := envMap(tc.env)
+		wd := func() (string, error) { return filepath.Join(root, tc.wd), nil }
+		got, guessed := composeKey("/usr/local/bin/docker", tc.args, c, getenv, wd, failing, time.Now, os.Stat)
+		if got != tc.want || !guessed {
+			t.Errorf("%s: project = %q, guessed %v, want %q, guessed", tc.name, got, guessed, tc.want)
 		}
 	}
 }
@@ -909,11 +973,16 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 }
 
 // The name the shim falls back on when Compose's config fails is sent as a
-// guess (#84), and only that one: not -p, not Compose's own name, not
-// stdin's (the project directory's, as before).
+// guess (#84). Not -p, not Compose's own name, and not stdin's, which the
+// shim names as Compose does but for a name: in the piped file (#85).
 func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
 	r := newShimRig(t)
-	r.env = append(r.env, "ORCA_WORKTREE_ID=w", "COMPOSE_PROJECT_NAME=Shop")
+	base := append(slices.Clone(r.env), "ORCA_WORKTREE_ID=w")
+	named := "COMPOSE_PROJECT_NAME=Shop"
+	envFile := filepath.Join(r.dir, "x.env")
+	if err := os.WriteFile(envFile, []byte("COMPOSE_PROJECT_NAME=from-x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r.ask = allow
 	config := []byte(`{"name":"x"}`)
 	r.composeAsk = func(string, []string) ([]byte, error) {
@@ -925,18 +994,26 @@ func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		fails   bool
+		env     string
 		call    []string
 		target  string
 		guessed bool
 	}{
-		{"config fails", true, []string{"docker", "compose", "up", "-d"}, "shop", true},
-		{"config names it", false, []string{"docker", "compose", "up", "-d"}, "x", false},
-		{"-p", true, []string{"docker", "compose", "-p", "p", "up", "-d"}, "p", false},
-		{"stdin", true, []string{"docker", "compose", "-f", "-", "up", "-d"}, "shop", false},
+		{"config fails", true, named, []string{"docker", "compose", "up", "-d"}, "shop", true},
+		{"config names it", false, named, []string{"docker", "compose", "up", "-d"}, "x", false},
+		{"-p", true, named, []string{"docker", "compose", "-p", "p", "up", "-d"}, "p", false},
+		{"stdin, the project directory's", true, "", []string{"docker", "compose", "--project-directory", "/srv/api", "-f", "-", "up", "-d"}, "api", false},
+		{"stdin, from the environment", true, named, []string{"docker", "compose", "-f", "-", "up", "-d"}, "shop", false},
+		{"stdin, from an env file", true, "", []string{"docker", "compose", "--env-file", envFile, "-f", "-", "up", "-d"}, "from-x", false},
+		{"stdin, -p", true, named, []string{"docker", "compose", "-p", "p", "-f", "-", "up", "-d"}, "p", false},
 	} {
 		config = []byte(`{"name":"x"}`)
 		if tc.fails {
 			config = nil
+		}
+		r.env = slices.Clone(base)
+		if tc.env != "" {
+			r.env = append(r.env, tc.env)
 		}
 		r.asked = nil
 		r.run(tc.call...)
@@ -946,26 +1023,227 @@ func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
 	}
 }
 
+// A repeat stdin up of a running stack in a plain directory sends the
+// directory's name as exact, as before #85: the lease book takes the first
+// up's lease over instead of reserving the estimate again beside it.
+func TestARepeatStdinUpTakesTheFirstLeaseOver(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w")
+	plain, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(plain) })
+	book := lease.New(time.Minute, time.Now, discardLog())
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}}
+	r.ask = func(req protocol.CheckRequest) (*protocol.Decision, error) {
+		d := check(&req, s)
+		return &d, nil
+	}
+	for range 2 {
+		if code, stderr := r.run("docker", "compose", "--project-directory", plain, "-f", "-", "up", "-d"); code != 0 {
+			t.Fatalf("exit %d, %s", code, stderr)
+		}
+	}
+	if l := book.List(); len(l) != 1 {
+		t.Fatalf("leases = %+v, want the first taken over", l)
+	}
+}
+
 // compose -f - reads its file from stdin, which the shim must not consume:
 // the project is what Compose names it then, COMPOSE_PROJECT_NAME or the
 // project directory's name (the working directory's).
 func TestComposeProjectOfStdin(t *testing.T) {
 	wd := func() (string, error) { return "/Users/dev/src/My_App", nil }
-	none := func(string) string { return "" }
+	none := noEnv
 	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, none, wd); got != "my_app" {
 		t.Fatalf("project = %q, want my_app", got)
 	}
-	env := func(k string) string {
-		if k == "COMPOSE_PROJECT_NAME" {
-			return "Piped"
-		}
-		return ""
-	}
+	env := envMap(map[string]string{"COMPOSE_PROJECT_NAME": "Piped"})
 	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, env, wd); got != "piped" {
 		t.Fatalf("project = %q, want piped", got)
 	}
 	if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}, ComposeProjectDir: "/srv/_api"}, none, wd); got != "api" {
 		t.Fatalf("project = %q, want api", got)
+	}
+}
+
+// compose -f - takes COMPOSE_PROJECT_NAME from the env files Compose loads
+// (#85): the --env-files, relative to the working directory, a later one
+// winning; else .env in the project directory.
+func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	app, sub := filepath.Join(root, "app"), filepath.Join(root, "app", "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(app, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".env", "COMPOSE_PROJECT_NAME=Dotted\n")
+	write("x.env", "COMPOSE_PROJECT_NAME=from-x\n")
+	write("y.env", "OTHER=1\nCOMPOSE_PROJECT_NAME=from-y\n")
+	write("none.env", "OTHER=1\n")
+	write("sub/.env", "COMPOSE_PROJECT_NAME=from-sub\n")
+	wd := func() (string, error) { return app, nil }
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{".env in the working directory", []string{"compose", "-f", "-", "up", "-d"}, nil, "dotted"},
+		{".env in --project-directory", []string{"compose", "--project-directory", "sub", "-f", "-", "up", "-d"}, nil, "from-sub"},
+		{"--env-file instead of .env", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "from-x"},
+		{"the last --env-file wins", []string{"compose", "--env-file", "x.env", "--env-file", "y.env", "-f", "-", "up", "-d"}, nil, "from-y"},
+		{"an earlier --env-file, when a later one does not set it", []string{"compose", "--env-file", "x.env", "--env-file", "none.env", "-f", "-", "up", "-d"}, nil, "from-x"},
+		{"--env-file relative to the working directory, not the project's", []string{"compose", "--project-directory", "sub", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "from-x"},
+		{"an --env-file that does not set it: the directory's name, not .env", []string{"compose", "--env-file", "none.env", "-f", "-", "up", "-d"}, nil, "app"},
+		{"an unreadable --env-file is skipped", []string{"compose", "--env-file", "missing.env", "--env-file", "x.env", "-f", "-", "up", "-d"}, nil, "from-x"},
+		{"COMPOSE_ENV_FILES instead of .env", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_ENV_FILES": "x.env,y.env"}, "from-y"},
+		{"--env-file before COMPOSE_ENV_FILES", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_ENV_FILES": "y.env"}, "from-x"},
+		{"COMPOSE_DISABLE_ENV_FILE: no .env", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_DISABLE_ENV_FILE": "true"}, "app"},
+		{"COMPOSE_DISABLE_ENV_FILE: --env-file still read", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_DISABLE_ENV_FILE": "1"}, "from-x"},
+		{"the process environment beats the env files", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "env"},
+		{"the process environment beats .env", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "env"},
+		{"an empty COMPOSE_PROJECT_NAME in the environment: the directory's, not .env", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_PROJECT_NAME": ""}, "app"},
+		{"-p beats both", []string{"compose", "-p", "flag", "--env-file", "x.env", "-f", "-", "up", "-d"},
+			map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "flag"},
+	} {
+		if got := composeStdinProject(shim.Parse("docker", tc.args), envMap(tc.env), wd); got != tc.want {
+			t.Errorf("%s: project = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// compose -f - with another -f file: the project directory is that file's,
+// as Compose's GetWorkingDir has it (the first -f that is not -), for its
+// .env and its name (#85).
+func TestComposeProjectOfStdinWithAnotherFile(t *testing.T) {
+	app := filepath.Join(t.TempDir(), "app")
+	for name, body := range map[string]string{
+		".env":            "COMPOSE_PROJECT_NAME=from-cwd\n",
+		"ops/base.yml":    "services: {}\n",
+		"opsenv/base.yml": "services: {}\n",
+		"opsenv/.env":     "COMPOSE_PROJECT_NAME=from-ops\n",
+	} {
+		p := filepath.Join(app, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wd := func() (string, error) { return app, nil }
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"compose", "-f", "ops/base.yml", "-f", "-", "up", "-d"}, "ops"},
+		{[]string{"compose", "-f", "-", "-f", "ops/base.yml", "up", "-d"}, "ops"},
+		{[]string{"compose", "-f", "opsenv/base.yml", "-f", "-", "up", "-d"}, "from-ops"},
+	} {
+		if got := composeStdinProject(shim.Parse("docker", tc.args), noEnv, wd); got != tc.want {
+			t.Errorf("%q: project = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// An env file is read only if it is a regular file, and only up to
+// envFileMax (#85): a .env linked to /dev/zero, or a FIFO, costs nothing and
+// never blocks; one past the limit sets a name the shim cannot know. Either
+// way, the project is the directory's.
+func TestComposeEnvFileReadIsBounded(t *testing.T) {
+	app := filepath.Join(t.TempDir(), "app")
+	if err := os.Mkdir(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotenv := filepath.Join(app, ".env")
+	wd := func() (string, error) { return app, nil }
+	pad := strings.Repeat("# padding\n", envFileMax/10+1)
+	for _, tc := range []struct {
+		name string
+		make func() error
+	}{
+		{"named past the limit", func() error {
+			return os.WriteFile(dotenv, []byte(pad+"COMPOSE_PROJECT_NAME=late\n"), 0o644)
+		}},
+		{"named, then past the limit", func() error {
+			return os.WriteFile(dotenv, []byte("COMPOSE_PROJECT_NAME=early\n"+pad), 0o644)
+		}},
+		{"a FIFO", func() error { return syscall.Mkfifo(dotenv, 0o644) }},
+		{"a link to /dev/zero", func() error { return os.Symlink("/dev/zero", dotenv) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.RemoveAll(dotenv); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.make(); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, noEnv, wd)
+			if took := time.Since(start); took > time.Second {
+				t.Errorf("took %v", took)
+			}
+			if got != "app" {
+				t.Errorf("project = %q, want app", got)
+			}
+		})
+	}
+}
+
+// An env file is read as compose-go's dotenv parser reads it; each want is
+// what Docker Compose 5.5.1 named the project (with OTHER=o in its
+// environment), except that a value Compose interpolates is unknown, and
+// the directory's name follows.
+func TestComposeEnvFileSyntaxAsCompose(t *testing.T) {
+	app := filepath.Join(t.TempDir(), "app")
+	if err := os.Mkdir(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wd := func() (string, error) { return app, nil }
+	for _, tc := range []struct{ env, want string }{
+		{"export COMPOSE_PROJECT_NAME=exp\n", "exp"},
+		{"COMPOSE_PROJECT_NAME='single'\n", "single"},
+		{"COMPOSE_PROJECT_NAME=\"double\"\n", "double"},
+		{"# COMPOSE_PROJECT_NAME=commented\n", "app"},
+		{"COMPOSE_PROJECT_NAME=inline # comment\n", "inline"},
+		{"  COMPOSE_PROJECT_NAME = spaced  \n", "spaced"},
+		{"COMPOSE_PROJECT_NAME: yaml\n", "yaml"},
+		{"COMPOSE_PROJECT_NAME=one\nCOMPOSE_PROJECT_NAME=two\n", "two"},
+		{"COMPOSE_PROJECT_NAME=first\nCOMPOSE_PROJECT_NAME\n", "first"}, // the bare key looks itself up
+		{"COMPOSE_PROJECT_NAME=\n", "app"},
+		{"COMPOSE_PROJECT_NAME=crlf\r\n", "crlf"},
+		{"\xef\xbb\xbfCOMPOSE_PROJECT_NAME=bom\n", "bom"},
+		// A quoted value spans lines: what it holds is not a statement.
+		{"A=\"x\nCOMPOSE_PROJECT_NAME=fake\n\"\n", "app"},
+		{"A='x\nCOMPOSE_PROJECT_NAME=fake\n'\nCOMPOSE_PROJECT_NAME=real\n", "real"},
+		{"A=\"x\\\"\nCOMPOSE_PROJECT_NAME=fake\n\"\n", "app"}, // an escaped quote does not end it
+		// Interpolated by Compose ("o", "o-a"): unknown here.
+		{"COMPOSE_PROJECT_NAME=$OTHER\n", "app"},
+		{"COMPOSE_PROJECT_NAME=\"${OTHER}-a\"\n", "app"},
+		{"COMPOSE_PROJECT_NAME=named\nCOMPOSE_PROJECT_NAME=$OTHER\n", "app"},
+	} {
+		if err := os.WriteFile(filepath.Join(app, ".env"), []byte(tc.env), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := composeStdinProject(shim.Call{ComposeFiles: []string{"-"}}, noEnv, wd); got != tc.want {
+			t.Errorf("%q: project = %q, want %q", tc.env, got, tc.want)
+		}
 	}
 }
 

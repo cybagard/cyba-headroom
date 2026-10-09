@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
@@ -163,11 +165,13 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// not asked), and says whether a detached up starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
 		// down (R7).
+		env, _ := e.envOf()
+		lookupEnv := lookupIn(env)
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
-			req.Target = composeStdinProject(c, getenv, h.getwd)
+			req.Target = composeStdinProject(c, lookupEnv, h.getwd)
 		} else {
-			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, getenv, h.getwd, h.composeAsk, h.now, h.stat)
+			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
 			// Compose would start anything ("interactive run is not
 			// supported"), and a restart's lists each container as
@@ -289,8 +293,8 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 // name: the way it does, keeps the two from parting. When Compose cannot
 // say (its config fails or times out), the name it gives by default
 // (composeDefaultProject, #84).
-func composeProject(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
-	project, _ := composeKey(bin, args, c, getenv, getwd, ask, time.Now, os.Stat)
+func composeProject(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
+	project, _ := composeKey(bin, args, c, lookupEnv, getwd, ask, time.Now, os.Stat)
 	return project
 }
 
@@ -298,7 +302,7 @@ func composeProject(bin string, args []string, c shim.Call, getenv func(string) 
 // Compose gives by default, its config having failed, which misses a name
 // Compose finds elsewhere (#85). The lease book trusts a guess less (#84).
 // now and stat are the clock and os.Stat.
-func composeKey(bin string, args []string, c shim.Call, getenv func(string) string, getwd func() (string, error),
+func composeKey(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error),
 	ask func(bin string, args []string) ([]byte, error), now func() time.Time, stat func(string) (fs.FileInfo, error)) (project string, guessed bool) {
 	if c.Target != "" {
 		return c.Target, false
@@ -313,27 +317,35 @@ func composeKey(bin string, args []string, c shim.Call, getenv func(string) stri
 		Name string `json:"name"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		project = composeDefaultProject(c, getenv, getwd, composeTimeout-now().Sub(asked), stat)
+		project = composeDefaultProject(c, lookupEnv, getwd, asked.Add(composeTimeout), now, stat)
 		return project, project != ""
 	}
 	return cfg.Name, false
 }
 
 // composeDefaultProject is the project Compose names when it is not asked
-// (#84): COMPOSE_PROJECT_NAME from the call's environment, else the name of
-// the project directory: --project-directory, else the directory of the
-// first file (-f, else COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR; not
-// stdin's -), else of the compose file found in the working directory or
-// the nearest of its parents (searched for at most left), else the working
-// directory. Normalised as
-// Compose does. As compose-go's cli/options.go has it (GetWorkingDir,
-// WithConfigFileEnv, WithDefaultConfigPath, withNamePrecedenceLoad) and
+// (#84): COMPOSE_PROJECT_NAME from the call's environment, else from the
+// env files (composeEnvFileProject, #85), else the name of the project
+// directory: --project-directory, else the directory of the first file (-f,
+// else COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR; not stdin's -), else of
+// the compose file found in the working directory or the nearest of its
+// parents, else the working directory. Normalised as Compose does. As
+// compose-go's cli/options.go has it (GetWorkingDir, WithConfigFileEnv,
+// WithDefaultConfigPath, withNamePrecedenceLoad) and
 // loader.NormalizeProjectName; Compose's docs, "Specify a project name".
+// Compose reads .env in the directory it has before COMPOSE_FILE and the
+// search (--project-directory, -f's, else the working directory), then in
+// the project directory it ends with, the first winning (docker/compose's
+// cmd/compose/compose.go, toProjectOptions). The files are read and the
+// parents searched until deadline, by the clock now: config has already
+// waited.
 //
-// It cannot see a name: in the compose file, nor a COMPOSE_PROJECT_NAME or
-// COMPOSE_FILE in .env (#85): there the name differs from Compose's, the
-// lease never binds and holds its cost, as with no name at all.
-func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func() (string, error), left time.Duration, stat func(string) (fs.FileInfo, error)) string {
+// It cannot see a name: in the compose file, nor a COMPOSE_FILE in .env, nor
+// an interpolated COMPOSE_PROJECT_NAME: there the name differs from
+// Compose's, and the lease, a guess, binds nothing (entry.guessed).
+func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), deadline time.Time, now func() time.Time,
+	stat func(string) (fs.FileInfo, error)) string {
+	getenv := getenvOf(lookupEnv)
 	if name := getenv("COMPOSE_PROJECT_NAME"); name != "" {
 		return normalProject(name)
 	}
@@ -341,21 +353,37 @@ func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func()
 	if err != nil {
 		return ""
 	}
-	files := c.ComposeFiles
-	if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
-		sep := getenv("COMPOSE_PATH_SEPARATOR")
-		if sep == "" {
-			sep = string(filepath.ListSeparator)
-		}
-		files = strings.Split(f, sep)
-	}
+	first := func(files []string) int { return slices.IndexFunc(files, func(f string) bool { return f != "-" }) }
 	dir := cwd
 	if c.ComposeProjectDir != "" {
 		dir = absIn(cwd, c.ComposeProjectDir)
-	} else if i := slices.IndexFunc(files, func(f string) bool { return f != "-" }); i >= 0 {
-		dir = filepath.Dir(absIn(cwd, files[i]))
-	} else if found, ok := composeFileDirWithin(cwd, left, stat); ok {
-		dir = found
+	} else if i := first(c.ComposeFiles); i >= 0 {
+		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
+	}
+	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
+		return normalProject(name)
+	}
+	if dir == cwd && c.ComposeProjectDir == "" {
+		files := c.ComposeFiles
+		if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
+			sep := getenv("COMPOSE_PATH_SEPARATOR")
+			if sep == "" {
+				sep = string(filepath.ListSeparator)
+			}
+			files = strings.Split(f, sep)
+		}
+		if i := first(files); i >= 0 {
+			dir = filepath.Dir(absIn(cwd, files[i]))
+		} else if found, ok := composeFileDirWithin(cwd, deadline.Sub(now()), stat); ok {
+			dir = found
+		}
+		if dir != cwd {
+			// The working directory's .env again, first: one that sets it
+			// to a name the shim cannot know wins too.
+			if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{cwd, dir}, deadline.Sub(now())); ok {
+				return normalProject(name)
+			}
+		}
 	}
 	return normalProject(filepath.Base(dir))
 }
@@ -509,27 +537,244 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 }
 
 // composeStdinProject names the project of compose -f - as Compose does
-// when its file is on stdin: -p, else COMPOSE_PROJECT_NAME, else the
-// project directory's name (--project-directory, else the working
-// directory). A name: in the piped file is not seen: that lease then does
-// not bind, and holds its cost (failing closed).
-func composeStdinProject(c shim.Call, getenv func(string) string, getwd func() (string, error)) string {
+// when its file is on stdin: -p, else COMPOSE_PROJECT_NAME from the
+// environment, else from the env files (composeEnvFileProject), else the
+// project directory's name (--project-directory, else the directory of the
+// first -f file that is not -, else the working directory; compose-go's
+// cli/options.go, GetWorkingDir). A name: in the piped file is not seen:
+// that lease then does not bind, and holds its cost (failing closed).
+func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string) {
+	getenv := getenvOf(lookupEnv)
 	switch {
 	case c.Target != "":
 		return c.Target
 	case getenv("COMPOSE_PROJECT_NAME") != "":
 		return normalProject(getenv("COMPOSE_PROJECT_NAME"))
-	case filepath.IsAbs(c.ComposeProjectDir):
-		return normalProject(filepath.Base(c.ComposeProjectDir))
 	}
 	cwd, err := getwd()
 	if err != nil {
-		return ""
+		if filepath.IsAbs(c.ComposeProjectDir) {
+			project = normalProject(filepath.Base(c.ComposeProjectDir))
+		}
+		return project
 	}
+	dir := cwd
 	if c.ComposeProjectDir != "" {
-		cwd = filepath.Join(cwd, c.ComposeProjectDir)
+		dir = absIn(cwd, c.ComposeProjectDir)
+	} else if i := slices.IndexFunc(c.ComposeFiles, func(f string) bool { return f != "-" }); i >= 0 {
+		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
 	}
-	return normalProject(filepath.Base(cwd))
+	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout); ok {
+		return normalProject(name)
+	}
+	return normalProject(filepath.Base(dir))
+}
+
+// composeEnvFileProject is COMPOSE_PROJECT_NAME as the env files Compose
+// loads set it (#85), read within left; ok is false when none sets it to a
+// value the shim can know, or the time ran out. The files: the call's
+// --env-files, else COMPOSE_ENV_FILES (comma-separated), relative to the
+// working directory cwd, a later one winning; else .env in each of dirs,
+// the first that sets it winning, unless COMPOSE_DISABLE_ENV_FILE is true.
+// A file that cannot be read is skipped (R7). As docker/compose's
+// cmd/compose/compose.go has it (the --env-file flag's default,
+// toProjectOptions: WithEnvFiles and WithDotEnv once before the compose file
+// is found and once after, so the working directory's .env and then the
+// found project directory's) and compose-go's cli/options.go (WithEnvFiles,
+// WithDotEnv), dotenv/env.go (GetEnvFromFile: one map, a later file
+// overwriting) and types/mapping.go (Mapping.Merge keeps what is set: the
+// process environment, then the first .env, beat what follows). A
+// COMPOSE_PROJECT_NAME set in the process environment, even empty, is kept
+// (WithOsEnv copies it so), and none is read: an empty one leaves the
+// directory's name (withNamePrecedenceLoad).
+func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), cwd string, dirs []string, left time.Duration) (string, bool) {
+	if _, set := lookupEnv("COMPOSE_PROJECT_NAME"); set {
+		return "", false
+	}
+	getenv := getenvOf(lookupEnv)
+	files := c.ComposeEnvFiles
+	if len(files) == 0 {
+		files = strings.FieldsFunc(getenv("COMPOSE_ENV_FILES"), func(r rune) bool { return r == ',' })
+	}
+	if len(files) > 0 {
+		dirs = nil
+		files = slices.Clone(files)
+		for i, f := range files {
+			files[i] = absIn(cwd, f)
+		}
+	} else if off, _ := strconv.ParseBool(getenv("COMPOSE_DISABLE_ENV_FILE")); off {
+		return "", false
+	}
+	found, done := within(left, func() (name string) {
+		// The --env-files: the last that sets it.
+		for _, f := range files {
+			if v, set := envFileValue(f, "COMPOSE_PROJECT_NAME"); set {
+				name = v
+			}
+		}
+		// The .env files: the first that sets it.
+		for _, d := range dirs {
+			if v, set := envFileValue(filepath.Join(d, ".env"), "COMPOSE_PROJECT_NAME"); set {
+				return v
+			}
+		}
+		return name
+	})
+	return found, done && found != ""
+}
+
+// envFileMax is the most of an env file the shim reads (#85): a .env is a
+// few lines, and one that never ends (a link to /dev/zero) must not cost
+// the shim memory in its own gate.
+const envFileMax = 64 << 10
+
+// envFileValue is key's value in env file path, and whether the file sets
+// it: "" for a value the shim cannot know (envValue). A file that cannot be
+// read or parsed sets nothing, nor does one that is not a regular file (a
+// device, a FIFO: stat, unlike open, does not wait on one). One longer than
+// envFileMax sets a value the shim cannot know.
+func envFileValue(path, key string) (string, bool) {
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, envFileMax+1))
+	switch {
+	case err != nil:
+		return "", false
+	case len(b) > envFileMax:
+		return "", true
+	}
+	return envValue(string(b), key)
+}
+
+// envValue is key's value in env file src, and whether src sets it, read a
+// statement at a time as compose-go's dotenv parser does (dotenv/parser.go,
+// parse; godotenv.go drops a UTF-8 BOM): blank lines and # comments
+// skipped; an optional export; KEY=VALUE or KEY: VALUE, spaces around
+// both; a value in single or double quotes, which may span lines and
+// escape its quote with \; an unquoted one up to the line's end or " #".
+// A bare KEY looks itself up, which leaves key as it was. A value Compose
+// would interpolate ($, unquoted or in double quotes) or unescape (\ in
+// double quotes) is unknown: "". A file the parser rejects sets nothing,
+// as Compose then fails.
+func envValue(src, key string) (value string, set bool) {
+	src = strings.TrimPrefix(src, "\uFEFF")
+	for {
+		src = strings.TrimLeftFunc(src, unicode.IsSpace)
+		if src == "" {
+			return value, set
+		}
+		if src[0] == '#' {
+			_, src, _ = strings.Cut(src, "\n")
+			continue
+		}
+		if exportPrefix.MatchString(src) {
+			src = strings.TrimLeftFunc(strings.TrimPrefix(src, "export"), envSpace)
+		}
+		// The key, up to =, : or a newline (a bare key); with none, the
+		// key is "" and the statement its value.
+		k, bare := "", false
+		for i, r := range src {
+			if envSpace(r) || r == '_' || r == '.' || r == '-' || r == '[' || r == ']' || unicode.IsLetter(r) || unicode.IsNumber(r) {
+				continue
+			}
+			if r != '=' && r != ':' && r != '\n' {
+				return "", false
+			}
+			k, bare, src = src[:i], r == '\n', src[i+1:]
+			break
+		}
+		if k = strings.TrimRightFunc(k, unicode.IsSpace); strings.Contains(k, " ") {
+			return "", false
+		}
+		src = strings.TrimLeftFunc(src, envSpace)
+		if bare {
+			continue
+		}
+		var v string
+		var known bool
+		if src != "" && (src[0] == '"' || src[0] == '\'') {
+			quote, closed, escaped := src[0], false, false
+			var b []byte
+			i := 1
+			for ; i < len(src) && !closed; i++ {
+				switch ch := src[i]; {
+				case ch != quote && !escaped && ch == '\\':
+					escaped = true
+				case ch != quote && escaped:
+					escaped = false
+					b = append(b, '\\', ch)
+				case ch != quote, escaped: // an escaped quote is kept
+					escaped = false
+					b = append(b, ch)
+				default:
+					closed = true
+				}
+			}
+			if !closed {
+				return "", false
+			}
+			v, src = string(b), src[i:]
+			known = quote == '\'' || !strings.ContainsAny(v, `$\`)
+		} else {
+			v, src, _ = strings.Cut(src, "\n")
+			v, _, _ = strings.Cut(v, " #")
+			v = strings.TrimRightFunc(v, unicode.IsSpace)
+			known = !strings.Contains(v, "$")
+		}
+		if k == key {
+			value, set = v, true
+			if !known {
+				value = ""
+			}
+		}
+	}
+}
+
+// exportPrefix is the export an env file's statement may start with
+// (compose-go's dotenv exportRegex).
+var exportPrefix = regexp.MustCompile(`^export\s+`)
+
+// envSpace is a space within an env file's line (compose-go's dotenv
+// isSpace): not a newline.
+func envSpace(r rune) bool {
+	switch r {
+	case '\t', '\v', '\f', '\r', ' ', 0x85, 0xA0:
+		return true
+	}
+	return false
+}
+
+// getenvOf is lookupEnv as getenv: "" when unset.
+func getenvOf(lookupEnv func(string) (string, bool)) func(string) string {
+	return func(k string) string {
+		v, _ := lookupEnv(k)
+		return v
+	}
+}
+
+// within is f's result, unless it takes longer than left: then false. What
+// f is left doing ends with the process, which the real binary replaces.
+func within[T any](left time.Duration, f func() T) (T, bool) {
+	var zero T
+	if left <= 0 {
+		return zero, false
+	}
+	done := make(chan T, 1)
+	go func() { done <- f() }()
+	t := time.NewTimer(left)
+	defer t.Stop()
+	select {
+	case v := <-done:
+		return v, true
+	case <-t.C:
+		return zero, false
+	}
 }
 
 // normalProject is a project name as Compose normalises it (compose-go's

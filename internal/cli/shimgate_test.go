@@ -1115,6 +1115,9 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 	if err := os.Chmod(filepath.Join(app, "locked.env"), 0); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "p.env"), []byte("COMPOSE_PROJECT_NAME=from-home\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	wd := func() (string, error) { return app, nil }
 	for _, tc := range []struct {
 		name string
@@ -1137,6 +1140,12 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 		{"an --env-file that is a directory: unknown", []string{"compose", "--env-file", "x.env", "--env-file", "sub", "-f", "-", "up", "-d"}, nil, "app"},
 		{"a missing COMPOSE_ENV_FILES entry: unknown", []string{"compose", "-f", "-", "up", "-d"},
 			map[string]string{"COMPOSE_ENV_FILES": "x.env,missing.env"}, "app"},
+		// Compose expands a leading ~ in each (paths.ExpandUser).
+		{"--env-file=~/p.env in the home directory", []string{"compose", "--env-file=~/p.env", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root}, "from-home"},
+		{"a COMPOSE_ENV_FILES entry ~/p.env in the home directory", []string{"compose", "-f", "-", "up", "-d"},
+			map[string]string{"HOME": root, "COMPOSE_ENV_FILES": "x.env,~/p.env"}, "from-home"},
+		{"~/p.env without a HOME: relative, so missing", []string{"compose", "--env-file=~/p.env", "-f", "-", "up", "-d"}, nil, "app"},
 		{"COMPOSE_ENV_FILES instead of .env", []string{"compose", "-f", "-", "up", "-d"},
 			map[string]string{"COMPOSE_ENV_FILES": "x.env,y.env"}, "from-y"},
 		{"--env-file before COMPOSE_ENV_FILES", []string{"compose", "--env-file", "x.env", "-f", "-", "up", "-d"},

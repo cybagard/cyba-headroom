@@ -456,6 +456,18 @@ func absIn(dir, p string) string {
 	return filepath.Join(dir, p)
 }
 
+// expandUser is env file path p with a leading ~ replaced by home, as
+// docker/compose's normalizeProjectOptions expands each --env-file
+// (cmd/compose/compose.go, e11dce5) with compose-go's paths.ExpandUser
+// (paths/home.go, 32d8d5d): any p starting with ~, ~user too, is home
+// joined with the rest; without a HOME, p is kept.
+func expandUser(p, home string) string {
+	if !strings.HasPrefix(p, "~") || home == "" {
+		return p
+	}
+	return filepath.Join(home, p[1:])
+}
+
 // composePlain reports whether a compose call's dry run tells what it
 // starts. Not when Compose's dry run cannot see it: a model provider (a
 // service's provider or models, in any profile) runs for real even in a
@@ -581,8 +593,9 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 // composeEnvFileProject is COMPOSE_PROJECT_NAME as the env files Compose
 // loads set it (#85), read within left; ok is false when none sets it to a
 // value the shim can know, or the time ran out. The files: the call's
-// --env-files, else COMPOSE_ENV_FILES (comma-separated), relative to the
-// working directory cwd, a later one winning; else .env in each of dirs,
+// --env-files, else COMPOSE_ENV_FILES (comma-separated), a leading ~ the
+// home directory (expandUser), relative to the working directory cwd, a
+// later one winning; else .env in each of dirs,
 // the first that sets it winning, unless COMPOSE_DISABLE_ENV_FILE is true.
 // A file Compose fails on (envFileValue's error) leaves the name unknown,
 // whatever the others set: an --env-file that does not exist or is a
@@ -613,7 +626,7 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 		dirs = nil
 		files = slices.Clone(files)
 		for i, f := range files {
-			files[i] = absIn(cwd, f)
+			files[i] = absIn(cwd, expandUser(f, getenv("HOME")))
 		}
 	} else if off, _ := strconv.ParseBool(getenv("COMPOSE_DISABLE_ENV_FILE")); off {
 		return "", false

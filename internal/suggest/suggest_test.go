@@ -469,3 +469,26 @@ func TestValueAboveTheConfigLimitIsNotUsable(t *testing.T) {
 		t.Fatalf("min headroom with the absurd idle %+v, without %+v", with, without)
 	}
 }
+
+// A [policy] value the config would reject is not usable either.
+func TestPolicyValueAboveTheConfigLimitIsNotUsable(t *testing.T) {
+	const absurd = 1 << 52
+	host := aggregate(threeDays(func(s *samples.Sample, i int) {
+		if i%100 == 1 && i < 500 { // warn onsets on an absurd host
+			s.Host.Pressure = "warn"
+			s.Host.TotalBytes = absurd
+		}
+	}))
+	var big []samples.Sample // five days of one worktree's absurd container
+	for d := 0; d < 5; d++ {
+		for _, s := range workingHours(d, 2, 5*gib) {
+			s.Containers = []samples.Container{{Name: "db", MemoryBytes: absurd, Mounts: []string{"/Users/dev/w/project-a/data"}}}
+			big = append(big, s)
+		}
+	}
+	for _, v := range []suggest.Value{value(t, host, "min_headroom_gb"), value(t, aggregate(big), "per_worktree_cap_gb")} {
+		if v.OK || !strings.Contains(v.Why, "not usable") || !strings.Contains(v.Why, "above the config's limit of 1024 GB") {
+			t.Errorf("%s = %+v", v.Key, v)
+		}
+	}
+}

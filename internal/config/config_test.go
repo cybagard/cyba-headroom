@@ -141,6 +141,8 @@ func TestLoadErrors(t *testing.T) {
 		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
 		{"NaN baseline", "[budget]\nhost_baseline_gb = nan\n", "budget.host_baseline_gb must be a number"},
 		{"NaN headroom", "[policy]\nmin_headroom_gb = nan\n", "policy.min_headroom_gb must be >= 0"},
+		{"absurd headroom", "[policy]\nmin_headroom_gb = 1e10\n", "policy.min_headroom_gb must be >= 0 and <= 1024"},
+		{"absurd worktree cap", "[policy]\nper_worktree_cap_gb = 5000\n", "policy.per_worktree_cap_gb must be >= 0 and <= 1024"},
 		{"bad pressure guard", "[policy]\npressure_guard = \"red\"\n", "policy.pressure_guard must be off, warn or critical"},
 		{"zero container cost", "[policy]\ndefault_container_gb = 0\n", "policy.default_container_gb must be > 0"},
 		{"zero tart cost", "[policy]\ndefault_tart_gb = 0\n", "policy.default_tart_gb must be > 0"},

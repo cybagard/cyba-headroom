@@ -171,3 +171,23 @@ func TestWriteLeavesOutAValueAboveTheLimit(t *testing.T) {
 		t.Fatalf("config:\n%s", b)
 	}
 }
+
+// A [policy] value above the config's limit is not written either.
+func TestWriteLeavesOutAPolicyValueAboveTheLimit(t *testing.T) {
+	dir, env := suggestEnv(t)
+	writeSamples(t, dir, []int{5, 4, 3, 2, 1}, 2, func(s *samples.Sample) {
+		s.Host.TotalBytes = 1 << 52 // an absurd host: headroom at the warn onsets too
+		if s.T.Minute()%10 == 0 {
+			s.Host.Pressure = "warn"
+		}
+		s.Containers = []samples.Container{{Name: "db", MemoryBytes: 1 << 40, Mounts: []string{"/Users/dev/w/a/data"}}}
+	})
+	code, out, stderr := run(t, env, "headroom", "suggest", "--write")
+	if code != 0 || !strings.Contains(out, "# min_headroom_gb: not usable") || !strings.Contains(out, "# per_worktree_cap_gb: not usable") {
+		t.Fatalf("exit %d, stderr %s, out:\n%s", code, stderr, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if !strings.Contains(string(b), "host_baseline_gb = 6") || strings.Contains(string(b), "min_headroom_gb") || strings.Contains(string(b), "per_worktree_cap_gb") {
+		t.Fatalf("config:\n%s", b)
+	}
+}

@@ -304,8 +304,8 @@ func (a *Aggregator) Result() Result {
 		return v
 	}
 
-	// A budget value the config would reject is not usable: --write would
-	// fail on it, and the replay must not reserve it.
+	// A value the config would reject is not usable: --write would fail on
+	// it, and the replay must not reserve a budget value.
 	limit := func(v Value) Value {
 		if v.OK && v.GB > config.MaxBudgetGB {
 			v.OK = false
@@ -316,7 +316,7 @@ func (a *Aggregator) Result() Result {
 	for _, v := range []Value{a.hostBaseline(), a.dockerOverhead(), a.lmStudioIdle(), a.ollamaIdle()} {
 		r.Values = append(r.Values, limit(gate(v)))
 	}
-	r.Values = append(r.Values, gate(a.minHeadroom(a.params(r.Values))), gate(a.perWorktreeCap()))
+	r.Values = append(r.Values, limit(gate(a.minHeadroom(a.params(r.Values)))), limit(gate(a.perWorktreeCap())))
 	r.Advice = append(r.Advice, a.pressureAdvice()...)
 	r.Advice = append(r.Advice, a.concurrencyAdvice()...)
 	r.Advice = append(r.Advice, a.dockerAdvice()...)

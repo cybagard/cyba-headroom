@@ -179,9 +179,9 @@ func (b Budget) Params() budget.Params {
 	}
 }
 
-// maxBudgetGB bounds budget sizes well above any Mac's memory, so their sum
+// MaxBudgetGB bounds budget sizes well above any Mac's memory, so their sum
 // cannot overflow when converted to bytes.
-const maxBudgetGB = 1024
+const MaxBudgetGB = 1024
 
 func gib(v float64) uint64 { return GiB(v) }
 
@@ -345,11 +345,11 @@ func (c Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("policy.pressure_guard must be off, warn or critical, not %q", c.Policy.PressureGuard))
 	}
-	if g := c.Policy.DefaultContainerGB; !(g > 0) || g > maxBudgetGB {
-		errs = append(errs, fmt.Errorf("policy.default_container_gb must be > 0 and <= %d", maxBudgetGB))
+	if g := c.Policy.DefaultContainerGB; !(g > 0) || g > MaxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.default_container_gb must be > 0 and <= %d", MaxBudgetGB))
 	}
-	if g := c.Policy.DefaultTartGB; !(g > 0) || g > maxBudgetGB {
-		errs = append(errs, fmt.Errorf("policy.default_tart_gb must be > 0 and <= %d", maxBudgetGB))
+	if g := c.Policy.DefaultTartGB; !(g > 0) || g > MaxBudgetGB {
+		errs = append(errs, fmt.Errorf("policy.default_tart_gb must be > 0 and <= %d", MaxBudgetGB))
 	}
 	if c.Policy.IdleGrace.Duration < 0 {
 		errs = append(errs, errors.New("policy.idle_grace must be >= 0"))
@@ -377,8 +377,8 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("budget.%s must be a number", v.key))
 		case v.gb < 0:
 			errs = append(errs, fmt.Errorf("budget.%s must be >= 0", v.key))
-		case v.gb > maxBudgetGB:
-			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, maxBudgetGB))
+		case v.gb > MaxBudgetGB:
+			errs = append(errs, fmt.Errorf("budget.%s must be <= %d", v.key, MaxBudgetGB))
 		}
 	}
 	if c.Samples.Enabled && c.Samples.Retention.Duration < 24*time.Hour {

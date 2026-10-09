@@ -445,3 +445,27 @@ func TestModelAdviceCountsTheHoursOfCountedDays(t *testing.T) {
 		}
 	}
 }
+
+// A value the config would reject is not usable: --write leaves it out, and
+// the min_headroom replay keeps the current one.
+func TestValueAboveTheConfigLimitIsNotUsable(t *testing.T) {
+	withIdle := func(footprint uint64) []samples.Sample {
+		return threeDays(func(s *samples.Sample, i int) {
+			if footprint > 0 && i%2 == 0 {
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(footprint)}
+			}
+			if i%100 == 1 && i < 500 { // warn onsets, Ollama running
+				s.Host.Pressure = "warn"
+				s.Ollama = &samples.Ollama{FootprintBytes: u64(gib), Models: []samples.OllamaModel{{Name: "m", SizeBytes: gib}}}
+			}
+		})
+	}
+	r := aggregate(withIdle(1 << 62))
+	if v := value(t, r, "ollama_idle_gb"); v.OK || !strings.Contains(v.Why, "not usable") || !strings.Contains(v.Why, "above the config's limit of 1024 GB") {
+		t.Fatalf("ollama idle = %+v", v)
+	}
+	with, without := value(t, r, "min_headroom_gb"), value(t, aggregate(withIdle(0)), "min_headroom_gb")
+	if !with.OK || with != without {
+		t.Fatalf("min headroom with the absurd idle %+v, without %+v", with, without)
+	}
+}

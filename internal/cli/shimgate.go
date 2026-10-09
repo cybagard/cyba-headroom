@@ -314,27 +314,34 @@ func composeKey(bin string, args []string, c shim.Call, getenv func(string) stri
 		Name string `json:"name"`
 	}
 	if err != nil || json.Unmarshal(out, &cfg) != nil {
-		project = composeDefaultProject(c, getenv, getwd, composeTimeout-now().Sub(asked), stat)
+		project = composeDefaultProject(c, getenv, getwd, asked.Add(composeTimeout), now, stat)
 		return project, project != ""
 	}
 	return cfg.Name, false
 }
 
 // composeDefaultProject is the project Compose names when it is not asked
-// (#84): COMPOSE_PROJECT_NAME from the call's environment, else the name of
-// the project directory: --project-directory, else the directory of the
-// first file (-f, else COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR; not
-// stdin's -), else of the compose file found in the working directory or
-// the nearest of its parents (searched for at most left), else the working
-// directory. Normalised as
-// Compose does. As compose-go's cli/options.go has it (GetWorkingDir,
-// WithConfigFileEnv, WithDefaultConfigPath, withNamePrecedenceLoad) and
+// (#84): COMPOSE_PROJECT_NAME from the call's environment, else from the
+// env files (composeEnvFileProject, #85), else the name of the project
+// directory: --project-directory, else the directory of the first file (-f,
+// else COMPOSE_FILE split by COMPOSE_PATH_SEPARATOR; not stdin's -), else of
+// the compose file found in the working directory or the nearest of its
+// parents, else the working directory. Normalised as Compose does. As
+// compose-go's cli/options.go has it (GetWorkingDir, WithConfigFileEnv,
+// WithDefaultConfigPath, withNamePrecedenceLoad) and
 // loader.NormalizeProjectName; Compose's docs, "Specify a project name".
+// Compose reads .env in the directory it has before COMPOSE_FILE and the
+// search (--project-directory, -f's, else the working directory), then in
+// the project directory it ends with, the first winning (docker/compose's
+// cmd/compose/compose.go, toProjectOptions). The files are read and the
+// parents searched until deadline, by the clock now: config has already
+// waited.
 //
-// It cannot see a name: in the compose file, nor a COMPOSE_PROJECT_NAME or
-// COMPOSE_FILE in .env (#85): there the name differs from Compose's, the
-// lease never binds and holds its cost, as with no name at all.
-func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func() (string, error), left time.Duration, stat func(string) (fs.FileInfo, error)) string {
+// It cannot see a name: in the compose file, nor a COMPOSE_FILE in .env, nor
+// an interpolated COMPOSE_PROJECT_NAME: there the name differs from
+// Compose's, and the lease, a guess, binds nothing (entry.guessed).
+func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func() (string, error), deadline time.Time, now func() time.Time,
+	stat func(string) (fs.FileInfo, error)) string {
 	if name := getenv("COMPOSE_PROJECT_NAME"); name != "" {
 		return normalProject(name)
 	}
@@ -342,21 +349,35 @@ func composeDefaultProject(c shim.Call, getenv func(string) string, getwd func()
 	if err != nil {
 		return ""
 	}
-	files := c.ComposeFiles
-	if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
-		sep := getenv("COMPOSE_PATH_SEPARATOR")
-		if sep == "" {
-			sep = string(filepath.ListSeparator)
-		}
-		files = strings.Split(f, sep)
-	}
+	first := func(files []string) int { return slices.IndexFunc(files, func(f string) bool { return f != "-" }) }
 	dir := cwd
 	if c.ComposeProjectDir != "" {
 		dir = absIn(cwd, c.ComposeProjectDir)
-	} else if i := slices.IndexFunc(files, func(f string) bool { return f != "-" }); i >= 0 {
-		dir = filepath.Dir(absIn(cwd, files[i]))
-	} else if found, ok := composeFileDirWithin(cwd, left, stat); ok {
-		dir = found
+	} else if i := first(c.ComposeFiles); i >= 0 {
+		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
+	}
+	if name, ok := composeEnvFileProject(c, getenv, cwd, []string{dir}, deadline.Sub(now())); ok {
+		return normalProject(name)
+	}
+	if dir == cwd && c.ComposeProjectDir == "" {
+		files := c.ComposeFiles
+		if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
+			sep := getenv("COMPOSE_PATH_SEPARATOR")
+			if sep == "" {
+				sep = string(filepath.ListSeparator)
+			}
+			files = strings.Split(f, sep)
+		}
+		if i := first(files); i >= 0 {
+			dir = filepath.Dir(absIn(cwd, files[i]))
+		} else if found, ok := composeFileDirWithin(cwd, deadline.Sub(now()), stat); ok {
+			dir = found
+		}
+		if dir != cwd {
+			if name, ok := composeEnvFileProject(c, getenv, cwd, []string{dir}, deadline.Sub(now())); ok {
+				return normalProject(name)
+			}
+		}
 	}
 	return normalProject(filepath.Base(dir))
 }

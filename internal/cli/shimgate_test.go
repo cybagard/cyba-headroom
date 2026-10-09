@@ -776,6 +776,60 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 	}
 }
 
+// When Compose's config fails, the fallback reads COMPOSE_PROJECT_NAME from
+// the env files as Compose does (#85): the --env-files, else .env in the
+// project directory; with no -f or --project-directory, the working
+// directory's .env, then that of the compose file found in a parent, the
+// first winning. The name is still a guess.
+func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("stack/compose.yaml", "services: {}\n")
+	write("stack/.env", "COMPOSE_PROJECT_NAME=from-stack\n")
+	write("stack/deeper/x", "")
+	write("stack/own/.env", "COMPOSE_PROJECT_NAME=from-own\n")
+	write("plain/.env", "COMPOSE_PROJECT_NAME=from-plain\n")
+	write("web/compose.yaml", "services: {}\n")
+	write("web/.env", "COMPOSE_PROJECT_NAME=from-web\n")
+	write("x.env", "COMPOSE_PROJECT_NAME=from-x\n")
+	write("dollar/.env", "COMPOSE_PROJECT_NAME=$OTHER\n")
+	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		wd   string
+		want string
+	}{
+		{"the working directory's .env", []string{"compose", "up"}, nil, "plain", "from-plain"},
+		{"--project-directory's .env", []string{"compose", "--project-directory", "plain", "up"}, nil, "", "from-plain"},
+		{"the first -f file's directory's .env", []string{"compose", "-f", "web/compose.yaml", "up"}, nil, "", "from-web"},
+		{"COMPOSE_FILE's directory's .env", []string{"compose", "up"}, map[string]string{"COMPOSE_FILE": "web/compose.yaml"}, "", "from-web"},
+		{"--env-file, relative to the working directory", []string{"compose", "--project-directory", "plain", "--env-file", "x.env", "up"}, nil, "", "from-x"},
+		{"the found compose file's .env", []string{"compose", "up"}, nil, "stack/deeper", "from-stack"},
+		{"the working directory's .env before the found one's", []string{"compose", "up"}, nil, "stack/own", "from-own"},
+		{"the process environment beats .env", []string{"compose", "up"}, map[string]string{"COMPOSE_PROJECT_NAME": "Env"}, "plain", "env"},
+		{"an interpolated name: the directory's", []string{"compose", "up"}, nil, "dollar", "dollar"},
+	} {
+		c := shim.Parse("docker", tc.args)
+		getenv := func(k string) string { return tc.env[k] }
+		wd := func() (string, error) { return filepath.Join(root, tc.wd), nil }
+		got, guessed := composeKey("/usr/local/bin/docker", tc.args, c, getenv, wd, failing, time.Now, os.Stat)
+		if got != tc.want || !guessed {
+			t.Errorf("%s: project = %q, guessed %v, want %q, guessed", tc.name, got, guessed, tc.want)
+		}
+	}
+}
+
 // The search for a compose file in the parents stops within what is left of
 // config's budget (#84): a parent may be a mount that hangs (autofs's /net),
 // and the call has already waited for config. Cut short, the project is the

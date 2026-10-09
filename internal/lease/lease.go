@@ -651,7 +651,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			} else {
 				b.judge(r, gated, now)
 			}
-		} else if !b.prev[r.key] {
+		} else {
 			unbound = append(unbound, r)
 		}
 	}

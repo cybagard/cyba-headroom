@@ -46,6 +46,6 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 ## This repo
 
-- The plan lives here, not in a file. Each phase is an epic issue (label `epic`), blocked by the phase before it; its tasks and follow-ups are its sub-issues, in the epic's order.
-- A new issue goes to GitHub only. Give it its phase's `phase:*` label and make it a sub-issue of that phase's epic; leave one that fits no phase without either, for the user to place. A triage role is added only when one applies; `ready-for-human` marks an issue that waits on the user (a step on their machine, a date).
+- The plan lives here, not in a file. Each phase is an epic issue (label `epic`), blocked by the phase before it; its tasks and follow-ups are its sub-issues, in the epic's order. List an epic's open sub-issues in that order (all pages: GitHub returns 30 by default): `gh api 'repos/cybagard/cyba-headroom/issues/<epic>/sub_issues?per_page=100' --paginate --jq '.[] | select(.state=="open") | .number'`. Attach one: `gh api --method POST repos/cybagard/cyba-headroom/issues/<epic>/sub_issues -F sub_issue_id=<db-id>`, with the database id as in **Blocking** above.
+- A new issue goes to GitHub only. Give it its phase's `phase:*` label and make it a sub-issue of that phase's epic; leave one that fits no phase without either, for the user to place. A triage role is added only when one applies (`docs/agents/triage-labels.md`).
 - Blocking edges are GitHub's native issue dependencies, read and added as in **Blocking** above; when an issue's body names a blocker, add the edge too.

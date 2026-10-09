@@ -91,14 +91,13 @@ func (m *Matcher) Match(k Keys) Match {
 	for _, ev := range []struct {
 		by    string
 		paths []string
-		many  bool // several paths: a .git among them may be set aside
 	}{
-		{ByComposeDir, nonEmpty(k.ComposeDir), false},
-		{ByLaunchCwd, nonEmpty(k.LaunchCwd), false},
-		{ByMount, k.Mounts, true},
-		{BySharedDir, k.SharedDirs, true},
+		{ByComposeDir, nonEmpty(k.ComposeDir)},
+		{ByLaunchCwd, nonEmpty(k.LaunchCwd)},
+		{ByMount, k.Mounts},
+		{BySharedDir, k.SharedDirs},
 	} {
-		if r, ok := decide(ev.by, m.pathMatches(ev.paths, ev.many)); ok {
+		if r, ok := decide(ev.by, m.pathMatches(ev.paths)); ok {
 			return r
 		}
 	}
@@ -182,18 +181,18 @@ func decide(by string, ids []string) (Match, bool) {
 }
 
 // pathMatches returns the distinct worktrees the paths lie in, in order.
-// With setAside, a path in its worktree's .git counts only when no other
-// path points at a worktree: a repo's .git is shared by every linked
-// worktree of the repo, and a container (or VM) of a linked one mounts the
-// main checkout's so git works, which says nothing about which (#94). With
-// nothing else, it still names its repo (a git daemon).
-func (m *Matcher) pathMatches(paths []string, setAside bool) []string {
+// A path in a .git within its worktree is set aside when the other paths
+// point at no worktree of another repo: a repo's .git is shared by
+// every linked worktree of the repo, and a container (or VM) of a linked
+// one mounts the main checkout's so git works, which says nothing about
+// which (#94). With nothing else, it still names its repo (a git daemon).
+func (m *Matcher) pathMatches(paths []string) []string {
 	var ids, git []string
 	for _, p := range paths {
 		id, inGit := m.owner(p)
 		switch {
 		case id == "":
-		case inGit && setAside:
+		case inGit:
 			if !slices.Contains(git, id) {
 				git = append(git, id)
 			}
@@ -201,15 +200,27 @@ func (m *Matcher) pathMatches(paths []string, setAside bool) []string {
 			ids = append(ids, id)
 		}
 	}
-	if len(ids) == 0 {
-		return git
+	for _, g := range git {
+		if len(ids) == 0 || slices.ContainsFunc(ids, func(id string) bool { return !sameRepo(id, g) }) {
+			if !slices.Contains(ids, g) {
+				ids = append(ids, g)
+			}
+		}
 	}
 	return ids
 }
 
+// sameRepo reports whether two worktree IDs (<repoId>::<path>) are of one
+// repo. An ID without a repo is its own.
+func sameRepo(a, b string) bool {
+	ra, _, oka := strings.Cut(a, "::")
+	rb, _, okb := strings.Cut(b, "::")
+	return oka && okb && ra == rb
+}
+
 // owner is the deepest worktree that p equals or lies under, on whole path
-// segments, "" if none, and whether p is that worktree's .git or lies in
-// it. Relative paths say nothing about the host.
+// segments, "" if none, and whether p is or lies in a .git within it (its
+// own, or a nested repo's). Relative paths say nothing about the host.
 func (m *Matcher) owner(p string) (id string, inGit bool) {
 	p = key(p)
 	if p == "" {
@@ -225,8 +236,7 @@ func (m *Matcher) owner(p string) (id string, inGit bool) {
 		}
 	}
 	if id != "" {
-		rest := strings.TrimPrefix(p[bestLen:], "/")
-		inGit = rest == ".git" || strings.HasPrefix(rest, ".git/")
+		inGit = slices.Contains(strings.Split(strings.TrimPrefix(p[bestLen:], "/"), "/"), ".git")
 	}
 	return id, inGit
 }

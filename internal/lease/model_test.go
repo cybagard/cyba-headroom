@@ -27,6 +27,15 @@ const target = gib // what each container grows to
 
 const timeout = 2 * time.Minute // the book's (book)
 
+// plenty is the headroom readings report unless memory runs short (op 14):
+// with it, every check must be allowed.
+const plenty = int64(1024 * gib)
+
+// lowReadings is how many readings memory stays short after op 14 lowers
+// headroom: one, so most calls are checked with plenty, and a BUDGET_WAIT
+// call (op 15) is denied until the reading after it.
+const lowReadings = 1
+
 type mcont struct {
 	id, project, service, wt string
 	labels                   map[string]string
@@ -60,6 +69,7 @@ type model struct {
 	last     time.Time // the last allowed call
 	ticks    int
 	headroom int64        // what the readings say is free
+	low      int          // readings left before headroom is plenty again
 	open     map[int]bool // the open bugs whose cases run
 }
 
@@ -68,7 +78,7 @@ type model struct {
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
 	87:  "a held container missing from one reading (or restarted after one) comes back new and binds the up's lease as counted",
-	89:  "a restart by policy binds another worktree's same-named compose lease",
+	89:  "a restart by policy binds another worktree's same-named compose lease (a container labelled with another worktree's project: #109's shared name, or a dressed run)",
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
 	110: "a container not held, missing from one reading (or restarted after one), ends its lease or binds an up's as counted (#87's cause)",
 	111: "a crashed container stays bound to a two-container start's lease: a compose up restarting it binds nothing",
@@ -155,9 +165,13 @@ func (m *model) of(project, wt string) []*mcont {
 	return out
 }
 
-// check asks the book about r. A denied call starts nothing.
+// check asks the book about r. A denied call starts nothing; with plenty
+// of headroom, a denial is a failure.
 func (m *model) check(r policy.Request) protocol.Decision {
 	d := m.b.Check(r, m.snapshot(), cfg)
+	if !d.Allow && m.headroom == plenty {
+		m.fail("%s denied: %+v", r.Command, d)
+	}
 	if d.Allow {
 		m.last = m.c.t
 		if d.LeaseID != "" {
@@ -176,6 +190,13 @@ type stack struct{ project, wt string }
 // stacks are the projects w1 and w2 bring up: both use the name app
 // (#109).
 var stacks = []stack{{"p1", "w1"}, {"p2", "w2"}, {"app", "w1"}, {"app", "w2"}}
+
+// nameTaken reports whether x's compose project label names a stack of
+// another worktree (#89).
+func nameTaken(x *mcont) bool {
+	name := x.labels[protocol.ComposeProjectLabel]
+	return name != "" && slices.ContainsFunc(stacks, func(st stack) bool { return st.project == name && st.wt != x.wt })
+}
 
 // stackAt is the stack op argument a names.
 func (m *model) stackAt(a int) stack {
@@ -202,7 +223,7 @@ func (m *model) composeUp(st stack) bool {
 	}
 	idle := cost == 0
 	if !idle && !m.on(112) && slices.ContainsFunc(m.of(project, wt), func(x *mcont) bool {
-		return x.running && x.cur < target && strings.HasPrefix(m.leases[x.startedBy], "docker compose")
+		return x.running && x.cur < target && (x.startedBy == "covered" || strings.HasPrefix(m.leases[x.startedBy], "docker compose"))
 	}) {
 		return true // left out: it takes over a lease whose services warm (#112)
 	}
@@ -361,6 +382,10 @@ var neverRE = regexp.MustCompile(`never appeared.*lease=(\S+)`)
 
 func (m *model) tick() {
 	m.c.t = m.c.t.Add(5 * time.Second)
+	if m.low--; m.headroom != plenty && m.low < 0 {
+		m.headroom = plenty
+		m.step("headroom plenty again")
+	}
 	for _, x := range m.conts {
 		if x.running {
 			x.cur = min(x.cur+target/2, target)
@@ -487,8 +512,9 @@ func (m *model) run(ops []op) {
 				m.tick() // the daemon reads every 5 s
 			}
 		case 14:
-			// Memory runs short, or frees up again: the next reading says.
-			m.headroom = []int64{int64(1024 * gib), 0, int64(gib), int64(2 * gib)}[o.b%4]
+			// Memory runs short for lowReadings readings, half the time, or
+			// frees up again: the next reading says.
+			m.headroom, m.low = []int64{plenty, 0, plenty, int64(gib), plenty, int64(2 * gib)}[o.b%6], lowReadings
 			m.step("headroom %d MiB", m.headroom>>20)
 			m.tick()
 		case 15:
@@ -523,18 +549,19 @@ func (m *model) run(ops []op) {
 			}
 		case 17:
 			// Docker's restart policy restarts a crashed container, with a
-			// backoff of at most a minute. One that spans a reading is #87's
-			// if it was held, else #110's.
-			spans := func(x *mcont) bool {
+			// backoff of at most a minute. One whose backoff spans a reading
+			// is #87's if it was held, else #110's; one labelled with another
+			// worktree's project is #89's (nameTaken). A removed container
+			// stays down.
+			ok := func(x *mcont) bool {
+				spanned := 110
 				if x.crashHeld {
-					return !m.on(87)
+					spanned = 87
 				}
-				return !m.on(110)
+				return (x.crashTick == m.ticks || m.on(spanned)) && (m.on(89) || !nameTaken(x))
 			}
-			if !m.on(89) {
-				m.tick()
-			} else if x := m.pick(func(x *mcont) bool {
-				return !x.crashed.IsZero() && m.c.t.Sub(x.crashed) <= time.Minute && (x.crashTick == m.ticks || !spans(x))
+			if x := m.pick(func(x *mcont) bool {
+				return !x.gone && !x.crashed.IsZero() && m.c.t.Sub(x.crashed) <= time.Minute && ok(x)
 			}); x != nil {
 				m.restart(x)
 				m.step("restart policy started %s", x.id)
@@ -561,7 +588,7 @@ func (m *model) pick(ok func(*mcont) bool) *mcont {
 // play runs ops on a fresh book: the failure, if any.
 func play(t *testing.T, ops []op) (f *failure) {
 	b, c, log := book(t)
-	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: int64(1024 * gib),
+	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
 		open: openIssues()}
 	defer func() {
 		if r := recover(); r != nil {

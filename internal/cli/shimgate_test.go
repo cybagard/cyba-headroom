@@ -625,6 +625,22 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 	}
 }
 
+// A bare host:port is -H's, not a context's (a context name has no ':'):
+// docker reads it as TCP, and DOCKER_HOST does not count.
+func TestABareHostIsTCP(t *testing.T) {
+	get := func(k string) string {
+		return map[string]string{"DOCKER_CONFIG": "/tmp/none", "DOCKER_HOST": "ssh://dev@build.example"}[k]
+	}
+	for endpoint, want := range map[string]string{
+		"localhost:2375":     "tcp://localhost:2375",
+		"build.example:2376": "tcp://build.example:2376",
+	} {
+		if got := dockerEndpointIn(get, "", endpoint); got != want {
+			t.Errorf("-H %s: %q, want %q", endpoint, got, want)
+		}
+	}
+}
+
 // docker --config DIR reads its context from DIR.
 func TestDockerEndpointHonoursConfigDir(t *testing.T) {
 	dir := t.TempDir()
@@ -977,6 +993,77 @@ func TestTheLeaseLabelNameElsewhereIsAllowed(t *testing.T) {
 	}
 }
 
+// The engine is resolved as the docker CLI resolves it, before anything
+// else: a call whose engine is this Mac's, or unknown, is asked about,
+// even when DOCKER_HOST, which the CLI ignores for it, is remote (#90).
+func TestTheCallsOwnEngineDecidesWhetherItIsGated(t *testing.T) {
+	for name, args := range map[string][]string{
+		"an unreadable --context": {"--context", "ghost", "run", "alpine"},
+		"a bare local -H":         {"-H", "localhost:2375", "run", "alpine"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		if err := os.MkdirAll(filepath.Join(r.dir, "dc"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"), "DOCKER_HOST=ssh://dev@build.example")
+		if code, _ := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 1 {
+			t.Errorf("%s: code %d, asked %d, want gated", name, code, len(r.asked))
+		}
+	}
+}
+
+// Each way the docker CLI picks its engine, local and remote, as before #90.
+func TestTheEngineFollowsTheCLIAtTheGate(t *testing.T) {
+	for name, c := range map[string]struct {
+		args  []string
+		env   []string
+		gated bool
+	}{
+		"a local -H":                        {[]string{"-H", "unix:///var/run/docker.sock"}, []string{"DOCKER_HOST=ssh://dev@build.example"}, true},
+		"a remote -H":                       {[]string{"-H", "ssh://dev@build.example"}, nil, false},
+		"a local DOCKER_HOST":               {nil, []string{"DOCKER_HOST=unix:///var/run/docker.sock", "DOCKER_CONTEXT=remote"}, true},
+		"a remote DOCKER_HOST":              {nil, []string{"DOCKER_HOST=tcp://10.0.0.5:2376", "DOCKER_CONTEXT=local"}, false},
+		"a local DOCKER_CONTEXT":            {nil, []string{"DOCKER_CONTEXT=local"}, true},
+		"a remote DOCKER_CONTEXT":           {nil, []string{"DOCKER_CONTEXT=remote"}, false},
+		"a local currentContext":            {nil, []string{"CURRENT=local"}, true},
+		"a remote currentContext":           {nil, []string{"CURRENT=remote"}, false},
+		"DOCKER_CONTEXT over current":       {nil, []string{"DOCKER_CONTEXT=local", "CURRENT=remote"}, true},
+		"a local --context":                 {[]string{"--context", "local"}, []string{"DOCKER_HOST=ssh://dev@build.example"}, true},
+		"--context over DOCKER_CONTEXT":     {[]string{"--context", "remote"}, []string{"DOCKER_CONTEXT=local"}, false},
+		"the default context":               {[]string{"--context", "default"}, []string{"CURRENT=remote"}, true},
+		"the default context's DOCKER_HOST": {[]string{"--context", "default"}, []string{"DOCKER_HOST=ssh://dev@build.example"}, false},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		dc := filepath.Join(r.dir, "dc")
+		for ctx, host := range map[string]string{"local": "unix:///var/run/docker.sock", "remote": "ssh://dev@build.example"} {
+			sum := sha256.Sum256([]byte(ctx))
+			meta := filepath.Join(dc, "contexts", "meta", hex.EncodeToString(sum[:]))
+			if err := os.MkdirAll(meta, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"`+host+`"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+dc)
+		for _, kv := range c.env {
+			if current, ok := strings.CutPrefix(kv, "CURRENT="); ok {
+				if err := os.WriteFile(filepath.Join(dc, "config.json"), []byte(`{"currentContext":"`+current+`"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			r.env = append(r.env, kv)
+		}
+		argv := append(append([]string{"docker"}, c.args...), "run", "alpine")
+		if code, _ := r.run(argv...); code != 0 || r.execed == "" || (len(r.asked) == 1) != c.gated {
+			t.Errorf("%s: code %d, execed %q, asked %d, want gated %v", name, code, r.execed, len(r.asked), c.gated)
+		}
+	}
+}
+
 // A context whose engine is remote: its memory is not this Mac's, so the
 // call is not asked about, as with -H tcp://….
 func TestARemoteContextIsNotGated(t *testing.T) {
@@ -1000,6 +1087,31 @@ func TestARemoteContextIsNotGated(t *testing.T) {
 		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"))
 		if code, _ := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
 			t.Errorf("%q: code %d, asked %d, execed %q", args, code, len(r.asked), r.execed)
+		}
+	}
+}
+
+// A remote engine is not this Mac's, whichever way the call names it: a
+// lease label on it is not headroom's concern, as with -H ssh://… (#90).
+func TestARemoteContextMaySetTheLeaseLabel(t *testing.T) {
+	for _, args := range [][]string{
+		{"-H", "ssh://dev@build.example", "run", "-l", "dev.headroom.lease=x", "alpine"},
+		{"-H", "build.example:2376", "run", "-l", "dev.headroom.lease=x", "alpine"},
+		{"--context", "builder", "run", "-l", "dev.headroom.lease=x", "alpine"},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		sum := sha256.Sum256([]byte("builder"))
+		meta := filepath.Join(r.dir, "dc", "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"ssh://dev@build.example"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"))
+		if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
+			t.Errorf("%q: code %d, asked %d, execed %q, stderr %q", args, code, len(r.asked), r.execed, stderr)
 		}
 	}
 }

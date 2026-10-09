@@ -644,7 +644,7 @@ func envFileValue(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, envFileMax+1))
 	switch {
 	case err != nil:

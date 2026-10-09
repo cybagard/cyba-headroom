@@ -124,3 +124,20 @@ func TestHostTreeAndFootprints(t *testing.T) {
 		t.Fatalf("child footprint %d not part of total %d", one, both)
 	}
 }
+
+func TestHostListsOtherUsersProcessesWithoutArguments(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every process's arguments")
+	}
+	procs, err := vmproc.Host{}.ProcessesNamed("launchd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(procs, func(p vmproc.Process) bool { return p.PID == 1 })
+	if i < 0 {
+		t.Fatalf("launchd (pid 1, root's) not in %+v", procs)
+	}
+	if p := procs[i]; p.ArgsErr == nil || p.Args != nil || p.Exec != "" {
+		t.Fatalf("got %+v, want no arguments and why", p)
+	}
+}

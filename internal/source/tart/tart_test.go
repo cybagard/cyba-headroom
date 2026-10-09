@@ -294,3 +294,13 @@ func TestARunningVMWithoutItsConfigCountsAsMacOS(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestAnotherUsersTartProcessIsNotALauncher(t *testing.T) {
+	procs := fakeProcs{procs: []vmproc.Process{
+		{PID: 900, PPID: 500, Comm: "tart", ArgsErr: errors.New("kern.procargs2: operation not permitted")},
+	}}
+	vm := collect(t, tart.New(runningCLI(), procs, fakeVMs{}, home)).VMs[0]
+	if vm.RunPID != 0 || vm.LaunchCwd != "" || vm.SharedDirs != nil {
+		t.Fatalf("got pid=%d cwd=%q dirs=%v, want no launcher", vm.RunPID, vm.LaunchCwd, vm.SharedDirs)
+	}
+}

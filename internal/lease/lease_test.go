@@ -818,6 +818,24 @@ func TestAGuessTakesNoLeaseOver(t *testing.T) {
 	}
 }
 
+// Nothing takes a guess over, not even a later up of the same project in its
+// own worktree (compose -p api up while the guess's stack, named billing in
+// its file, still pulls): both reserve, and the guess keeps its timeout.
+func TestNoUpTakesAGuessOver(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	d := b.Check(guessed("w1", "api"), snap(), cfg)
+	before := expiry(b, d.LeaseID)
+	c.t = c.t.Add(time.Minute)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p api up -d", CostBytes: gib, Target: "api", OnEngine: true}, snap(), cfg)
+	if got := expiry(b, d.LeaseID); !got.Equal(before) {
+		t.Fatalf("the guess's lease expires at %v, want %v: the up took it over", got, before)
+	}
+	if r := reserved(b); r != 2*gib {
+		t.Fatalf("reserved %d MiB, want both estimates", r>>20)
+	}
+}
+
 // A guess that hits: the up's containers, in its own worktree, bind its
 // lease. None is ungated, and the lease ends quietly.
 func TestAGuessThatHitsBindsItsStack(t *testing.T) {

@@ -186,9 +186,10 @@ const stale = 2 * time.Second
 // an open lease of the same project in its own worktree, neither a compose
 // run's (its one-off container is new). Another worktree's keeps its
 // lease, against its own cap; a manual call reserves nothing. A guessed
-// project takes nothing over: the guess may name another stack.
+// project takes nothing over, and nothing takes it over: the guess may
+// name another stack.
 func composeTakes(r policy.Request, o *entry) bool {
-	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && o.project == r.Target && o.Worktree == r.Worktree
+	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && !o.guessed && o.project == r.Target && o.Worktree == r.Worktree
 }
 
 // startTakes reports whether a start of starts takes o over: the lease of

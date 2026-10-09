@@ -181,11 +181,14 @@ func decide(by string, ids []string) (Match, bool) {
 }
 
 // pathMatches returns the distinct worktrees the paths lie in, in order.
-// A path in a .git within its worktree is set aside when the other paths
-// point at no worktree of another repo: a repo's .git is shared by
-// every linked worktree of the repo, and a container (or VM) of a linked
-// one mounts the main checkout's so git works, which says nothing about
-// which (#94). With nothing else, it still names its repo (a git daemon).
+// A path in a .git within a worktree is set aside when another path matches
+// a worktree and every such worktree is the .git's own or of the same repo,
+// since a linked worktree mounts the main checkout's .git so git works
+// (#94): a worktree's data with its own .git names that worktree. If one is
+// of another repo, the .git's worktree is kept too, so the item is
+// ambiguous. With nothing else, the .git of one worktree names that
+// worktree; .git paths in two different worktree directories are ambiguous,
+// even within one repo.
 func (m *Matcher) pathMatches(paths []string) []string {
 	var ids, git []string
 	for _, p := range paths {
@@ -215,7 +218,8 @@ func (m *Matcher) pathMatches(paths []string) []string {
 }
 
 // sameRepo reports whether two worktree IDs (<repoId>::<path>) are of one
-// repo. An ID without a repo is its own.
+// repo. It is false when either ID has no "::", even for identical IDs;
+// pathMatches tests for those before calling it.
 func sameRepo(a, b string) bool {
 	ra, _, oka := strings.Cut(a, "::")
 	rb, _, okb := strings.Cut(b, "::")

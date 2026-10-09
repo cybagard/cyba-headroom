@@ -9,6 +9,7 @@ import (
 )
 
 func TestRemote(t *testing.T) {
+	resolving(t, map[string]string{"build-box": "203.0.113.7"})
 	host, _ := os.Hostname()
 	lan := ""
 	if addrs, err := net.InterfaceAddrs(); err == nil {
@@ -89,6 +90,24 @@ func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
 		env := map[string]string{"DOCKER_HOST": c.dockerHost}
 		if Remote("docker", c.endpoint, func(k string) string { return env[k] }) {
 			t.Errorf("Remote(docker, %q, DOCKER_HOST=%q) = true, want this Mac's", c.endpoint, c.dockerHost)
+		}
+	}
+}
+
+// A tcp host that resolves only to another machine stays remote, and so
+// does an ssh host, which is not resolved (#118).
+func TestARemoteTCPHostStaysRemote(t *testing.T) {
+	resolving(t, map[string]string{"build-box": "203.0.113.7"})
+	for _, endpoint := range []string{
+		"tcp://build-box:2376",
+		"build-box:2376",
+		"tcp://203.0.113.7:2376",
+		"tcp://[2001:db8::1]:2376",
+		"2001:db8::1",
+		"ssh://dev@ssh-alias",
+	} {
+		if !Remote("docker", endpoint, func(string) string { return "" }) {
+			t.Errorf("Remote(docker, %q) = false, want remote", endpoint)
 		}
 	}
 }

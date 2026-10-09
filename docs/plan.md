@@ -103,3 +103,4 @@ Unscheduled. Spec: docs/02-requirements.md (Future).
 - [ ] #72 **Gate: FIFO queue for BUDGET_WAIT in the daemon**
 - [ ] #74 **Attribution: give a container or VM the worktree of the lease it settled**
 - [ ] #100 **CLAUDE.md: the smoke test should name the racing cases again**
+- [ ] #104 **Loop Pick: what counts as ready (epics, parked and dated issues, Phase 5, phase order)**

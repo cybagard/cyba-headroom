@@ -48,7 +48,7 @@ Follow-ups:
 - [ ] #84 **Compose: a slow or failing `compose config` leaves the lease without a key**
 - [ ] #85 **Compose: `-f -` ignores COMPOSE_PROJECT_NAME from .env and --env-file**
 - [ ] #87 **Lease: a held container missing from one reading loses its held state**
-- [ ] #88 **Lease: a denied start still renews the lease that covers it**
+- [x] #88 **Lease: a denied start still renews the lease that covers it**
 - [ ] #89 **Lease: a restart after a crash can bind another worktree's same-named compose lease**
 - [ ] #90 **Shim: remote-context edge cases**
 - [ ] #91 **Lease model: cover missing readings, restart policies and denials**

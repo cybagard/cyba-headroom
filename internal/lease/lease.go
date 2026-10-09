@@ -13,9 +13,8 @@
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
 // cost, when they are gone, or at its timeout; one that never saw its
-// resource is logged as expired. A lease with no key (headroom check
-// without --name, or Docker not answering at a start) never binds: it holds
-// its cost to its timeout.
+// resource is logged as expired. A lease with no key (a headroom check
+// sends none) never binds: a worktree's holds its cost to its timeout.
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -1053,7 +1052,7 @@ func (e *entry) key(r resource, based bool) bool {
 	case e.Kind != "container" || len(e.bound) > 0:
 		return false
 	case e.name != "":
-		return based && e.name == r.name // a run checked with headroom check --name
+		return based && e.name == r.name // a run with --name the shim did not label
 	case e.target != "":
 		return based && (e.target == r.name || e.target == r.id) // a start Docker could not resolve
 	}

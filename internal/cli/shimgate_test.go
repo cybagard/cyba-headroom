@@ -1540,7 +1540,8 @@ func TestARemoteContextIsNotGated(t *testing.T) {
 		if err := os.MkdirAll(meta, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"tcp://build.example:2376"}}}`), 0o600); err != nil {
+		// A remote tcp name must resolve now (#118), so the test uses a documentation address.
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"tcp://203.0.113.5:2376"}}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(r.dir, "dc", "config.json"), []byte(`{"currentContext":"builder"}`), 0o600); err != nil {
@@ -1558,7 +1559,8 @@ func TestARemoteContextIsNotGated(t *testing.T) {
 func TestARemoteContextMaySetTheLeaseLabel(t *testing.T) {
 	for _, args := range [][]string{
 		{"-H", "ssh://dev@build.example", "run", "-l", "dev.headroom.lease=x", "alpine"},
-		{"-H", "build.example:2376", "run", "-l", "dev.headroom.lease=x", "alpine"},
+		// A remote tcp name must resolve now (#118), so the test uses a documentation address.
+		{"-H", "203.0.113.5:2376", "run", "-l", "dev.headroom.lease=x", "alpine"},
 		{"--context", "builder", "run", "-l", "dev.headroom.lease=x", "alpine"},
 	} {
 		r := newShimRig(t)
@@ -1575,6 +1577,16 @@ func TestARemoteContextMaySetTheLeaseLabel(t *testing.T) {
 		if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 || len(r.asked) != 0 || r.execed == "" {
 			t.Errorf("%q: code %d, asked %d, execed %q, stderr %q", args, code, len(r.asked), r.execed, stderr)
 		}
+	}
+}
+
+// -H tcp://127.1:2375 is this Mac's loopback, as the docker CLI dials it:
+// the call is gated, and its lease label refused (#118).
+func TestALoopbackTCPHostIsGated(t *testing.T) {
+	r := newShimRig(t)
+	r.ask = allow
+	if code, stderr := r.run("docker", "-H", "tcp://127.1:2375", "run", "-l", "dev.headroom.lease=x", "alpine"); code != exitDenied || r.execed != "" {
+		t.Errorf("code %d, execed %q, stderr %q, want the label refused", code, r.execed, stderr)
 	}
 }
 

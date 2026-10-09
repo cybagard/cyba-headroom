@@ -200,11 +200,13 @@ func (m *Matcher) pathMatches(paths []string) []string {
 			ids = append(ids, id)
 		}
 	}
+	if len(ids) == 0 {
+		return git
+	}
+	others := slices.Clone(ids) // judged against these alone: order must not matter
 	for _, g := range git {
-		if len(ids) == 0 || slices.ContainsFunc(ids, func(id string) bool { return !sameRepo(id, g) }) {
-			if !slices.Contains(ids, g) {
-				ids = append(ids, g)
-			}
+		if slices.ContainsFunc(others, func(id string) bool { return !sameRepo(id, g) }) && !slices.Contains(ids, g) {
+			ids = append(ids, g)
 		}
 	}
 	return ids
@@ -236,7 +238,7 @@ func (m *Matcher) owner(p string) (id string, inGit bool) {
 		}
 	}
 	if id != "" {
-		inGit = slices.Contains(strings.Split(strings.TrimPrefix(p[bestLen:], "/"), "/"), ".git")
+		inGit = strings.Contains(p[bestLen:]+"/", "/.git/")
 	}
 	return id, inGit
 }

@@ -13,7 +13,7 @@ If the hook throws, the call does not run, and the model receives the thrown mes
 
 Two more results matter for #41 (see the questions at the end):
 - **An unexpected throw in the hook also blocks the call.**
-- **`kilo run --pure` loads no plugins** (the only form tested), so the hook can only ever be advisory. The shim still gates the call.
+- **`kilo run --pure` loads no plugins**, so the hook can only ever be advisory. `--pure` was tried only with `kilo run`. The shim still gates the call.
 
 No Kilo-side timeout on the hook was seen or tested.
 
@@ -59,23 +59,23 @@ Each case ran headless against a local model, `kilo run -m <provider/model> --fo
 - **Per call:** `input = { tool, sessionID, callID }`, plus `output.args`, the tool's arguments. In every `bash` call observed, the args were `{ command, description }`. Whether Kilo's bash tool accepts a working-directory argument was not checked. A `cd` inside the command is only text to the hook.
 - **`tool.execute.after`** received `{ title, output }` for `echo ok`. In the one run that logged it, it did not fire for the denied `docker run`. #41 should not rely on that.
 
-The binary also names a `permission.ask` hook and a `shell.env` hook. They were not tested. `shell.env` may be a way to set `PATH` and `HEADROOM_WORKTREE` for Kilo's tool shells, as #31 does through Orca's launch env.
+The binary also names a `permission.ask` hook and a `shell.env` hook. They were not tested. `shell.env` may be a way to set `PATH` for Kilo's tool shells, as #31's `headroom run` does for the agent's whole environment.
 
 ## For #41
 
 This spike answers whether Kilo can be hooked. How the plugin should ask headroom is #41's design. These are the facts it starts from, and the questions its plan has to answer.
 
-**Facts** (from `internal/cli/check.go`, `internal/lease/lease.go` and the earlier spikes):
-- An allowed `headroom check` takes a lease whenever a worktree is identified for it (`Book.Check` in `internal/lease/lease.go`). That happens for any command, `echo ok` included, at its kind's default cost when no cost is given (`check` defaults to `--kind container`). `check` never releases the lease. How a lease lives and ends is set out in the package comment of `internal/lease/lease.go`. So a pre-check through today's `check` would reserve each gated call a second time, and reserve memory for calls that start nothing.
+**Facts** (from `internal/cli/check.go`, `internal/cli/run.go`, `internal/cli/shimgate.go`, `internal/lease/lease.go`, `internal/policy/policy.go` and the earlier spikes):
+- An allowed `headroom check` takes a lease whenever a worktree is identified for it (`Book.Check` in `internal/lease/lease.go`). That happens for any command, `echo ok` included, at the container default when no cost is given (the Tart default for `--kind tart`; see `policy.Decide`). `check` never releases the lease. How a lease lives and ends is set out in the package comment of `internal/lease/lease.go`. So a pre-check through today's `check` would reserve each gated call a second time, and reserve memory for calls that start nothing.
 - `check` has no parser. It joins its arguments, defaults to `--kind container` and asks about any command, so under pressure it would deny `echo ok`. It sends the raw command, while the shim sends only `shim.Call.Command`, without flags that may hold secrets.
 - `check` answers once. It exits 0 on allow and 75 on deny. It exits 1 when the config cannot be loaded or the daemon is unreachable or fails, and 2 on a usage error. Unlike the shim, it does not wait under `BUDGET_WAIT`.
-- `--worktree` takes a worktree ID, not a path. Without it, `check` identifies the caller as the shim does, through `callerRequest` in `internal/cli/shimgate.go`, but from its own process, not the tool shell's. Orca sets `ORCA_WORKTREE_ID` in the agent's environment, and Kilo and its tool shells inherit it (`orca-launch-env.md`, `tool-shell-path.md`). `HEADROOM_WORKTREE` is an optional override that nothing in headroom sets (`orca-launch-env.md`); `headroom run` only puts the shims first on PATH. Outside Orca, with neither set, `check` falls back to cwd and ancestors (question 3).
+- `--worktree` takes a worktree ID, not a path. Without it, `check` identifies the caller as the shim does, through `callerRequest` in `internal/cli/shimgate.go`, but from its own process, not the tool shell's. Orca sets `ORCA_WORKTREE_ID` in the agent's environment, and Kilo's tool shells inherit it in headless `kilo run --auto` (`tool-shell-path.md`). `HEADROOM_WORKTREE` is an optional override: nothing in headroom sets it, since `headroom run` only puts the shims first on PATH (`internal/cli/run.go`), although `tool-shell-path.md`'s decision for R9 planned it to. Outside Orca, with neither set, `check` falls back to its cwd and parent processes (question 3).
 - The hook was awaited on every tool call observed (`bash`, `task`). If that holds for all tools, every call pays for whatever the hook does.
 
 **Questions for #41's plan:**
 1. **Leases.** How does the hook ask without taking a lease, so that only the shim reserves? For example, a dry-run mode of `check` or a daemon op. A check that times out or answers late must not leave one behind either.
 2. **One request.** How does the hook ask with exactly the request the shim would build: the parse, the cost from `-m`, the kind, the tart VM fields, the remote-engine skip, and `Command` without secrets? How is a shell string turned into that: the first simple command, or full shell lexing that skips quoted text? What about `cd x && docker run …`?
-3. **Identity.** Does the hook's check name the same worktree as the shim in every launch path #41 supports? This is at risk when neither variable is set and the caller is found by cwd or ancestors, which differ between the Kilo process and its tool shell.
+3. **Identity.** Does the hook's check name the same worktree as the shim in every launch path #41 supports? This is at risk when neither variable is set and the caller is found by cwd and parent processes, which differ between the Kilo process and its tool shell.
 4. **Waiting.** Under `BUDGET_WAIT`, should the hook let a retryable deny through to the shim, which waits?
 5. **Time and cost.** Where does the time bound live: in `check`, from `daemon_timeout`, or in the plugin? What happens to a check still running when the bound passes? Can a cheap prefilter on the words docker, podman and tart spare `ls` the spawn?
 6. **Failure.** How does the plugin make sure that only a deliberate deny throws, so that its own errors fail open (R7)? How does it pass the model's text to `check` without a shell, which would run it?

@@ -63,10 +63,26 @@ The binary also names a `permission.ask` hook and a `shell.env` hook. They were 
 
 ## For #41
 
-- **Install the plugin once, in Kilo's global plugin dir.** The tested path was `$XDG_CONFIG_HOME/kilo/plugins/`. Kilo reads its global config from `~/.config/kilo/`, so with `XDG_CONFIG_HOME` unset the dir is presumably `~/.config/kilo/plugins/`. #41 should confirm that.
-- **First, give `headroom check` a mode that parses a command string.** Today `check` has no parser. It joins its arguments, defaults to `--kind container` and asks the daemon about any command, so under pressure it would deny `echo ok`. #41 needs a mode that splits the string, runs `shim.Parse`, allows what the shim would not gate, and takes the kind from the parse (`container`, `compose` or `tart`). That way one parser, whose flag tables are tested against the CLIs, decides. Do not re-implement it in TypeScript.
-- **Use `headroom check`, not the socket.** Its exit codes, caller identification and timeout are the tested Go path. A TypeScript client of the daemon protocol would duplicate them and drift.
-- **Give `check` the call's place.** `--worktree` takes a worktree ID (`HEADROOM_WORKTREE`, else `ORCA_WORKTREE_ID`), not a path, so do not pass `ctx.worktree`. Leaving it out makes `check` identify the caller from its own environment, cwd and ancestors. Those are the Kilo process's, not the tool shell's. So spawn `check` with Kilo's environment, and with the call's `workdir` (else `ctx.directory`) as its cwd.
-- **Throw only on a deny.** `headroom check` exits 75 on a deny, 1 when the daemon is unreachable or fails, and 2 on a usage error. Throw only on 75, with headroom's message. Let everything else through: other exit codes, a timeout, and any error in the plugin.
-- **No shell.** The command is the model's text. Run `check` with `execFile` or `spawn` and an argv array, passing the command after `--`, never inside an `exec` or `sh -c` string, which would run it.
-- **Leases stay with the shim.** A denied call never reaches the shim, so it takes no lease. An allowed call is checked again by the shim, which takes the lease as today.
+This spike answers whether Kilo can be hooked. How the plugin should ask headroom is #41's design. These are the facts it starts from, and the questions its plan has to answer.
+
+**Facts:**
+- An allowed `headroom check` with a worktree **takes a lease**, and `check` never releases it. A plugin that pre-checks through today's `check` would reserve each gated call twice: once for the hook, once for the shim.
+- `check` has no parser. It joins its arguments, defaults to `--kind container` and asks about any command, so under pressure it would deny `echo ok`. It also sends the raw command, while the shim sends only `shim.Call.Command`, without flags that may hold secrets.
+- `check` answers once. Its exit codes are 0 allow, 75 deny, 1 daemon unreachable or broken, and 2 usage. Unlike the shim, it does not wait under `BUDGET_WAIT`.
+- `--worktree` takes a worktree ID, not a path, so `ctx.worktree` cannot be passed as it is. Without it, `check` identifies the caller from its own environment, cwd and ancestors. Those are the Kilo process's, not the tool shell's.
+- The hook is awaited on every tool call, including `ls`, and an unexpected throw blocks the call.
+
+**Questions for #41's plan:**
+1. **A check that takes no lease.** Should there be a dry-run mode of `check`, or a daemon op, so that only the shim reserves? A timed-out or late answer must not leave a lease behind either.
+2. **One request builder.** The hook should ask with exactly the request the shim would build, through the same Go function as `gate()`: the parse, the cost from `-m`, the kind, the tart VM fields, the remote-engine skip, and `Command` without secrets. How is a shell string turned into that? It might mean the first simple command only, or full shell lexing that skips quoted text, and `cd x && docker run …` has to be handled.
+3. **Identity.** Which environment and cwd should the hook's check use, so that it names the same worktree the shim will? Especially if #31 or `shell.env` set `HEADROOM_WORKTREE` only in tool shells.
+4. **Waiting.** Under `BUDGET_WAIT`, should the hook let a retryable deny through to the shim, which waits, rather than throw?
+5. **Bounds and cost.**
+   - Where does the time bound live: in `check`, from `daemon_timeout`, or as a generous outer cap in the plugin?
+   - Kill the child on timeout.
+   - Is a cheap TypeScript prefilter on the words docker, podman and tart acceptable, so that `ls` spawns nothing?
+6. **Safety.**
+   - Catch every error and throw only on a deliberate deny.
+   - Never run the model's text through a shell (`exec`, `sh -c`).
+   - Pass it as an argv element after `--`, or in a request field.
+7. **The interactive TUI.** Confirm everything above in the TUI that Orca agents run, not only in `kilo run`.

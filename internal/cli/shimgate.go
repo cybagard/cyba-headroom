@@ -353,13 +353,7 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 	if err != nil {
 		return ""
 	}
-	first := func(files []string) int { return slices.IndexFunc(files, func(f string) bool { return f != "-" }) }
-	dir := cwd
-	if c.ComposeProjectDir != "" {
-		dir = absIn(cwd, c.ComposeProjectDir)
-	} else if i := first(c.ComposeFiles); i >= 0 {
-		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
-	}
+	dir := composeWorkingDir(c, cwd)
 	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
 		return normalProject(name)
 	}
@@ -372,7 +366,7 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 			}
 			files = strings.Split(f, sep)
 		}
-		if i := first(files); i >= 0 {
+		if i := firstComposeFile(files); i >= 0 {
 			dir = filepath.Dir(absIn(cwd, files[i]))
 		} else if found, ok := composeFileDirWithin(cwd, deadline.Sub(now()), stat); ok {
 			dir = found
@@ -386,6 +380,26 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 		}
 	}
 	return normalProject(filepath.Base(dir))
+}
+
+// composeWorkingDir is the project directory Compose has before it looks
+// for a compose file, relative to the working directory cwd:
+// --project-directory, else the directory of the first -f file that is not
+// stdin's -, else cwd (compose-go 32d8d5d, cli/options.go GetWorkingDir).
+func composeWorkingDir(c shim.Call, cwd string) string {
+	if c.ComposeProjectDir != "" {
+		return absIn(cwd, c.ComposeProjectDir)
+	}
+	if i := firstComposeFile(c.ComposeFiles); i >= 0 {
+		return filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
+	}
+	return cwd
+}
+
+// firstComposeFile is the index of the first of files that is not stdin's
+// -, or -1.
+func firstComposeFile(files []string) int {
+	return slices.IndexFunc(files, func(f string) bool { return f != "-" })
 }
 
 // composeFileDir is the nearest of dir and its parents that holds a compose
@@ -539,9 +553,8 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 // composeStdinProject names the project of compose -f - as Compose does
 // when its file is on stdin: -p, else COMPOSE_PROJECT_NAME from the
 // environment, else from the env files (composeEnvFileProject), else the
-// project directory's name (--project-directory, else the directory of the
-// first -f file that is not -, else the working directory; compose-go's
-// cli/options.go, GetWorkingDir). A name: in the piped file is not seen:
+// project directory's name (composeWorkingDir; with no working directory,
+// only an absolute one). A name: in the piped file is not seen:
 // that lease then does not bind, and holds its cost (failing closed).
 func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string) {
 	getenv := getenvOf(lookupEnv)
@@ -553,17 +566,12 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 	}
 	cwd, err := getwd()
 	if err != nil {
-		if filepath.IsAbs(c.ComposeProjectDir) {
-			project = normalProject(filepath.Base(c.ComposeProjectDir))
+		if dir := composeWorkingDir(c, ""); filepath.IsAbs(dir) {
+			project = normalProject(filepath.Base(dir))
 		}
 		return project
 	}
-	dir := cwd
-	if c.ComposeProjectDir != "" {
-		dir = absIn(cwd, c.ComposeProjectDir)
-	} else if i := slices.IndexFunc(c.ComposeFiles, func(f string) bool { return f != "-" }); i >= 0 {
-		dir = filepath.Dir(absIn(cwd, c.ComposeFiles[i]))
-	}
+	dir := composeWorkingDir(c, cwd)
 	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout); ok {
 		return normalProject(name)
 	}

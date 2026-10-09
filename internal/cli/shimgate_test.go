@@ -1071,6 +1071,26 @@ func TestComposeProjectOfStdin(t *testing.T) {
 	}
 }
 
+// compose -f - with no working directory: the project directory is still
+// known when Compose's GetWorkingDir needs none, an absolute
+// --project-directory or first -f file.
+func TestComposeProjectOfStdinWithoutAWorkingDirectory(t *testing.T) {
+	wd := func() (string, error) { return "", errors.New("getwd: no such file or directory") }
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"compose", "--project-directory", "/srv/_api", "-f", "-", "up", "-d"}, "api"},
+		{[]string{"compose", "-f", "-", "-f", "/srv/web/base.yml", "up", "-d"}, "web"},
+		{[]string{"compose", "--project-directory", "api", "-f", "-", "up", "-d"}, ""},
+		{[]string{"compose", "-f", "-", "up", "-d"}, ""},
+	} {
+		if got := composeStdinProject(shim.Parse("docker", tc.args), noEnv, wd); got != tc.want {
+			t.Errorf("%q: project = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
 // compose -f - takes COMPOSE_PROJECT_NAME from the env files Compose loads
 // (#85): the --env-files, relative to the working directory, a later one
 // winning; else .env in the project directory.

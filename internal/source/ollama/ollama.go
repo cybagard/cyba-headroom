@@ -5,8 +5,8 @@
 // context's KV cache and so runs above what it touches. The real cost is the
 // footprint of the server's process tree, where each loaded model has a
 // runner (llama-server). headroom only reads GET /api/ps, and only once an
-// `ollama serve` process is running, so it never starts, pulls or loads
-// anything.
+// `ollama serve` process, or an ollama process of another user's, is
+// running, so it never starts, pulls or loads anything.
 package ollama
 
 import (
@@ -51,9 +51,21 @@ func (s *Source) Name() string { return "ollama" }
 // Collect implements daemon.Source.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	o := protocol.Ollama{Models: []protocol.OllamaModel{}}
-	pids, err := s.servers()
+	pids, others, err := s.servers()
 	if err != nil {
 		return nil, fmt.Errorf("ollama processes: %w", err)
+	}
+	// Another user's ollama may be a server or a client: it is a server
+	// if the API answers. Its footprint cannot be read, so with it the
+	// footprint is unknown, even beside the user's own server (two servers
+	// rarely share a Mac: they contend for the port).
+	var probed *ps
+	if len(others) > 0 {
+		m, err := s.models(ctx)
+		if err == nil {
+			pids = append(pids, others...)
+		}
+		probed = &ps{m, err}
 	}
 	if len(pids) == 0 {
 		o.Installed = s.installed()
@@ -65,15 +77,15 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	// side, so together they fit the source timeout. Without the model list
 	// the footprint still counts: the budget reserves it, so a server on a
 	// port headroom was not told about is not free.
-	type ps struct {
-		models []protocol.OllamaModel
-		err    error
-	}
 	read := make(chan ps, 1)
-	go func() {
-		m, err := s.models(ctx)
-		read <- ps{m, err}
-	}()
+	if probed != nil {
+		read <- *probed
+	} else {
+		go func() {
+			m, err := s.models(ctx)
+			read <- ps{m, err}
+		}()
+	}
 	if fp, err := s.procs.Footprints(ctx, pids...); err != nil {
 		o.FootprintError = err.Error()
 	} else {
@@ -87,6 +99,12 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		o.Models = models
 	}
 	return reading{o}, nil
+}
+
+// ps is a read of /api/ps.
+type ps struct {
+	models []protocol.OllamaModel
+	err    error
 }
 
 func (s *Source) models(ctx context.Context) ([]protocol.OllamaModel, error) {
@@ -108,14 +126,18 @@ func (s *Source) models(ctx context.Context) ([]protocol.OllamaModel, error) {
 
 // servers returns the pids of every running `ollama serve` and the
 // processes under it: one runner per loaded model. A server that exits
-// before its tree is read is not running.
-func (s *Source) servers() ([]int, error) {
+// before its tree is read is not running. others are the ollama processes
+// whose arguments cannot be read (another user's), servers or clients.
+func (s *Source) servers() (pids, others []int, err error) {
 	procs, err := s.procs.ProcessesNamed("ollama")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var pids []int
 	for _, p := range procs {
+		if p.ArgsErr != nil {
+			others = append(others, p.PID)
+			continue
+		}
 		if len(p.Args) < 2 || p.Args[1] != "serve" {
 			continue
 		}
@@ -127,7 +149,7 @@ func (s *Source) servers() ([]int, error) {
 			pids = append(pids, q.PID)
 		}
 	}
-	return pids, nil
+	return pids, others, nil
 }
 
 // Unusable is the API of an Ollama host headroom does not ask (see

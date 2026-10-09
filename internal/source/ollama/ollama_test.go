@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,10 +54,14 @@ func (f fakeProcs) ProcessesNamed(comm string) ([]vmproc.Process, error) {
 }
 
 // Tree returns root and its descendants, root first, like vmproc.Host.
+// Like vmproc.Host, it fails for a root whose arguments cannot be read.
 func (f fakeProcs) Tree(root int) ([]vmproc.Process, error) {
 	var out []vmproc.Process
 	for _, p := range f.procs {
 		if p.PID == root {
+			if p.ArgsErr != nil {
+				return nil, p.ArgsErr
+			}
 			out = append(out, p)
 		}
 	}
@@ -77,6 +82,11 @@ func (f fakeProcs) Footprints(_ context.Context, pids ...int) (uint64, error) {
 	if f.footprintErr != nil {
 		return 0, f.footprintErr
 	}
+	for _, p := range f.procs {
+		if p.ArgsErr != nil && slices.Contains(pids, p.PID) {
+			return 0, errors.New("footprint: exit status 1") // another user's
+		}
+	}
 	var total uint64
 	for _, pid := range pids {
 		total += f.footprint[pid]
@@ -95,6 +105,18 @@ func serverTree() fakeProcs {
 		},
 		footprint: map[int]uint64{700: 12 << 20, 701: 2300 << 20, 800: 1 << 30},
 	}
+}
+
+// errNotPermitted is what reading another user's arguments fails with.
+var errNotPermitted = errors.New("kern.procargs2: operation not permitted")
+
+// otherUsersServer is `sudo ollama serve` with one runner: neither's
+// arguments can be read.
+func otherUsersServer() fakeProcs {
+	return fakeProcs{procs: []vmproc.Process{
+		{PID: 600, PPID: 599, Comm: "ollama", ArgsErr: errNotPermitted},
+		{PID: 601, PPID: 600, Comm: "llama-server", ArgsErr: errNotPermitted},
+	}}
 }
 
 func collect(t *testing.T, src *ollama.Source) protocol.Ollama {
@@ -273,5 +295,49 @@ func TestInstalledIsNotSearchedWhileRunning(t *testing.T) {
 	src := ollama.New(fakeAPI{t: t, file: "ps-empty.json", allowed: true}, serverTree(), func() bool { searched = true; return false })
 	if got := collect(t, src); !got.Installed || searched {
 		t.Fatalf("installed=%v searched=%v, want installed without a search", got.Installed, searched)
+	}
+}
+
+func TestAnotherUsersServerRunsWithItsModels(t *testing.T) {
+	got := collect(t, ollama.New(fakeAPI{t: t, file: "ps-one.json", allowed: true}, otherUsersServer(), is(false)))
+	if !got.Installed || !got.Running || len(got.Models) != 1 || got.Models[0].Name != "llama3.2:1b" {
+		t.Fatalf("got %+v, want installed and running with llama3.2:1b", got)
+	}
+	if got.FootprintBytes != nil || got.FootprintError == "" {
+		t.Fatalf("footprint=%v error=%q, want unknown with an error", got.FootprintBytes, got.FootprintError)
+	}
+}
+
+func TestAnotherUsersOllamaWithoutAnAPIIsNotRunning(t *testing.T) {
+	// e.g. another user's `ollama run` client, or a server on a port
+	// headroom was not told about.
+	got := collect(t, ollama.New(fakeAPI{t: t, allowed: true}, otherUsersServer(), is(true)))
+	if !got.Installed || got.Running || got.Models == nil || got.FootprintError != "" {
+		t.Fatalf("got %+v, want installed, not running, empty model list", got)
+	}
+}
+
+// countingAPI counts /api/ps reads.
+type countingAPI struct {
+	fakeAPI
+	calls *int
+}
+
+func (c countingAPI) PS(ctx context.Context) ([]byte, error) {
+	*c.calls++
+	return c.fakeAPI.PS(ctx)
+}
+
+func TestAnotherUsersOllamaCostsOneAPIReadPerReading(t *testing.T) {
+	procs := serverTree()
+	procs.procs = append(procs.procs, otherUsersServer().procs...)
+	calls := 0
+	got := collect(t, ollama.New(countingAPI{fakeAPI{t: t, file: "ps-one.json", allowed: true}, &calls}, procs, is(true)))
+	if calls != 1 || len(got.Models) != 1 {
+		t.Fatalf("%d reads of /api/ps, models %+v; want 1 read, one model", calls, got.Models)
+	}
+	// Beside the user's own server, the other's footprint makes it unknown.
+	if got.FootprintBytes != nil || got.FootprintError == "" {
+		t.Fatalf("footprint=%v error=%q, want unknown", got.FootprintBytes, got.FootprintError)
 	}
 }

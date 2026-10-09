@@ -47,8 +47,8 @@ func (Host) VMPIDs() ([]int, error) {
 }
 
 // ProcessesNamed lists processes whose kernel name is comm, with their
-// arguments. Processes whose arguments cannot be read (other users') are
-// left out.
+// arguments. A process whose arguments cannot be read (another user's) is
+// listed without them, with ArgsErr saying why.
 func (Host) ProcessesNamed(comm string) ([]Process, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
@@ -62,10 +62,7 @@ func (Host) ProcessesNamed(comm string) ([]Process, error) {
 		}
 		pid := int(p.Proc.P_pid)
 		exec, args, err := procArgs(pid)
-		if err != nil {
-			continue
-		}
-		out = append(out, Process{PID: pid, PPID: int(p.Eproc.Ppid), Comm: comm, Exec: exec, Args: args})
+		out = append(out, Process{PID: pid, PPID: int(p.Eproc.Ppid), Comm: comm, Exec: exec, Args: args, ArgsErr: err})
 	}
 	return out, nil
 }

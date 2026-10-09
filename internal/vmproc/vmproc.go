@@ -47,6 +47,9 @@ type Process struct {
 	// Exec is the executable's path; argv[0] (Args[0]) may differ.
 	Exec string
 	Args []string
+	// ArgsErr is why Exec and Args could not be read (another user's
+	// process); nil when they were.
+	ArgsErr error
 }
 
 // System is the OS access vmproc needs. The darwin implementation is Host.

@@ -46,5 +46,5 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 ## This repo
 
-- Every issue carries one `phase:*` label for its phase in `docs/plan.md`, alongside a triage role.
+- Plan issues carry a `phase:*` label for their phase in `docs/plan.md`; a triage role is added only when one applies.
 - Blocking edges are a `Blocked by #<n>` line in the issue body; `docs/plan.md` gives the order.

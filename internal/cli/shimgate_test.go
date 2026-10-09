@@ -1103,6 +1103,42 @@ func TestComposeProjectOfStdinFromEnvFiles(t *testing.T) {
 	}
 }
 
+// compose -f - with another -f file: the project directory is that file's,
+// as Compose's GetWorkingDir has it (the first -f that is not -), for its
+// .env and its name (#85).
+func TestComposeProjectOfStdinWithAnotherFile(t *testing.T) {
+	app := filepath.Join(t.TempDir(), "app")
+	for name, body := range map[string]string{
+		".env":            "COMPOSE_PROJECT_NAME=from-cwd\n",
+		"ops/base.yml":    "services: {}\n",
+		"opsenv/base.yml": "services: {}\n",
+		"opsenv/.env":     "COMPOSE_PROJECT_NAME=from-ops\n",
+	} {
+		p := filepath.Join(app, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wd := func() (string, error) { return app, nil }
+	for _, tc := range []struct {
+		args    []string
+		want    string
+		guessed bool
+	}{
+		{[]string{"compose", "-f", "ops/base.yml", "-f", "-", "up", "-d"}, "ops", true},
+		{[]string{"compose", "-f", "-", "-f", "ops/base.yml", "up", "-d"}, "ops", true},
+		{[]string{"compose", "-f", "opsenv/base.yml", "-f", "-", "up", "-d"}, "from-ops", false},
+	} {
+		got, guessed := composeStdinProject(shim.Parse("docker", tc.args), noEnv, wd)
+		if got != tc.want || guessed != tc.guessed {
+			t.Errorf("%q: project = %q, guessed %v, want %q, guessed %v", tc.args, got, guessed, tc.want, tc.guessed)
+		}
+	}
+}
+
 // An env file is read as compose-go's dotenv parser reads it; each want is
 // what Docker Compose 5.5.1 named the project (with OTHER=o in its
 // environment), except that a value Compose interpolates is unknown, and

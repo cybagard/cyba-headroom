@@ -7,7 +7,7 @@ Admission control for a fleet of parallel coding agents on one Mac. `headroom` s
 ## Docs
 
 - [Product spec (full)](docs/SPEC.md), split into: [problem & goals](docs/01-problem-and-goals.md), [requirements](docs/02-requirements.md), [architecture](docs/03-architecture.md), [metrics](docs/04-metrics.md), [open questions](docs/05-open-questions.md), [phasing](docs/06-phasing.md)
-- [Implementation plan](docs/plan.md) — phases and epics; tracked as [GitHub issues](https://github.com/cybagard/cyba-headroom/issues) with sub-issues
+- [Implementation plan](https://github.com/cybagard/cyba-headroom/issues?q=is%3Aissue%20label%3Aepic) — one GitHub epic issue per phase, its tasks as sub-issues
 
 ## Development
 

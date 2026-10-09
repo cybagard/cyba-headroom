@@ -46,5 +46,6 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 ## This repo
 
-- Plan issues carry a `phase:*` label for their phase in `docs/plan.md`; a triage role is added only when one applies.
-- Blocking edges are GitHub's native issue dependencies, read and added as in **Blocking** above; when an issue's body names a blocker, add the edge too. `docs/plan.md` gives the order.
+- The plan lives here, not in a file. Each phase is an epic issue (label `epic`), blocked by the phase before it; its tasks and follow-ups are its sub-issues, in the epic's order.
+- A new issue goes to GitHub only. Give it its phase's `phase:*` label and make it a sub-issue of that phase's epic; leave one that fits no phase without either, for the user to place. A triage role is added only when one applies; `ready-for-human` marks an issue that waits on the user (a step on their machine, a date).
+- Blocking edges are GitHub's native issue dependencies, read and added as in **Blocking** above; when an issue's body names a blocker, add the edge too.

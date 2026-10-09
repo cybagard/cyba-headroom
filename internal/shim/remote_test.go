@@ -74,7 +74,8 @@ func resolving(t *testing.T, names map[string]string) {
 }
 
 // A tcp:// host is this Mac's when it resolves to one of its addresses, as
-// the docker CLI dials it: 127.1, a bare ::1, a name for 127.0.0.1 (#118).
+// the docker CLI dials it: 127.1, a name for 127.0.0.1; and so is a bare
+// ::1 on either scheme (#118).
 func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
 	resolving(t, map[string]string{"127.1": "127.0.0.1", "dev-box": "127.0.0.1", "dev-box6": "::1"})
 	for _, c := range []struct{ endpoint, dockerHost string }{

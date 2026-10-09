@@ -17,5 +17,5 @@
 - [ ] Tart VM naming convention: enforce `<worktree>-<suffix>` via the shim, or attribute by process cwd only? *(engineering)*
 - [x] Language and packaging: Python for speed of build, or Go for a single static binary the shims call quickly? *(engineering)* → **Go**, see [ADR 0001](adr/0001-language.md)
 - [ ] Shim latency budget: the daemon check must not noticeably slow every `docker` call. *(engineering)*
-- [ ] Does Kilo's CLI offer a before-tool-execution hook (its `.kilo` JS plugins suggest an OpenCode-style one), and can it deny with a message to the model? Decides whether P1 agent hooks cover Kilo. *(engineering)*
+- [x] Does Kilo's CLI offer a before-tool-execution hook (its `.kilo` JS plugins suggest an OpenCode-style one), and can it deny with a message to the model? Decides whether P1 agent hooks cover Kilo. *(engineering)* → **Yes, in headless `kilo run`; the interactive TUI is not yet tested.** A plugin's `tool.execute.before` hook is awaited, and if it throws, the call is blocked and the model sees the message. It must catch its own errors to fail open, and `kilo --pure` skips it. See [the spike](spikes/kilo-hook.md) (#11).
 

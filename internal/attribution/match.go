@@ -94,7 +94,7 @@ func (m *Matcher) Match(k Keys) Match {
 	}{
 		{ByComposeDir, nonEmpty(k.ComposeDir)},
 		{ByLaunchCwd, nonEmpty(k.LaunchCwd)},
-		{ByMount, k.Mounts},
+		{ByMount, m.notGit(k.Mounts)},
 		{BySharedDir, k.SharedDirs},
 	} {
 		if r, ok := decide(ev.by, m.pathMatches(ev.paths)); ok {
@@ -180,14 +180,37 @@ func decide(by string, ids []string) (Match, bool) {
 	return Match{WorktreeID: ids[0], By: by}, true
 }
 
+// notGit is mounts without those in a worktree's .git, unless that leaves
+// none that point at a worktree. A repo's .git is shared by every linked
+// worktree of the repo: a container mounts the main checkout's so git
+// works in a linked one, and that says nothing about which (#94). With
+// nothing else, it still names its repo (a git daemon).
+func (m *Matcher) notGit(mounts []string) []string {
+	var rest []string
+	for _, p := range mounts {
+		if !m.inGitDir(p) {
+			rest = append(rest, p)
+		}
+	}
+	if len(m.pathMatches(rest)) == 0 {
+		return mounts
+	}
+	return rest
+}
+
+// inGitDir reports whether p is a worktree's .git or lies inside it.
+func (m *Matcher) inGitDir(p string) bool {
+	p = key(p)
+	return p != "" && slices.ContainsFunc(m.wts, func(w prepared) bool {
+		return w.path != "" && (p == w.path+"/.git" || strings.HasPrefix(p, w.path+"/.git/"))
+	})
+}
+
 // pathMatches returns the distinct worktrees the paths lie in, in order.
-// A worktree's .git, or a path inside it, says nothing: a repo's .git is
-// shared by every linked worktree of the repo, and a container mounts the main
-// checkout's so git works in a linked one (#94).
 func (m *Matcher) pathMatches(paths []string) []string {
 	var ids []string
 	for _, p := range paths {
-		if id, rest := m.owner(p); id != "" && rest != ".git" && !strings.HasPrefix(rest, ".git/") && !slices.Contains(ids, id) {
+		if id := m.owner(p); id != "" && !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -195,24 +218,22 @@ func (m *Matcher) pathMatches(paths []string) []string {
 }
 
 // owner is the deepest worktree that p equals or lies under, on whole path
-// segments, and the rest of p below it; "" if none. Relative paths say
-// nothing about the host.
-func (m *Matcher) owner(p string) (id, rest string) {
+// segments; "" if none. Relative paths say nothing about the host.
+func (m *Matcher) owner(p string) string {
 	p = key(p)
 	if p == "" {
-		return "", ""
+		return ""
 	}
-	bestLen := -1
+	best, bestLen := "", -1
 	for _, w := range m.wts {
 		if w.path == "" || len(w.path) <= bestLen {
 			continue
 		}
 		if p == w.path || strings.HasPrefix(p, w.path+"/") {
-			id, bestLen = w.id, len(w.path)
-			rest = strings.TrimPrefix(strings.TrimPrefix(p, w.path), "/")
+			best, bestLen = w.id, len(w.path)
 		}
 	}
-	return id, rest
+	return best
 }
 
 // key is p in comparable form: canonical and lower-case, since macOS

@@ -36,10 +36,16 @@ func TestMatchPaths(t *testing.T) {
 		// A repo's .git is shared by every linked worktree of the repo: a container
 		// mounts the main checkout's so git works in a linked one (#94).
 		"main .git with a linked worktree": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a", "/Users/dev/w/project-b/.git"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
-		".git only":                        {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.git"}}, attribution.Match{Reason: attribution.NoMatch}},
-		"inside .git":                      {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.git/objects/pack"}}, attribution.Match{Reason: attribution.NoMatch}},
-		".github still counts":             {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.github"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
-		"case-insensitive":                 {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},
+		// With nothing else, a .git still names its repo (a git daemon).
+		".git only":                  {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.git"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
+		"inside .git, with a linked": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.git/objects/pack", "/Users/dev/w/project-a/x"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
+		"linked's own .git file":     {attribution.Keys{Mounts: []string{"/Users/dev/w/project-a/.git", "/Users/dev/w/project-b/.git"}}, attribution.Match{Reason: attribution.Ambiguous}},
+		"nested worktree's .git":     {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/sub/wt/.git", "/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
+		".GIT, trailing slash":       {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.GIT/", "/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "a", By: attribution.ByMount}},
+		// Only mounts: a compose dir inside .git still decides.
+		"compose dir in .git":  {attribution.Keys{ComposeDir: "/Users/dev/w/project-b/.git/x", Mounts: []string{"/Users/dev/w/project-a"}}, attribution.Match{WorktreeID: "b", By: attribution.ByComposeDir}},
+		".github still counts": {attribution.Keys{Mounts: []string{"/Users/dev/w/project-b/.github"}}, attribution.Match{WorktreeID: "b", By: attribution.ByMount}},
+		"case-insensitive":     {attribution.Keys{ComposeDir: "/users/dev/w/fix-login"}, attribution.Match{WorktreeID: "case", By: attribution.ByComposeDir}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

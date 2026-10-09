@@ -35,7 +35,7 @@ func Identify(s *protocol.Snapshot, c Caller) (id, by string) {
 	}
 	m := NewMatcher(wts)
 	for _, p := range []string{c.Cwd, c.RealCwd} {
-		if id, _ := m.owner(p); id != "" {
+		if id := m.owner(p); id != "" {
 			return id, protocol.IdentifiedByCwd
 		}
 	}

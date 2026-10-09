@@ -68,7 +68,8 @@ type Book struct {
 	// resource not among them is new and may bind a lease: one started for
 	// the first time, or again after it stopped. A failed read keeps the
 	// previous set, so a resource missing from it does not come back new;
-	// so does a reading a container is only missing from (Book.gone).
+	// so does a reading a container is only missing from (Book.gone),
+	// though when it is back it may bind a lease, held (Observe).
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
 	// based says which sources (container, vm) prev holds a fresh reading
@@ -609,9 +610,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			}
 		}
 	}
-	var fresh []resource // new this tick, and bound to no lease yet
+	var fresh []resource // new this tick, or back after a reading it was missing from, and bound to no lease yet
 	for _, r := range res {
-		if !b.prev[r.key] && !bound[r.key] {
+		if (!b.prev[r.key] || b.missed[r.key] > 0) && !bound[r.key] {
 			fresh = append(fresh, b.unmark(r))
 		}
 	}
@@ -640,7 +641,16 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 		if e != nil {
 			e.bind(r)
-			b.judge(r, gated, now)
+			if b.prev[r.key] {
+				// Back after one reading it was missing from: with no
+				// events, a stop the call started again, or a stats blip
+				// across its check (#87). Held, so it binds without its
+				// use counting as what the lease waits for, and it keeps
+				// its verdict.
+				e.held[r.key] = true
+			} else {
+				b.judge(r, gated, now)
+			}
 		} else {
 			unbound = append(unbound, r)
 		}

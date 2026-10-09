@@ -1,7 +1,7 @@
 // Package suggest learns headroom's thresholds from recorded samples (#23):
-// what the host really needs outside every component, what the Docker VM and
-// LM Studio cost beyond their payload, how much headroom was left when
-// memory pressure turned, and how much one worktree uses at its peak.
+// what the host really needs outside every component, what the Docker VM,
+// LM Studio and Ollama cost beyond their payload, how much headroom was left
+// when memory pressure turned, and how much one worktree uses at its peak.
 //
 // Only working samples count: at least one agent working and no stale budget
 // input. A value with too little evidence is reported as such, never guessed.
@@ -38,6 +38,7 @@ const (
 	minWorkingPerDay  = time.Hour
 	minDockerTime     = time.Hour
 	minLMIdleTime     = 10 * time.Minute
+	minOllamaIdleTime = 10 * time.Minute
 	minWarnOnsets     = 3
 	minWorktreeDays   = 5
 	headroomMarginGiB = 1.0
@@ -95,12 +96,14 @@ type Aggregator struct {
 	dockerExtra []float64
 	// LM Studio's footprint with no model loaded.
 	lmIdle []float64
+	// Ollama's footprint with no model loaded.
+	ollIdle []float64
 
 	// prev is the previous sample, for pressure onsets and sample weights.
 	prev *samples.Sample
-	// How long the Docker VM ran, and LM Studio ran with no model loaded,
-	// in working samples.
-	dockerSpan, lmIdleSpan time.Duration
+	// How long the Docker VM ran, and LM Studio and Ollama ran with no model
+	// loaded, in working samples.
+	dockerSpan, lmIdleSpan, ollIdleSpan time.Duration
 	// Samples at which pressure turned warn, or critical, from normal.
 	warnOnsets, critOnsets []samples.Sample
 
@@ -117,7 +120,10 @@ type Aggregator struct {
 	dockerLimit     uint64
 	idleModel       map[modelDay]time.Duration
 	modelSize       map[string]uint64
-	maxCalmWorking  int
+	// Each Ollama model's time loaded with no expiry per day, and its size.
+	ollNoExpiry    map[modelDay]time.Duration
+	ollSize        map[string]uint64
+	maxCalmWorking int
 }
 
 type modelDay struct{ key, date string }
@@ -130,7 +136,8 @@ func New(o Options) *Aggregator {
 		o.Loc = time.Local
 	}
 	return &Aggregator{o: o, days: map[string]*Day{}, worktreePeak: map[worktreeDay]uint64{},
-		idleModel: map[modelDay]time.Duration{}, modelSize: map[string]uint64{}}
+		idleModel: map[modelDay]time.Duration{}, modelSize: map[string]uint64{},
+		ollNoExpiry: map[modelDay]time.Duration{}, ollSize: map[string]uint64{}}
 }
 
 // budgetSources are the inputs to the budget; a stale one makes a sample
@@ -189,6 +196,18 @@ func (a *Aggregator) Add(s samples.Sample) {
 			}
 		}
 	}
+	// An Ollama model list that could not be read says nothing about what
+	// is loaded: such samples are left out of its idle footprint and advice.
+	if o := s.Ollama; o != nil && !o.ModelsUnknown {
+		for _, m := range o.Models {
+			// Loaded, and nothing will unload it (keep_alive < 0). Ollama
+			// records no last use, so this is time loaded, not time unused.
+			if m.ExpiresAt == nil {
+				a.ollNoExpiry[modelDay{m.Name, day.Date}] += dt
+				a.ollSize[m.Name] = m.SizeBytes
+			}
+		}
+	}
 	if d := s.Docker; d != nil && d.VMRunning {
 		a.dockerFootprint = append(a.dockerFootprint, float64(d.VMFootprintBytes))
 		a.dockerSpan += dt
@@ -202,6 +221,10 @@ func (a *Aggregator) Add(s samples.Sample) {
 	if l := s.LMStudio; l != nil && len(l.Models) == 0 && l.FootprintBytes != nil {
 		a.lmIdle = append(a.lmIdle, float64(*l.FootprintBytes))
 		a.lmIdleSpan += dt
+	}
+	if o := s.Ollama; o != nil && !o.ModelsUnknown && len(o.Models) == 0 && o.FootprintBytes != nil {
+		a.ollIdle = append(a.ollIdle, float64(*o.FootprintBytes))
+		a.ollIdleSpan += dt
 	}
 	a.addWorktreeUse(s, day.Date)
 	if s.Budget != nil && s.Budget.UnaccountedBytes != nil {
@@ -280,12 +303,13 @@ func (a *Aggregator) Result() Result {
 		return v
 	}
 
-	r.Values = append(r.Values, gate(a.hostBaseline()), gate(a.dockerOverhead()), gate(a.lmStudioIdle()))
+	r.Values = append(r.Values, gate(a.hostBaseline()), gate(a.dockerOverhead()), gate(a.lmStudioIdle()), gate(a.ollamaIdle()))
 	r.Values = append(r.Values, gate(a.minHeadroom(a.params(r.Values))), gate(a.perWorktreeCap()))
 	r.Advice = append(r.Advice, a.pressureAdvice()...)
 	r.Advice = append(r.Advice, a.concurrencyAdvice()...)
 	r.Advice = append(r.Advice, a.dockerAdvice()...)
 	r.Advice = append(r.Advice, a.modelAdvice()...)
+	r.Advice = append(r.Advice, a.ollamaAdvice()...)
 	return r
 }
 
@@ -305,6 +329,8 @@ func (a *Aggregator) params(vs []Value) budget.Params {
 			p.DockerOverheadBytes = b
 		case "lmstudio_idle_gb":
 			p.LMStudioIdleBytes = b
+		case "ollama_idle_gb":
+			p.OllamaIdleBytes = b
 		}
 	}
 	return p
@@ -375,27 +401,44 @@ func (a *Aggregator) dockerAdvice() []string {
 // modelAdvice names LM Studio models that sat loaded and unused for over an
 // hour of working time on at least two days, with no TTL to unload them.
 func (a *Aggregator) modelAdvice() []string {
-	days := map[string]int{}
-	total := map[string]time.Duration{}
-	for k, d := range a.idleModel {
-		total[k.key] += d
-		if d >= time.Hour {
-			days[k.key]++
-		}
-	}
-	keys := make([]string, 0, len(days))
-	for k, n := range days {
-		if n >= 2 {
-			keys = append(keys, k)
-		}
-	}
-	slices.Sort(keys)
+	keys, days, total := overTwoDays(a.idleModel)
 	var out []string
 	for _, k := range keys {
 		out = append(out, fmt.Sprintf("LM Studio: %q (%.1f GB) sat loaded and unused for %.1f h on %d days with no TTL; set a TTL so it unloads when idle.",
 			k, float64(a.modelSize[k])/(1<<30), total[k].Hours(), days[k]))
 	}
 	return out
+}
+
+// ollamaAdvice names Ollama models that stayed loaded with no expiry for
+// over an hour of working time on at least two days.
+func (a *Aggregator) ollamaAdvice() []string {
+	keys, days, total := overTwoDays(a.ollNoExpiry)
+	var out []string
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("Ollama: %q (%.1f GB) stayed loaded with no expiry for %.1f h on %d days; set a keep_alive so it unloads when idle.",
+			k, float64(a.ollSize[k])/(1<<30), total[k].Hours(), days[k]))
+	}
+	return out
+}
+
+// overTwoDays returns, sorted, the models in m with at least an hour on at
+// least two days, with each model's count of such days and its total time.
+func overTwoDays(m map[modelDay]time.Duration) (keys []string, days map[string]int, total map[string]time.Duration) {
+	days, total = map[string]int{}, map[string]time.Duration{}
+	for k, d := range m {
+		total[k.key] += d
+		if d >= time.Hour {
+			days[k.key]++
+		}
+	}
+	for k, n := range days {
+		if n >= 2 {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys, days, total
 }
 
 // pressureAdvice reports the free % at which the kernel changed level.
@@ -506,6 +549,19 @@ func (a *Aggregator) lmStudioIdle() Value {
 	p50, p95, top := dist(a.lmIdle)
 	v.OK, v.GB = true, roundUp(p95, 0.1)
 	v.Rule = fmt.Sprintf("p95 of LM Studio's footprint with no model loaded (%d samples; p50 %.1f, max %.1f GB)", len(a.lmIdle), p50, top)
+	return v
+}
+
+// ollamaIdle is the p95 of Ollama's footprint with no model loaded.
+func (a *Aggregator) ollamaIdle() Value {
+	v := Value{Section: "budget", Key: "ollama_idle_gb"}
+	if have := a.ollIdleSpan.Round(time.Minute); have < minOllamaIdleTime {
+		v.Why = fmt.Sprintf("not enough data: Ollama ran with no model loaded for %s of working time, need %s", have, minOllamaIdleTime)
+		return v
+	}
+	p50, p95, top := dist(a.ollIdle)
+	v.OK, v.GB = true, roundUp(p95, 0.1)
+	v.Rule = fmt.Sprintf("p95 of Ollama's footprint with no model loaded (%d samples; p50 %.1f, max %.1f GB)", len(a.ollIdle), p50, top)
 	return v
 }
 

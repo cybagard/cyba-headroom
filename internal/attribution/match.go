@@ -181,10 +181,13 @@ func decide(by string, ids []string) (Match, bool) {
 }
 
 // pathMatches returns the distinct worktrees the paths lie in, in order.
+// A worktree's .git, or a path inside it, says nothing: a repo's .git is
+// shared by every linked worktree of the repo, and a container mounts the main
+// checkout's so git works in a linked one (#94).
 func (m *Matcher) pathMatches(paths []string) []string {
 	var ids []string
 	for _, p := range paths {
-		if id := m.owner(p); id != "" && !slices.Contains(ids, id) {
+		if id, rest := m.owner(p); id != "" && rest != ".git" && !strings.HasPrefix(rest, ".git/") && !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -192,22 +195,24 @@ func (m *Matcher) pathMatches(paths []string) []string {
 }
 
 // owner is the deepest worktree that p equals or lies under, on whole path
-// segments; "" if none. Relative paths say nothing about the host.
-func (m *Matcher) owner(p string) string {
+// segments, and the rest of p below it; "" if none. Relative paths say
+// nothing about the host.
+func (m *Matcher) owner(p string) (id, rest string) {
 	p = key(p)
 	if p == "" {
-		return ""
+		return "", ""
 	}
-	best, bestLen := "", -1
+	bestLen := -1
 	for _, w := range m.wts {
 		if w.path == "" || len(w.path) <= bestLen {
 			continue
 		}
 		if p == w.path || strings.HasPrefix(p, w.path+"/") {
-			best, bestLen = w.id, len(w.path)
+			id, bestLen = w.id, len(w.path)
+			rest = strings.TrimPrefix(strings.TrimPrefix(p, w.path), "/")
 		}
 	}
-	return best
+	return id, rest
 }
 
 // key is p in comparable form: canonical and lower-case, since macOS

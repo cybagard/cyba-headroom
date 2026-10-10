@@ -20,6 +20,16 @@ make lint    # go vet + golangci-lint
 bin/headroom config   # effective config and its path
 ```
 
+## Releasing
+
+Tag a commit on `main` once its CI run is green, and push the tag:
+
+```sh
+git tag -a vX.Y.Z -m "headroom vX.Y.Z" && git push origin vX.Y.Z
+```
+
+The [release workflow](.github/workflows/release.yml) tests and lints the tag, builds `headroom` for darwin/arm64 with the tag as its version, and publishes `headroom-vX.Y.Z-darwin-arm64.tar.gz` (the binary, LICENSE and README) and `SHA256SUMS` as a GitHub release. `v0.*` releases are marked pre-release. Then close the version's milestone.
+
 ## Observe
 
 `headroom install` runs the daemon as a LaunchAgent: it starts at login, restarts if it crashes, and logs to `~/Library/Logs/headroom/daemon.log` (rotated at 5 MB). The install copies the binary to `~/.local/bin/headroom`; run `install` again to upgrade. `headroom uninstall` removes the agent and the binary, but keeps config, samples and logs. The other commands read from the daemon.

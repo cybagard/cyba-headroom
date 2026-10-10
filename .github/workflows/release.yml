@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # headroom ships for macOS on Apple silicon only.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # The version ci.yml's golangci-lint-action resolved to when this was written.
+      - name: install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make NATIVE=1 test
+      - run: make NATIVE=1 lint
+      - name: build and check the version
+        run: |
+          make NATIVE=1 build VERSION="$GITHUB_REF_NAME"
+          got=$(./bin/headroom version)
+          if [ "$got" != "headroom $GITHUB_REF_NAME" ]; then
+            echo "headroom version printed '$got', want 'headroom $GITHUB_REF_NAME'" >&2
+            exit 1
+          fi
+      - name: package
+        run: |
+          mkdir -p dist/stage
+          cp bin/headroom LICENSE README.md dist/stage/
+          tarball="headroom-$GITHUB_REF_NAME-darwin-arm64.tar.gz"
+          tar -czf "dist/$tarball" -C dist/stage headroom LICENSE README.md
+          (cd dist && shasum -a 256 "$tarball" > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=false
+          case "$GITHUB_REF_NAME" in v0.*) pre=true ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --prerelease="$pre" \
+            "dist/headroom-$GITHUB_REF_NAME-darwin-arm64.tar.gz" dist/SHA256SUMS

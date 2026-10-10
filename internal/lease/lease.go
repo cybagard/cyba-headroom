@@ -688,15 +688,22 @@ type resource struct {
 	bytes uint64
 }
 
+// resources lists s's containers and VMs. Their worktree is the evidence's
+// alone: a lease's placement (attribution.ByLease) is for status and
+// policy, and never feeds back into binding (#74).
 func resources(s *protocol.Snapshot) []resource {
 	owner := map[string]string{}
 	if a := s.Attribution; a != nil {
 		for _, w := range a.Worktrees {
 			for _, c := range w.Containers {
-				owner["container:"+c.ID] = w.ID
+				if c.By != attribution.ByLease {
+					owner["container:"+c.ID] = w.ID
+				}
 			}
 			for _, vm := range w.TartVMs {
-				owner["vm:"+vm.Name] = w.ID
+				if vm.By != attribution.ByLease {
+					owner["vm:"+vm.Name] = w.ID
+				}
 			}
 		}
 	}

@@ -166,21 +166,26 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 		pid  int   // mac1's RunPID
 		pids []int // its RunPIDs: none in an old or fake reading
 	}
+	// Every review finding's shape is a row: a run told by one PID picked
+	// from an unordered set (R1-B1, R1-B2, R2-B2, R3-B1).
 	for _, tc := range []struct {
 		name     string
+		first    reading   // mac1's in the reading that binds it: {p} if zero
 		recheck  bool      // a checked tart run of mac1 under q, before the readings
 		readings []reading // mac1's in the readings after it was bound
 		want     string
 		ungated  bool // mac1 is listed as ungated
 	}{
-		{"another PID", false, []reading{{q, nil}}, "mac1 (manual)", true},
-		{"another PID, checked", true, []reading{{q, nil}}, `mac1 (worktree "A"`, false},
-		{"PID 0, then the same", false, []reading{{0, nil}, {p, nil}}, `mac1 (worktree "A"`, false},
-		{"same PID", false, []reading{{p, nil}}, `mac1 (worktree "A"`, false},
-		// Two tart runs of mac1, listed in either order: the first runs on.
-		{"two runs, in either order", false, []reading{{p, []int{p, q}}, {q, []int{p, q}}, {p, []int{p, q}}}, `mac1 (worktree "A"`, false},
-		{"two runs, then the first alone", false, []reading{{q, []int{p, q}}, {p, []int{p}}}, `mac1 (worktree "A"`, false},
-		{"another run alone", false, []reading{{q, []int{q}}}, "mac1 (manual)", true},
+		{"another PID", reading{}, false, []reading{{q, nil}}, "mac1 (manual)", true},
+		{"another PID, checked", reading{}, true, []reading{{q, nil}}, `mac1 (worktree "A"`, false},            // R1-B2
+		{"PID 0, then the same", reading{}, false, []reading{{0, nil}, {p, nil}}, `mac1 (worktree "A"`, false}, // R1-B1
+		{"same PID", reading{}, false, []reading{{p, nil}}, `mac1 (worktree "A"`, false},
+		// Two tart runs of mac1, listed in either order: the first runs on (R2-B2).
+		{"two runs, in either order", reading{}, false, []reading{{p, []int{p, q}}, {q, []int{p, q}}, {p, []int{p, q}}}, `mac1 (worktree "A"`, false},
+		{"two runs, then the first alone", reading{}, false, []reading{{q, []int{p, q}}, {p, []int{p}}}, `mac1 (worktree "A"`, false},
+		// First seen with a duplicate run listed last, which then exits (R3-B1).
+		{"two runs at first, then the first alone", reading{q, []int{p, q}}, false, []reading{{p, []int{p}}}, `mac1 (worktree "A"`, false},
+		{"another run alone", reading{}, false, []reading{{q, []int{q}}}, "mac1 (manual)", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			book := lease.New(time.Minute, time.Now, discardLog())
@@ -203,14 +208,18 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 			}
 			run := func(s *protocol.Snapshot, pid int) {
 				t.Helper()
-				if d := check(&protocol.CheckRequest{Worktree: w, Kind: "tart", Command: "tart run mac1", MacOS: true, CostBytes: 4 << 30, PID: pid}, s); !d.Allow {
+				if d := check(&protocol.CheckRequest{Worktree: w, Kind: "tart", Command: "tart run mac1", MacOS: true, CostBytes: 4 << 30, PID: pid, Target: "mac1"}, s); !d.Allow {
 					t.Fatalf("tart run mac1: %+v", d)
 				}
 			}
 
 			s := snap()
 			run(s, p)
-			s = snap(mac1(p)) // it uses its cost: the lease ends
+			first := tc.first
+			if first.pid == 0 {
+				first = reading{p, nil}
+			}
+			s = snap(mac1(first.pid, first.pids...)) // it uses its cost: the lease ends
 			if l := book.List(); len(l) != 0 {
 				t.Fatalf("leases = %+v", l)
 			}

@@ -609,7 +609,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 		delete(from.dead, r.key)
 		if d.ran.IsZero() {
-			d.ran = cmp.Or(began, now) // no event saw it: by this reading
+			d.ran = now // no event saw it: by this reading
 		}
 		if e := b.binder(b.unmark(r)); !b.prev[r.key] && e != nil && d.takenBy(e) {
 			from.letGo(r.key)

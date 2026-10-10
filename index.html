@@ -1,0 +1,281 @@
+<!doctype html>
+<!-- headroom landing page, built on the cybagard design system 2.0.1.
+     Site root for the gh-pages branch. Check with: node scripts/check.mjs index.html -->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>headroom · cybagard</title>
+  <meta name="description" content="headroom is admission control for parallel coding agents on one Mac. It shows what each agent costs and refuses to start a container or VM that does not fit.">
+  <meta name="theme-color" content="#000000">
+  <meta property="og:title" content="headroom">
+  <meta property="og:description" content="Agents can handle it. Your memory cannot.">
+  <meta property="og:image" content="assets/cybagard/logos/mark-cream-1024.png">
+  <link rel="icon" type="image/png" href="assets/cybagard/logos/favicon.png">
+  <link rel="stylesheet" href="assets/cybagard/fonts.css">
+  <link rel="stylesheet" href="assets/cybagard/tokens.css">
+  <link rel="stylesheet" href="assets/cybagard/cybagard.css">
+</head>
+<body class="cg-root">
+  <a class="cg-skip" href="#main">Go to the content</a>
+
+  <nav class="cg-nav" aria-label="Primary">
+    <div class="cg-wrap">
+      <a class="cg-brand" href="#top">
+        <img src="assets/cybagard/logos/mark-cream.png" alt="" width="30" height="30">
+        <span>headroom</span>
+        <small>cybagard</small>
+      </a>
+      <ul>
+        <li><a href="#why">Why</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#view">View</a></li>
+        <li><a href="#layers">Layers</a></li>
+        <li><a href="#coverage">Coverage</a></li>
+        <li><a href="#quickstart">Quickstart</a></li>
+      </ul>
+      <a class="cg-btn-outline" href="https://github.com/cybagard/cyba-headroom">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </nav>
+
+  <header class="cg-hero" id="top">
+    <div class="cg-wrap">
+      <div>
+        <span class="cg-eyebrow">macOS · Apple silicon · Docker · Podman · Tart</span>
+        <h1 class="cg-h1">Agents can handle it.<br><span>Your memory cannot.</span></h1>
+        <p class="cg-hero__lede">headroom is admission control for parallel coding agents on one Mac. It shows what each agent costs, and it refuses to start a container or VM that does not fit.</p>
+        <div class="cg-cta">
+          <a class="cg-btn cg-btn--gold" href="#quickstart">Install headroom →</a>
+          <a class="cg-btn cg-btn--ghost" href="https://github.com/cybagard/cyba-headroom">View on GitHub</a>
+        </div>
+        <div class="cg-status-row" aria-label="Stack">
+          <span class="cg-pill cg-pill--off">Go</span>
+          <span class="cg-pill cg-pill--off">Orca</span>
+          <span class="cg-pill cg-pill--off">LaunchAgent</span>
+          <span class="cg-pill cg-pill--off">v0.1.0 pre-release</span>
+        </div>
+      </div>
+      <div class="cg-hero__mark">
+        <img src="assets/cybagard/logos/mark-cream.png" alt="" width="360" height="360">
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <section class="cg-section" id="why">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">Why headroom</span>
+          <h2 class="cg-h2">Three agents build at once, and the Mac swaps.</h2>
+          <p>Orca runs several coding agents in parallel, each in its own worktree. Each agent starts containers and VMs that share one pool of unified memory. No layer sees the others, so the fleet fills the host, every agent slows down, and nothing reports why.</p>
+        </div>
+        <div class="cg-flow">
+          <div class="cg-card cg-card--accent-top">
+            <span class="cg-card__num">STEP 1</span>
+            <h3 class="cg-h3">An agent calls docker, podman or tart</h3>
+            <p>The call goes through a shim first on the agent's PATH. The shim asks the daemon whether the call fits in the budget.</p>
+          </div>
+          <div class="cg-flow__arrow" aria-hidden="true">→</div>
+          <div class="cg-card cg-card--accent-top">
+            <span class="cg-card__num">STEP 2</span>
+            <h3 class="cg-h3">The daemon checks the budget</h3>
+            <p>It subtracts the reserved memory of every container, VM and loaded model from the host total. It then applies the policy.</p>
+          </div>
+          <div class="cg-flow__arrow" aria-hidden="true">→</div>
+          <div class="cg-outcomes">
+            <div class="cg-outcome cg-outcome--muted">
+              <span class="cg-pill cg-pill--off">allowed</span><b>The call runs as usual.</b>
+              <p>The container or VM starts, and the daemon attributes it to the agent's worktree.</p>
+            </div>
+            <div class="cg-outcome cg-outcome--gold">
+              <span class="cg-pill cg-pill--on">denied</span><b>The call does not run.</b>
+              <p>The agent reads what it can reuse or stop. With <code>BUDGET_WAIT=1</code> the call waits for room instead.</p>
+            </div>
+          </div>
+        </div>
+        <p class="cg-callout"><b>NOTE</b>The gate is cooperative, not a security boundary. An agent can call the real binary or the Docker socket directly. headroom detects such a start and marks it, but it does not prevent it.</p>
+      </div>
+    </section>
+
+    <section class="cg-section cg-section--alt" id="features">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">Features</span>
+          <h2 class="cg-h2">One glance answers who costs what.</h2>
+        </div>
+        <div class="cg-grid cg-g4">
+          <article class="cg-card cg-card--accent-top"><span class="cg-card__num">01</span><h3 class="cg-h3">One row for each worktree</h3><p>The view shows each Orca worktree with its agents, containers, Tart VMs, CPU and agent memory. The headroom figure and the memory pressure lead the top line.</p></article>
+          <article class="cg-card cg-card--accent-top"><span class="cg-card__num">02</span><h3 class="cg-h3">Every resource has an owner</h3><p>Each container, VM and loaded model belongs to a worktree, or the view lists it as unattributed. Orphans from finished worktrees show up in minutes.</p></article>
+          <article class="cg-card cg-card--accent-top"><span class="cg-card__num">03</span><h3 class="cg-h3">Agents negotiate, they do not crash</h3><p>A denied call tells the agent what to reuse, what to stop, or how to wait. It does not receive an out-of-memory kill or an unclear Tart error.</p></article>
+          <article class="cg-card cg-card--accent-top"><span class="cg-card__num">04</span><h3 class="cg-h3">Fails open</h3><p>When the daemon is down, each call runs and shows a warning. A crashed monitor does not block your build.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="cg-section" id="view">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">The view · host state</span>
+          <h2 class="cg-h2">The top line tells you the state of the host.</h2>
+          <p>Run <code>headroom</code> for one frame, or <code>headroom --watch</code> to see it redraw in place. The pressure word is the state, and its colour follows macOS memory pressure.</p>
+        </div>
+        <div class="cg-grid">
+          <div class="cg-term" role="region" aria-label="Example headroom view">
+            <div class="cg-term__bar"><i></i><i></i><i></i><span>headroom --watch</span></div>
+<pre>headroom <span class="hl">27.0 GB</span> · pressure <span class="k">warn</span> (5m: rising, worst warn 12s) · total 64.0 · reserved 37.0 · used 22.5 · swap 0.1/2.0 GB
+  reserved: docker 6.0 · tart 8.0 · lmstudio 13.0 · host_baseline 10.0
+
+WORKTREE           AGENTS                  CONTAINERS    TART VMS      CPU    AGENT MEM
+fix-login          claude working          db, web       -             30%    1.0 GB
+release-prep       claude done             -             ci            -      0.5 GB
+two-agents         claude, codex           api           -             -      2.0 GB
+unattributed                               db-old        -             -</pre>
+          </div>
+          <div class="cg-grid cg-g2">
+            <div class="cg-card">
+              <h3 class="cg-h3">The pressure word</h3>
+              <ul class="cg-checklist">
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>normal is green.</b> The host has room. Start the next agent.</div></li>
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>warn is yellow.</b> The host is close to its limit. The trend in brackets tells how long it was at that level in the last five minutes.</div></li>
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>critical is red.</b> The host swaps. Look for the row with the most agent memory, and stop or reuse what it holds.</div></li>
+              </ul>
+            </div>
+            <div class="cg-card">
+              <h3 class="cg-h3">The rows</h3>
+              <ul class="cg-checklist">
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>One row for each worktree.</b> Agents, containers, Tart VMs, CPU and agent memory. The last row lists what belongs to no worktree.</div></li>
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>The flag <code>⚑</code> marks a hold while idle.</b> A worktree keeps containers or VMs while none of its agents works. You can release that memory.</div></li>
+                <li><span class="cg-tick" aria-hidden="true">✓</span><div><b>The sign <code>⚠</code> marks a start without a check.</b> A container or VM did not go through the gate. A <code>?</code> means unknown, and unknown is not 0.</div></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cg-section cg-section--alt" id="layers">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">Layers</span>
+          <h2 class="cg-h2">Three layers, from the host to one call.</h2>
+          <p>The daemon samples the host. The lease book attributes each reservation to a worktree. The shim gates one call at a time.</p>
+        </div>
+        <div class="cg-rings-wrap">
+          <div class="cg-rings" aria-hidden="true">
+            <svg viewBox="0 0 200 200">
+              <circle cx="100" cy="100" r="88" stroke="currentColor" stroke-width="12" stroke-dasharray="470 83" transform="rotate(-60 100 100)"/>
+              <circle cx="100" cy="100" r="64" stroke="#C5B081" stroke-width="12" stroke-dasharray="330 72" transform="rotate(120 100 100)"/>
+              <circle cx="100" cy="100" r="40" stroke="currentColor" stroke-width="12" stroke-dasharray="200 51" transform="rotate(-30 100 100)"/>
+              <circle cx="100" cy="100" r="9"/>
+            </svg>
+          </div>
+          <div class="cg-layers">
+            <div class="cg-layer"><div class="cg-layer__lvl">1</div><div><h3 class="cg-h3">Host budget</h3><p>The daemon reads the host total, the memory pressure and the swap. It subtracts a baseline for the host itself and what LM Studio and Ollama reserve.</p></div></div>
+            <div class="cg-layer"><div class="cg-layer__lvl">2</div><div><h3 class="cg-h3">Worktree leases</h3><p>Each container, VM and model has a lease that names its Orca worktree. The policy caps one worktree and keeps a minimum headroom for all of them.</p></div></div>
+            <div class="cg-layer"><div class="cg-layer__lvl">3</div><div><h3 class="cg-h3">The gated call</h3><p>A shim parses one <code>docker</code>, <code>podman</code> or <code>tart</code> call, asks for the memory it will reserve, and receives one verdict.</p>
+              <ul class="cg-layer__list">
+                <li><b>ALLOWED</b>The call runs. Exit code of the tool.</li>
+                <li><b>DENIED</b>The container or VM does not start. Exit code 75 and a reason on stderr.</li>
+                <li><b>WAITING</b>With <code>BUDGET_WAIT=1</code>, the call waits for room or for a macOS VM slot, up to 10 minutes.</li>
+              </ul></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cg-section" id="coverage">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">Coverage</span>
+          <h2 class="cg-h2">What headroom sees, and what it gates.</h2>
+          <p>headroom runs on macOS on Apple silicon. It finds each worktree through Orca. A call from outside an Orca worktree is not gated.</p>
+        </div>
+        <div class="cg-grid cg-g2">
+          <div>
+            <div class="cg-table-head"><h3 class="cg-h3">Runtimes</h3><span class="cg-pill cg-pill--on">3 / 5 gated</span></div>
+            <div class="cg-card cg-table-card">
+              <table class="cg-table">
+                <thead><tr><th scope="col">Runtime</th><th scope="col">Seen</th><th scope="col">Gated</th></tr></thead>
+                <tbody>
+                  <tr><td class="cg-key">docker</td><td class="yes">Yes</td><td><span class="cg-pill cg-pill--on">run, create, compose up</span></td></tr>
+                  <tr><td class="cg-key">podman</td><td class="yes">Yes</td><td><span class="cg-pill cg-pill--on">run, create, compose up</span></td></tr>
+                  <tr><td class="cg-key">tart</td><td class="yes">Yes</td><td><span class="cg-pill cg-pill--on">run</span></td></tr>
+                  <tr><td class="cg-key">lmstudio</td><td class="yes">Yes</td><td class="no">No. Loaded models are reserved, not gated.</td></tr>
+                  <tr><td class="cg-key">ollama</td><td class="yes">Yes</td><td class="no">No. Loaded models are reserved, not gated.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <div class="cg-table-head"><h3 class="cg-h3">Pressure levels</h3></div>
+            <div class="cg-card cg-table-card">
+              <table class="cg-table">
+                <thead><tr><th scope="col">Word</th><th scope="col">Colour</th><th scope="col">What you do</th></tr></thead>
+                <tbody>
+                  <tr><td class="cg-key">normal</td><td><span class="cg-pill cg-pill--off">green</span></td><td>Start the next agent.</td></tr>
+                  <tr><td class="cg-key">warn</td><td><span class="cg-pill cg-pill--on">yellow</span></td><td>Do not start more. Watch the trend.</td></tr>
+                  <tr><td class="cg-key">critical</td><td><span class="cg-pill cg-pill--on">red</span></td><td>Stop or reuse what the top row holds.</td></tr>
+                  <tr><td class="cg-key">?</td><td><span class="cg-pill cg-pill--off">none</span></td><td>Unknown. Run <code>headroom doctor</code>.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p class="cg-note"><b>Note:</b> Apple's licence permits two macOS VMs on one Apple silicon Mac, and the Virtualization framework enforces it. headroom counts the slots (<code>budget.max_macos_vms</code>, default 2) and denies the third macOS <code>tart run</code> before Tart fails. Linux guests do not count.</p>
+      </div>
+    </section>
+
+    <section class="cg-section cg-section--alt" id="quickstart">
+      <div class="cg-wrap">
+        <div class="cg-sec-head">
+          <span class="cg-eyebrow">Quickstart</span>
+          <h2 class="cg-h2">Install headroom.</h2>
+          <p>You must have Homebrew and Orca. The service starts the daemon now and at login, and it puts the shims in <code>~/.config/headroom/shims</code>.</p>
+        </div>
+        <div class="cg-steps">
+          <div class="cg-step"><div><h3 class="cg-h3">Install and start the service</h3><p>Homebrew installs the binary and the LaunchAgent. Do not also run <code>headroom install</code>.</p><div class="cg-term"><pre>brew install cybagard/tap/headroom
+brew services start headroom</pre></div></div></div>
+          <div class="cg-step"><div><h3 class="cg-h3">Launch each agent through the gate</h3><p>In Orca, open <cite>Settings → Agents</cite> and set the command of each agent. An agent that already runs keeps its old PATH until you restart it.</p><div class="cg-term"><pre>headroom run -- claude</pre></div></div></div>
+          <div class="cg-step"><div><h3 class="cg-h3">Check a shell</h3><p>Each line tells you what to fix. A login shell puts the real <code>docker</code> first on PATH, so its calls are not gated.</p><div class="cg-term"><pre><span class="p">$</span> headroom doctor
+headroom doctor
+  ✓ config      ~/.config/headroom/config.toml (no file: defaults in effect)
+  ✓ shims       docker, podman, tart in ~/.config/headroom/shims → /opt/homebrew/bin/headroom
+  ✓ daemon      running at ~/.config/headroom/d.sock, under Homebrew's LaunchAgent (brew services)</pre></div></div></div>
+          <div class="cg-step"><div><h3 class="cg-h3">Read a denial</h3><p>A denied call exits 75. The first line gives the reason and what the worktree holds. The last line tells the agent what helps.</p><div class="cg-term"><pre><span class="p">$</span> docker run -m 12g build-ci
+headroom: not starting `docker run` (≈ 13.6 GB) for worktree "fix-login": only 9.2 GB headroom, and 6.0 GB must stay free. Your worktree holds: db (2.0 GB), web (1.0 GB)
+headroom: retry later, or run it with <span class="hl">BUDGET_WAIT=1</span> to wait for room</pre></div></div></div>
+          <div class="cg-step"><div><h3 class="cg-h3">Set the policy</h3><p>Record some samples, then let <code>headroom suggest</code> propose values. Write them to <code>~/.config/headroom/config.toml</code>.</p><div class="cg-term"><pre><span class="c"># example values, not defaults</span>
+[policy]
+min_headroom_gb = <span class="hl">6</span>
+per_worktree_cap_gb = 12
+
+[budget]
+host_baseline_gb = 10</pre></div></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cg-band cg-section">
+      <div class="cg-wrap">
+        <h2 class="cg-h2">Run the fleet without the swap.</h2>
+        <p>Install headroom, launch your agents through the gate, and let the top line tell you when to stop.</p>
+        <div class="cg-cta">
+          <a class="cg-btn cg-btn--gold" href="#quickstart">Install headroom →</a>
+          <a class="cg-btn cg-btn--ghost" href="https://github.com/cybagard/cyba-headroom/blob/main/docs/SPEC.md">Read the spec</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="cg-footer">
+    <div class="cg-wrap">
+      <a class="cg-brand" href="https://github.com/cybagard"><img src="assets/cybagard/logos/mark-cream.png" alt="" width="26" height="26"><span>cybagard</span></a>
+      <span>AGPL-3.0-only · <a href="https://github.com/cybagard/cyba-headroom">cybagard/cyba-headroom</a> · <a href="https://github.com/cybagard/cyba-headroom/blob/main/SECURITY.md">Security</a></span>
+    </div>
+  </footer>
+</body>
+</html>

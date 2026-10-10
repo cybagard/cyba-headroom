@@ -49,8 +49,8 @@ type mcont struct {
 	startedBy                string    // the lease of the call that last started it, "" if none
 	startedAt                time.Time // when its call was checked
 	crashed                  time.Time // when it last crashed, zero once it stopped or started
-	heldBy                   string    // the up that found it running bound to no lease, "" once it stopped or started
-	boundBy                  string    // the lease that started it, or the up that took that one over
+	heldBy                   string    // the up that found it running bound to no lease, or the lease a reading bound it to back after one it missed (backReading); "" once it stopped or started
+	boundBy                  string    // the lease that started it, the up open at a guessed hit's start that took it, or the up that took either over
 	missing                  bool      // left out of this reading
 	missedAt                 int       // the last reading it was left out of
 	read                     int       // the last reading it was in
@@ -340,9 +340,11 @@ func (m *model) composeUp(st stack, guess int) bool {
 		r.Command, r.Target, r.Guessed = "docker compose up -d", name, true
 	}
 	// An up of the project in this worktree, open now, takes what a hit
-	// starts at its event (lease.go keyed: a key named before a guess).
+	// starts at its event: a guess keys no event, whose worktree is unknown
+	// (lease.go entry.key). Unless another worktree's guess names the
+	// project: the event ties, and the reading decides (tied).
 	var up string
-	if guess == guessHit {
+	if guess == guessHit && !m.tied(project, wt) {
 		up = m.upOf(project, wt)
 	}
 	d := m.check(r)
@@ -418,7 +420,8 @@ func (m *model) stop(x *mcont, crash bool) {
 }
 
 // held reports whether x is held: an up found it running and bound to no
-// lease (lease.go), and that up's lease is open.
+// lease (lease.go), or a reading bound it when it came back (backReading),
+// and that lease is open.
 func (m *model) held(x *mcont) bool { return m.isOpen(x.heldBy) }
 
 // bound reports whether a lease binds x, held or not.
@@ -559,8 +562,12 @@ func (m *model) tick() {
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
 	for _, x := range m.conts {
 		if x.running && !x.missing {
+			back, gone := x.guess == "" && x.missedAt > 0 && x.missedAt == m.ticks-1, x.read < m.ticks-2
 			x.read = m.ticks
 			m.firstReading(x)
+			if back {
+				m.backReading(x, gone)
+			}
 		}
 	}
 	m.judge()
@@ -608,15 +615,16 @@ func (m *model) judge() {
 // firstReading settles a guessed hit's container at its first reading: if
 // the reading attributes it, it binds the lease keyed would (binder), and is
 // gated; a guess it binds is confirmed. Unless an up of its project there
-// took it at its event, or the last reading showed it, so it is not new. A
-// flickered reading leaves it judged as with no key (O1): nothing is
-// asserted of it.
+// took it at its event and still binds it, or the last reading showed it,
+// so it is not new. A flickered reading leaves it judged as with no key
+// (O1): nothing is asserted of it, unless an up took it, which judged it
+// gated.
 func (m *model) firstReading(x *mcont) {
 	if x.guess == "" {
 		return
 	}
 	switch {
-	case x.taken:
+	case x.taken && (m.bound(x) || m.flick):
 	case m.flick:
 		x.firstGated = false
 		m.outcomes["flicker"]++
@@ -630,6 +638,26 @@ func (m *model) firstReading(x *mcont) {
 		}
 	}
 	x.guess = ""
+}
+
+// backReading settles a guessed hit's container back after a reading it
+// was missing from, and bound to no lease: if the reading attributes it, it
+// binds the lease keyed would (binder). Missing from one, it is held
+// (lease.go Observe) until it stops, which confirms no guess. Missing from
+// two in a row, it went, and binds as new, as at a first reading.
+func (m *model) backReading(x *mcont, gone bool) {
+	if x.miss || m.guesses[x.startedBy] == nil || m.bound(x) || m.flick {
+		return
+	}
+	id := m.binder(x)
+	if !gone {
+		x.heldBy = id
+		return
+	}
+	x.boundBy = id
+	if g := m.guesses[id]; g != nil {
+		g.confirmed = true
+	}
 }
 
 // binder is the open lease an attributed reading binds x, a new container
@@ -1020,8 +1048,8 @@ func TestTheLeaseModelOnAVerdictAged(t *testing.T) {
 
 // TestTheLeaseModelOnAGuessTakenAtItsStart plays a case random runs reach
 // and nothing asserts (#120's probe P6, #150): an up of p1, open in w1,
-// takes what a guessed hit of p1 starts at its start event (lease.go keyed:
-// a key named before a guess). An up starts c1 and c2; they go; the hit
+// takes what a guessed hit of p1 starts at its start event, which the guess
+// does not key (lease.go entry.key). An up starts c1 and c2; they go; the hit
 // starts c3 and c4. Both are the up's, as in the book, which spends the
 // up's reservation on them at the next reading and binds the guess nothing.
 func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {

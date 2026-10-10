@@ -54,6 +54,20 @@ type mcont struct {
 	missedAt                 int       // the last reading it was left out of
 	read                     int       // the last reading it was in
 	multi                    bool      // its call started others too (docker start a b)
+	// guess is the guessed up that started it as its own stack's (a hit),
+	// until its first reading, which decides whether the guess binds it.
+	// taken is set when an open up of its project in its worktree took it at
+	// its start, before the reading (lease.go keyed).
+	guess string
+	taken bool
+	began int // the reading count when it last started
+}
+
+// mguess is a guessed up's lease (lease.go entry.guessed): what its
+// containers come up as, and whether it bound one (confirmed).
+type mguess struct {
+	name, project, wt string // what it names, and what its stack comes up as
+	confirmed         bool
 }
 
 type op struct{ kind, a, b int }
@@ -69,6 +83,8 @@ type model struct {
 	flick    bool              // attribution lost this tick
 	leases   map[string]string // lease → the call that took it
 	starts   map[string]int    // lease → containers its call started
+	guesses  map[string]*mguess
+	outcomes map[string]int // how often each guessed outcome ran (coverage)
 	trace    []string
 	last     time.Time // the last allowed call
 	ticks    int
@@ -81,7 +97,7 @@ type model struct {
 // run only when HEADROOM_MODEL_OPEN is 1 (all) or lists the issue
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
-	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
+	109: "a project name used in w1 and w2, or guessed in one for the other's (tiedUnread): an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
 }
 
 // openIssues are the issues HEADROOM_MODEL_OPEN turns on.
@@ -143,6 +159,7 @@ func (m *model) start(x *mcont, by string) {
 		x.boundBy = by
 	}
 	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, false, "", 0
+	x.began = m.ticks
 	if by != "" {
 		m.starts[by]++
 	}
@@ -208,11 +225,63 @@ func (m *model) stackAt(a int) stack {
 	return stacks[a%len(stacks)]
 }
 
-func (m *model) composeUp(st stack) bool {
+// Guessed outcomes of a guessed up (#84, #120): kind 2 with b odd, (b/2)%3.
+const (
+	guessHit       = iota // the guess names the caller's own stack
+	guessMiss             // it names nothing: the stack comes up as m1 or m2
+	guessMissOther        // it names another worktree's stack: w1 guesses p2
+)
+
+// guessOf is what a guessed up of st names, and the project its stack
+// comes up as.
+func guessOf(st stack, outcome int) (name, project string) {
+	miss := "m" + strings.TrimPrefix(st.wt, "w") // a project only misses use
+	switch outcome {
+	case guessHit:
+		return st.project, st.project
+	case guessMiss:
+		return "nothing", miss
+	}
+	other := map[string]string{"w1": "p2", "w2": "p1"}[st.wt]
+	return other, miss
+}
+
+// composeUp is an up of st, or with guess ≥ 0, a guessed up of that
+// outcome in st's worktree.
+// tied reports whether another worktree's open guess names project, so
+// the start event of wt's container of it ties (lease.go tied) and only a
+// reading binds it: #109's.
+func (m *model) tied(project, wt string) bool {
+	if m.on(109) || project == "" {
+		return false
+	}
+	for id, g := range m.guesses {
+		if g.name == project && g.wt != wt && m.isOpen(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// tiedUnread reports whether x is #109's: its start event tied, and no
+// reading has shown it since. Gone before one, it binds no lease.
+func (m *model) tiedUnread(x *mcont) bool { return x.read <= x.began && m.tied(x.project, x.wt) }
+
+func (m *model) composeUp(st stack, guess int) bool {
 	project, wt := st.project, st.wt
+	name := project
+	if guess >= 0 {
+		name, project = guessOf(st, guess)
+	}
 	have := map[string]*mcont{}
 	for _, x := range m.of(project, wt) {
 		have[x.service] = x
+	}
+	if guess < 0 && m.tied(project, wt) && slices.ContainsFunc(m.of(project, wt), func(x *mcont) bool { return !x.running && x.read == m.ticks }) {
+		// #109's: stopped since the last reading, which showed it, its
+		// start ties and the next reading finds nothing new to bind.
+		m.step("%s: compose up %s skipped (#109)", wt, project)
+		return true
 	}
 	var cost uint64 // what the services it starts will use
 	for _, sv := range []string{"a", "b"} {
@@ -220,20 +289,44 @@ func (m *model) composeUp(st stack) bool {
 			cost += target
 		}
 	}
-	idle := cost == 0
+	idle := cost == 0 && guess < 0 // Compose's dry run failed too: a guess is never idle
 	cmd := "docker compose -p " + project + " up -d"
 	taken := map[string]bool{} // its stack's leases it takes over, those not past their timeout
 	for _, l := range m.b.List() {
-		if l.Worktree == wt && m.leases[l.ID] == cmd && l.Expires.After(m.c.t) {
+		if guess >= 0 || l.Worktree != wt || !l.Expires.After(m.c.t) {
+			continue // a guess takes nothing over
+		}
+		// A guess only once it bound something (lease.go composeTakes).
+		if g := m.guesses[l.ID]; m.leases[l.ID] == cmd || g != nil && g.confirmed && g.project == project && g.wt == wt {
 			taken[l.ID] = true
 		}
 	}
-	d := m.check(policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: cmd,
-		CostBytes: cost, Target: project, OnEngine: true, Idle: idle})
+	r := policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: cmd,
+		CostBytes: cost, Target: project, OnEngine: true, Idle: idle}
+	if guess >= 0 {
+		r.Command, r.Target, r.Guessed = "docker compose up -d", name, true
+	}
+	// An up of the project in this worktree, open now, takes what a hit
+	// starts at its event (lease.go keyed: a key named before a guess).
+	upOpen := guess == guessHit && slices.ContainsFunc(m.b.List(), func(l protocol.Lease) bool {
+		return l.Worktree == wt && m.leases[l.ID] == cmd
+	})
+	d := m.check(r)
 	if !d.Allow {
 		return false
 	}
-	m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
+	for id := range taken {
+		if m.guesses[id] != nil {
+			m.outcomes["takeover"]++ // of a guess that hit
+		}
+	}
+	if guess >= 0 {
+		m.guesses[d.LeaseID] = &mguess{name: name, project: project, wt: wt}
+		m.outcomes[[]string{"hit", "miss", "miss other"}[guess]]++
+		m.step("%s: guessed compose up %s, comes up as %s → %s", wt, name, project, d.LeaseID)
+	} else {
+		m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
+	}
 	for _, x := range m.of(project, wt) {
 		if taken[x.boundBy] {
 			x.boundBy = d.LeaseID
@@ -243,6 +336,8 @@ func (m *model) composeUp(st stack) bool {
 		x := have[sv]
 		switch {
 		case x == nil || !x.running:
+		case guess >= 0:
+			// A guess holds no running stack (lease.go Check).
 		case taken[x.heldBy]:
 			x.heldBy = d.LeaseID // it stays held
 		case !m.bound(x) && x.read == m.ticks && !m.flick:
@@ -251,10 +346,17 @@ func (m *model) composeUp(st stack) bool {
 		if x == nil {
 			x = m.newCont(project, sv, wt, map[string]string{protocol.ComposeProjectLabel: project,
 				protocol.ComposeServiceLabel: sv, protocol.ComposeConfigHashLabel: "h", protocol.ComposeWorkingDirLabel: "/src/" + wt})
-			x.firstGated = true
+			// A miss's container is ungated, as with no key.
+			x.firstGated = guess < 0 || guess == guessHit
 		}
 		if !x.running {
 			m.start(x, d.LeaseID)
+			if guess == guessHit {
+				x.guess, x.taken = d.LeaseID, upOpen
+				if !upOpen {
+					x.boundBy = "" // not the guess's until a reading says so
+				}
+			}
 			m.step("  started %s", x.id)
 		}
 	}
@@ -293,6 +395,7 @@ func (m *model) isOpen(id string) bool {
 // call's reservation is long spent.
 func (m *model) restart(x *mcont) {
 	x.running, x.cur, x.startedBy, x.startedAt, x.crashed, x.missedAt = true, 0, "", m.c.t, time.Time{}, 0
+	x.began = m.ticks
 	m.event("start", x)
 }
 
@@ -414,12 +517,34 @@ func (m *model) tick() {
 	for _, x := range m.conts {
 		if x.running && !x.missing {
 			x.read = m.ticks
+			m.firstReading(x)
 		}
 	}
 	m.step("tick %s (flicker %v)", m.c.t.Format("15:04:05"), m.flick)
 	m.b.Observe(m.snapshot())
 	m.invariants()
 	m.heldForNothing()
+}
+
+// firstReading settles a guessed hit's container at its first reading: it
+// binds the guess only if the reading attributes it to the guess's worktree
+// (lease.go key), and is then gated and confirms the guess, unless an up of
+// its project there took it at its event. A flickered reading leaves it
+// judged as with no key (O1): nothing is asserted of it.
+func (m *model) firstReading(x *mcont) {
+	if x.guess == "" {
+		return
+	}
+	switch {
+	case x.taken:
+	case m.flick:
+		x.firstGated = false
+		m.outcomes["flicker"]++
+	case m.isOpen(x.guess):
+		m.guesses[x.guess].confirmed = true
+		x.boundBy = x.guess
+	}
+	x.guess = ""
 }
 
 func (m *model) invariants() {
@@ -474,7 +599,11 @@ func (m *model) call(kind int, o op) func() bool {
 	switch kind {
 	case 0, 1, 2:
 		st := m.stackAt(o.a)
-		return func() bool { return m.composeUp(st) }
+		guess := -1
+		if kind == 2 && o.b%2 == 1 {
+			guess = (o.b / 2) % 3
+		}
+		return func() bool { return m.composeUp(st, guess) }
 	case 5:
 		stopped := func(x *mcont) bool { return !x.running && !x.gone }
 		x := m.pick(stopped)
@@ -504,6 +633,9 @@ func (m *model) run(ops []op) {
 				call()
 			}
 		case 3:
+			if slices.ContainsFunc(m.of(st.project, st.wt), m.tiedUnread) {
+				break // #109
+			}
 			for _, x := range m.of(st.project, st.wt) {
 				if x.running {
 					m.stop(x, false)
@@ -511,6 +643,9 @@ func (m *model) run(ops []op) {
 				}
 			}
 		case 4:
+			if slices.ContainsFunc(m.of(st.project, st.wt), m.tiedUnread) {
+				break // #109
+			}
 			for _, x := range m.of(st.project, st.wt) {
 				if x.running {
 					m.stop(x, false)
@@ -519,7 +654,7 @@ func (m *model) run(ops []op) {
 				m.step("compose down %s", x.id)
 			}
 		case 6:
-			if x := m.pick(func(x *mcont) bool { return x.running }); x != nil {
+			if x := m.pick(func(x *mcont) bool { return x.running && !m.tiedUnread(x) }); x != nil {
 				m.stop(x, o.b%2 == 0)
 				m.step("stop/crash(%v) %s", o.b%2 == 0, x.id)
 			}
@@ -617,10 +752,17 @@ func (m *model) pick(ok func(*mcont) bool) *mcont {
 }
 
 // play runs ops on a fresh book: the failure, if any.
-func play(t *testing.T, ops []op) (f *failure) {
+func play(t *testing.T, ops []op) *failure {
+	f, _ := playCounting(t, ops)
+	return f
+}
+
+// playCounting is play, and how often each guessed outcome ran.
+func playCounting(t *testing.T, ops []op) (f *failure, outcomes map[string]int) {
+	outcomes = map[string]int{}
 	b, c, log := book(t)
 	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
-		open: openIssues()}
+		open: openIssues(), guesses: map[string]*mguess{}, outcomes: outcomes}
 	defer func() {
 		if r := recover(); r != nil {
 			ff, ok := r.(failure)
@@ -632,7 +774,7 @@ func play(t *testing.T, ops []op) (f *failure) {
 	}()
 	b.Observe(m.snapshot())
 	m.run(ops)
-	return nil
+	return nil, outcomes
 }
 
 // shrink drops ops one at a time while the same kind of failure stays.
@@ -658,14 +800,17 @@ func TestTheLeaseModel(t *testing.T) {
 	if v, err := strconv.Atoi(os.Getenv("HEADROOM_MODEL_SEEDS")); err == nil {
 		seeds = v
 	}
-	kinds := map[string]int{}
+	kinds, outcomes := map[string]int{}, map[string]int{}
 	for seed := range seeds {
 		rng := rand.New(rand.NewPCG(uint64(seed), 1))
 		ops := make([]op, 80)
 		for i := range ops {
 			ops[i] = op{rng.IntN(18), rng.IntN(1000), rng.IntN(1000)}
 		}
-		f := play(t, ops)
+		f, n := playCounting(t, ops)
+		for k, v := range n {
+			outcomes[k] += v
+		}
 		if f == nil {
 			continue
 		}
@@ -678,6 +823,15 @@ func TestTheLeaseModel(t *testing.T) {
 	}
 	if len(kinds) > 0 {
 		t.Logf("failing seeds by kind: %v", kinds)
+	}
+	// Each guessed outcome ran (#120), at the default seeds.
+	t.Logf("guessed outcomes: %v", outcomes)
+	if seeds >= 300 {
+		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker"} {
+			if outcomes[k] == 0 {
+				t.Errorf("no guessed %s ran: %v", k, outcomes)
+			}
+		}
 	}
 }
 

@@ -1471,3 +1471,23 @@ func TestAnUpAfterACrashBindsTheContainerItStarts(t *testing.T) {
 		t.Fatal(log.String())
 	}
 }
+
+// docker compose stop, then up, with events: the stop's die makes db gone
+// at once, and the up's start binds it as new, so the up reserves only
+// what db does not use yet (#131).
+func TestAStopThenUpWithinOneReadingReservesOnlyWhatItStarts(t *testing.T) {
+	b, c, _ := book(t)
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app"}
+	b.Observe(read(withComposeContainer(snap(), "db", "w1", gib), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "db", "db", lbl)
+	b.ContainerEvent("die", "db", "db", lbl)
+	observe(b, c, snap()) // the stop's reading: no db
+	c.t = c.t.Add(time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, snap(), cfg)
+	b.ContainerEvent("start", "db", "db", lbl)
+	observe(b, c, withComposeContainer(snap(), "db", "w1", gib/2))
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB once db is back, want 512", r>>20)
+	}
+}

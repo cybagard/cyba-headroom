@@ -822,7 +822,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				// events, a stop the call started again, or a stats blip
 				// across its check (#87). Held, so it binds without its
 				// use counting as what the lease waits for, and it keeps
-				// its verdict.
+				// its verdict. Without events a stop reads like that blip,
+				// so an up after a stop reserves its cost on top of what
+				// the container uses, until the lease ends (its timeout at
+				// the latest): an error toward a deny. With events, the
+				// stop's die makes it gone, and its start binds it as new
+				// (#131).
 				e.held[r.key], e.found = true, true
 			} else {
 				b.judge(r, gated, now)

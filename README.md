@@ -18,9 +18,9 @@ Admission control for a fleet of parallel coding agents on one Mac.
 
 ## Background
 
-headroom shows what each coding agent costs in Docker, Tart, LM Studio and Ollama. It shows one row for each git worktree in which agents work.
+headroom shows what each coding agent costs in Docker, Tart, LM Studio and Ollama. It shows one row for each Orca worktree in which agents work. headroom needs [Orca](https://github.com/stablyai/orca) to find each worktree.
 
-headroom also gates the containers and VMs that agents start through `docker`, `podman` or `tart`. Before a call starts something, headroom checks that the call fits in the memory budget. If it does not fit, headroom stops the call and tells the agent what it can reuse or stop.
+headroom also gates the containers and VMs that an agent in an Orca worktree starts through `docker`, `podman` or `tart`. Before a call starts something, headroom checks that the call fits in the memory budget. If it does not fit, headroom stops the call and tells the agent what it can reuse or stop.
 
 ## Install
 
@@ -56,7 +56,7 @@ The view shows the headroom figure (host memory minus reserved memory) and the m
 
 ### Gate
 
-`install` puts the shims (`docker`, `podman` and `tart`) in `~/.config/headroom/shims`. Launch each agent with the shims first on PATH:
+`install` puts the shims (`docker`, `podman` and `tart`) in `~/.config/headroom/shims`. Launch each agent with the shims first on PATH. A call from outside an Orca worktree is not gated.
 
 ```sh
 headroom run -- claude
@@ -78,7 +78,7 @@ To check a shell, run `headroom doctor` in it. Each line tells you what to fix.
 
 The config file is `~/.config/headroom/config.toml`. `headroom config` prints each setting that is in effect. `headroom suggest` suggests values from the recorded samples.
 
-The memory thresholds have the default 0 (no limit) until the baseline run in [#63](https://github.com/cybagard/cyba-headroom/issues/63) sets them. The example below uses example values, not defaults:
+`min_headroom_gb`, `per_worktree_cap_gb` and `host_baseline_gb` have the default 0 until the baseline run in [#63](https://github.com/cybagard/cyba-headroom/issues/63) sets them. A value of 0 means no margin, no cap and no baseline. The example below uses example values, not defaults:
 
 ```toml
 [policy]

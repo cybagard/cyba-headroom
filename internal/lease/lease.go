@@ -917,10 +917,16 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.seen[r.key] = seen{at: now}
 		delete(b.missed, r.key) // it runs again
 		from, diedAt := b.deadIn(r.key)
-		if from != nil {
-			delete(from.dead, r.key)
-		} else if b.boundAnywhere(r.key) {
+		if from == nil && b.boundAnywhere(r.key) {
 			return
+		}
+		// The start's own restart: it is no longer dead. A return that
+		// leaves it to the reading keeps the mark, for the reading to
+		// hand it over (Book.markDead).
+		own := func() {
+			if from != nil {
+				delete(from.dead, r.key)
+			}
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
@@ -930,10 +936,12 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		checkedSinceCrash := e != nil && last.gone && e.Created.After(last.at)
 		switch {
 		case e == nil:
+			own()
 			return
 		case from != nil && e.Created.Before(diedAt):
 			// Not checked since it died: its start's restart, a restart
 			// policy's (Book.markDead).
+			own()
 			return
 		case crashed && !b.bindsAfterCrash(r, e):
 			// It was gated before the crash, so it is not flagged.
@@ -943,6 +951,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			// a stop (a restart policy's restart): no name's or project's.
 			// After docker or compose stop it is a start like any, and so
 			// after a crash it is for a call checked since (compose up).
+			own()
 			return
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run

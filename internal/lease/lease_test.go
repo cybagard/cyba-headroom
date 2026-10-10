@@ -1567,6 +1567,29 @@ func TestAStartOfSeveralDatesADeathAtTheFirstReadingThatMissedIt(t *testing.T) {
 	}
 }
 
+// c2's start event, after a crash and a reading, finds w2's up for its own
+// project p1 first, which may not bind it: the event leaves it to the
+// reading, which gives it to w1's up, checked since c2 died (#111).
+func TestAStartOfSeveralLeavesARestartTheEventCannotPlaceToTheReading(t *testing.T) {
+	b, c, _, p1, up := p1Started(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(p1(gib/8, 0))
+	c.t = c.t.Add(time.Second)
+	up2 := up
+	up2.Worktree = "w2"
+	b.Check(up2, p1(gib/8, 0), cfg)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want w1's up %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+}
+
 // startTwo is docker start c1 c2, both resolved.
 var startTwo = policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
 	Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}

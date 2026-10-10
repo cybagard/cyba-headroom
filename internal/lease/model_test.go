@@ -804,6 +804,7 @@ func (m *model) deadReading(x *mcont) {
 func (m *model) pendingReading(x *mcont) {
 	if x.pending && !x.shown && !m.bound(x) {
 		x.boundBy = m.binder(x)
+		x.owned = x.owned || x.boundBy != "" // its project's lease's worktree (lease.go boundBy)
 	}
 	x.pending = false
 }
@@ -2183,6 +2184,38 @@ func TestTheLeaseModelOnARestartAGuessTakes(t *testing.T) {
 	m.runOK(op{10, 0, 0}) // tick: c1 is new to it
 	if c1.boundBy != guess || !m.confirmed(guess) {
 		t.Errorf("%s boundBy = %q, the guess %s confirmed %v: want bound by the guess, as in the book", c1.id, c1.boundBy, guess, m.confirmed(guess))
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAPendingStartAtAFlicker plays #207's review B1: a
+// call's start of a crashed container no worktree owns binds no lease at
+// its event, and the next reading binds it as new even with no
+// attribution (lease.go Observe fresh, binder); the book then knows its
+// worktree from that lease's (lease.go boundBy, owner). A guessed hit of
+// p2 starts c1 and c2; c1 crashes before any reading; an up of p2 starts
+// c1 again; a flickered reading.
+func TestTheLeaseModelOnAPendingStartAtAFlicker(t *testing.T) {
+	m := newModel(t)
+	m.diff = true
+	m.runOK(
+		op{2, 1, 1}, // w2: a guessed hit of p2 starts c1 and c2
+		op{6, 0, 0}, // c1 crashes
+		op{0, 1, 0}, // w2: compose up p2 starts c1, bound to no lease
+	)
+	c1 := m.conts[0]
+	if m.bound(c1) || !c1.pending {
+		t.Fatalf("%s bound by %q, pending %v: want pending, bound by nothing", c1.id, c1.boundBy, c1.pending)
+	}
+	up := m.upOf("p2", "w2")
+	m.runOK(op{10, 1, 0}) // tick, flickered
+	if !m.flick {
+		t.Fatalf("the reading is not flickered")
+	}
+	if c1.boundBy != up || !c1.owned {
+		t.Errorf("%s boundBy = %q, owned %v: want the up %s, its worktree known, as in the book", c1.id, c1.boundBy, c1.owned, up)
 	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))

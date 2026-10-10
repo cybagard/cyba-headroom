@@ -86,15 +86,40 @@ func doctor(e Env) []finding {
 	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks, self))
 
 	snap, serr := h.status(cfg)
-	if serr != nil {
-		out = append(out, finding{mark: warn, name: "daemon",
-			detail: fmt.Sprintf("not reachable at %s (%s): calls run ungated until it is back; start it with `headroom install`", cfg.Socket, oneLine(serr))})
-	} else {
-		out = append(out, finding{mark: pass, name: "daemon", detail: "running at " + cfg.Socket})
-	}
+	out = append(out, daemonFinding(e.Getenv("HOME"), cfg.Socket, serr))
 
 	out = append(out, identityFinding(e.Getenv, h, snap))
 	return append(out, <-login)
+}
+
+// daemonFinding says whether the daemon answers on socket (err is why not),
+// and which LaunchAgent runs it: headroom's or Homebrew's (#185).
+func daemonFinding(home, socket string, err error) finding {
+	exists := func(p string) bool { _, err := os.Stat(p); return home != "" && err == nil }
+	ours, brew := exists(agentPlist(home)), home != "" && brewPlist(home) != ""
+	// headroom install refuses while Homebrew's agent is there.
+	start := "`headroom install`"
+	if brew {
+		start = "`brew services start headroom`"
+	}
+	manager := "no LaunchAgent (started by hand)"
+	switch {
+	case ours && brew:
+		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`, then `brew services restart headroom`)"
+	case brew:
+		manager = "under Homebrew's LaunchAgent (brew services)"
+	case ours:
+		manager = "under headroom's LaunchAgent (headroom install)"
+	}
+	if err != nil {
+		return finding{mark: warn, name: "daemon",
+			detail: fmt.Sprintf("not reachable at %s (%s): calls run ungated until it is back; start it with %s; %s", socket, oneLine(err), start, manager)}
+	}
+	mark := pass
+	if ours && brew {
+		mark = warn
+	}
+	return finding{mark: mark, name: "daemon", detail: fmt.Sprintf("running at %s, %s", socket, manager)}
 }
 
 // daemonStatus asks the daemon for its snapshot. A whole snapshot takes
@@ -150,7 +175,12 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 			via = filepath.Dir(first)
 		}
 	}
-	const restart = ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after `headroom install`)"
+	// headroom install refuses while Homebrew's agent is there (#185).
+	start := "`headroom install`"
+	if home := getenv("HOME"); home != "" && brewPlist(home) != "" {
+		start = "`brew services start headroom`"
+	}
+	restart := ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after " + start + ")"
 	switch {
 	case len(wrong) > 0:
 		return finding{mark: fail, name: "PATH", detail: strings.Join(wrong, "; ") + restart, more: more}

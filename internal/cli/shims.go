@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -47,6 +48,26 @@ func linkShims(dir, bin string) (notes []string, err error) {
 		}
 	}
 	return notes, nil
+}
+
+// linkOwnShims links the shims in dir to start, the path the daemon was
+// started from, as given: Homebrew's opt path stays the same across
+// upgrades, where the resolved one does not (#185). What it cannot link, it
+// logs; the daemon runs on.
+func linkOwnShims(start, dir string, log *slog.Logger) {
+	if !filepath.IsAbs(start) {
+		log.Warn("shims not linked: the daemon's start path is not absolute", "path", start)
+		return
+	}
+	notes, err := linkShims(dir, start)
+	for _, n := range notes {
+		log.Warn(n)
+	}
+	if err != nil {
+		log.Error("linking the shims", "dir", dir, "err", err)
+		return
+	}
+	log.Info("shims linked", "dir", dir, "to", start)
 }
 
 // unlinkShims removes the shim links in dir that lead to a headroom binary,

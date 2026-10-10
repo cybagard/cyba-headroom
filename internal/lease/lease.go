@@ -794,6 +794,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	var fresh []resource // new this tick, or back after a reading it was missing from (not gone: a die), and bound to no lease yet
 	for _, r := range res {
+		if sn := b.seen[r.key]; sn.gone && sn.at.After(began) && sn.bound {
+			// This life's start event bound it, and it died since the
+			// reading began: gone, not new to a lease checked since. One
+			// no event bound, whatever verdict an earlier life left, is
+			// the reading's to bind or judge (#131).
+			continue
+		}
 		if (!b.prev[r.key] || b.missed[r.key] > 0 && !b.gone(r.key)) && !bound[r.key] {
 			fresh = append(fresh, b.unmark(r))
 		}
@@ -822,7 +829,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				// events, a stop the call started again, or a stats blip
 				// across its check (#87). Held, so it binds without its
 				// use counting as what the lease waits for, and it keeps
-				// its verdict.
+				// its verdict. Without events a stop reads like that blip,
+				// so an up after a stop reserves its cost on top of what
+				// the container uses, until the lease ends (its timeout at
+				// the latest): an error toward a deny. With events, the
+				// stop's die makes it gone, and its start binds it as new
+				// (#131).
 				e.held[r.key], e.found = true, true
 			} else {
 				b.judge(r, gated, now)
@@ -1028,6 +1040,13 @@ type seen struct {
 	// stopped: by docker stop or kill, or compose stop or kill (a stop or
 	// kill event), not a restart policy's restart or a crash.
 	stopped bool
+	// bound: its start event bound it to a lease, in this life (a start
+	// resets it; a stop, kill or its die keeps it).
+	bound bool
+	// died: a die since its last start. A second die means a start the
+	// events lost, which began a life no event bound: that die drops
+	// bound (#131).
+	died bool
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
@@ -1055,7 +1074,8 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	now := b.now()
 	switch action {
 	case "stop":
-		b.seen[r.key] = seen{at: now, gone: true, stopped: true}
+		last := b.seen[r.key]
+		b.seen[r.key] = seen{at: now, gone: true, stopped: true, bound: last.bound, died: last.died}
 	case "kill":
 		if sig := labels["signal"]; sig == "9" || sig == "15" {
 			// SIGKILL or SIGTERM: it stops (its die says it is gone). Any
@@ -1114,8 +1134,10 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		e.bind(r)
 		b.judge(r, gated, now)
 		b.boundBy(r, e)
+		b.seen[r.key] = seen{at: now, bound: true}
 	case "die":
-		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
+		last := b.seen[r.key]
+		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound && !last.died, died: true}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
 		}

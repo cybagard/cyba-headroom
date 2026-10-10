@@ -613,3 +613,64 @@ func TestAReturningContainerIsNotTakenByAGuess(t *testing.T) {
 		t.Fatalf("ungated = %v", got)
 	}
 }
+
+// A container started with no check that a reading lists and that dies
+// after the reading began is still warned: its die makes it gone, not
+// judged (#131).
+func TestAnUngatedContainerThatDiesDuringTheReadingIsWarned(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "x", "x", nil) // no lease: it binds nothing
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "x", "x", nil)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib), t0.Add(3*time.Second))) // began before x's die
+	c.t = t0.Add(12 * time.Second)
+	b.Observe(read(snap(), t0.Add(11*time.Second)))
+	if !strings.Contains(log.String(), "ungated") {
+		t.Fatalf("x ran without a check and was not warned ungated: %s", log)
+	}
+}
+
+// The same container restarted by its restart policy, its start event lost
+// (an events reconnect): it runs on, listed ungated.
+func TestAnUngatedContainerRestartedWithoutItsStartEventStaysUngated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), t0))
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "x", "x", nil)
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "x", "x", nil) // its restart's start event is lost
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib), t0.Add(3*time.Second)))
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withContainerMem(snap(), "x", "w1", gib), c.t.Add(-time.Second)))
+	}
+	if u := b.Ungated(); len(u) != 1 {
+		t.Fatalf("ungated = %+v, want x", u)
+	}
+}
+
+// Started through the socket, stopped after a reading began that lists it,
+// and started again after that reading: still listed ungated.
+func TestAnUngatedContainerStoppedAndStartedAroundAReadingStaysUngated(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), t0))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("start", "U", "U", nil)
+	c.t = t0.Add(11 * time.Second)
+	b.ContainerEvent("die", "U", "U", nil)
+	c.t = t0.Add(12 * time.Second)
+	b.Observe(read(withContainerMem(snap(), "U", "w1", gib), t0.Add(9500*time.Millisecond)))
+	c.t = t0.Add(13 * time.Second)
+	b.ContainerEvent("start", "U", "U", nil)
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withContainerMem(snap(), "U", "w1", gib), c.t.Add(-time.Second)))
+	}
+	if u := b.Ungated(); len(u) != 1 {
+		t.Fatalf("ungated = %+v, want U", u)
+	}
+}

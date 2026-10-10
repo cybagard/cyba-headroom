@@ -1,10 +1,12 @@
 package lease_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -248,6 +250,177 @@ func TestADieNewerThanTheReadingBindsNoNewRun(t *testing.T) {
 	}
 }
 
+// The same for a one-off no reading showed yet: its start event bound it,
+// so a reading begun before its die that lists it does not make it new.
+func TestADieNewerThanTheReadingBindsNoNewRunNeverRead(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(5 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg) // the next compose run
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	c.t = t0.Add(16 * time.Second)
+	b.Observe(read(oneoff("r2", "p", "w1")(snap()), t0.Add(15*time.Second)))
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("the run's own one-off was warned ungated: %s", log)
+	}
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want the next run's, bound to r2", ls)
+	}
+}
+
+// A SIGTERM kill between the start and the die (docker stop) keeps the
+// mark the start event set: the dead one-off still binds no new run.
+func TestAKillBeforeTheDieBindsNoNewRunNeverRead(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(5 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg) // the next compose run
+	c.t = t0.Add(5500 * time.Millisecond)
+	b.ContainerEvent("kill", "r1", "r1", map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True", "signal": "15"})
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	c.t = t0.Add(16 * time.Second)
+	b.Observe(read(oneoff("r2", "p", "w1")(snap()), t0.Add(15*time.Second)))
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("the run's own one-off was warned ungated: %s", log)
+	}
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want the next run's, bound to r2", ls)
+	}
+}
+
+// A start resets the mark: a one-off its start event bound in one life,
+// started again as a tie (w1 and w2 each run p) and dead after a reading
+// began that lists it, is the reading's to bind, as when no event bound it.
+func TestATiedRestartOfAnEventBoundOneoffThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(3 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(5 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(6 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(4*time.Second))) // began before r1's die
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's run warned never appeared: %s", log)
+	}
+}
+
+// A second die with no start between says the events lost a start (a
+// reconnect): the life it ends is one no event bound, so the first life's
+// mark does not keep docker start x from binding x1 from the reading.
+func TestADieAfterALostStartBindsFromTheReading(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(named("w1", "x", "alpine"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "x1", "x", nil)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("die", "x1", "x", nil)
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	c.t = t0.Add(3 * time.Second)
+	b.Check(startOf("w1", "x"), snap(), cfg)
+	// x1's second start is lost.
+	c.t = t0.Add(5 * time.Second)
+	b.ContainerEvent("die", "x1", "x", nil)
+	c.t = t0.Add(6 * time.Second)
+	b.Observe(read(withNamed(snap(), "x1", "x", "alpine", "w1"), t0.Add(4*time.Second))) // began before x1's die
+	if ls := b.List(); len(ls) != 0 {
+		t.Errorf("leases = %+v, want docker start x bound to x1 and ended", ls)
+	}
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Errorf("w1's docker start warned never appeared: %s", log)
+	}
+}
+
+// w1 and w2 each run a one-off of project p, so its start event is a
+// tie and the reading binds it. A one-off the reading lists that exits
+// (--rm) after the reading began ends w1's lease at once, not at its
+// timeout with "never appeared".
+func TestATiedOneoffThatDiesDuringTheReadingEndsItsLease(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	for _, l := range b.List() {
+		if l.Worktree == "w1" {
+			t.Errorf("w1's lease still holds %d MiB after its one-off ran and exited", l.Bytes>>20)
+		}
+	}
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's run warned never appeared: %s", log)
+	}
+}
+
+// A tied start newer than the reading is no die: a one-off judged in an
+// earlier run, gone since, and started again while w1 and w2 each run one
+// of project p, binds w1's lease from the reading that lists it.
+func TestATiedStartDuringTheReadingOfAJudgedOneoffBindsItsLease(t *testing.T) {
+	b, c, _ := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(4*time.Second))) // judged: its run's
+	for i := range 3 {
+		c.t = t0.Add(time.Duration(10+5*i) * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second))) // gone: its lease ends
+	}
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(32 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(33 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(31*time.Second))) // began before r1's start
+	ls := b.List()
+	i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return l.Worktree == "w1" })
+	if i < 0 || ls[i].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want w1's bound to r1", ls)
+	}
+}
+
 // The same for a compose up checked after a service died: the up that
 // starts nothing still logs never appeared.
 func TestADieNewerThanTheReadingKeepsNeverAppeared(t *testing.T) {
@@ -273,5 +446,158 @@ func TestADieNewerThanTheReadingKeepsNeverAppeared(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("no never appeared for an up that started nothing: %s", log)
+	}
+}
+
+// composeUp is a compose up whose project the shim read.
+func composeUp(wt, project string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: project}
+}
+
+// stopped runs A1, a service of project app, in a reading, then compose
+// stop: two readings without it make it gone. Its verdict is kept.
+func stopped(b *lease.Book, c *clock) {
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.Observe(read(snap(), t0))
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(service("A1", "app", "w1")(snap()), t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("stop", "A1", "A1", lab)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+}
+
+// diesDuringTheReading starts A1 again, and it exits (a one-shot
+// service) after a reading began that lists it.
+func diesDuringTheReading(b *lease.Book, c *clock) {
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("start", "A1", "A1", lab)
+	began := c.t.Add(time.Second)
+	c.t = c.t.Add(3 * time.Second)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	c.t = c.t.Add(time.Second)
+	b.Observe(read(service("A1", "app", "w1")(snap()), began))
+}
+
+// w1 and w2 each run compose up of project app, so the start event of
+// A1, stopped since its last reading, is a tie. A1 exits during the
+// reading that lists it: the reading binds it to w1's up, as for a new
+// service. The verdict kept from its last life is not its start event's.
+func TestATiedUpOfAStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	stopped(b, c)
+	log.Reset()
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("A1, started by a checked up, is listed ungated: %+v", u)
+	}
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// The same with no earlier life: the tied start binds nothing, and the
+// reading binds A1.
+func TestATiedUpOfANewServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// The same when w1's up started A1 in its last life: its gated verdict,
+// kept since compose stop, is not this start event's either.
+func TestATiedUpOfAGatedStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.Observe(read(snap(), t0))
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "A1", "A1", lab) // binds w1's up: gated
+	for c.t.Before(t0.Add(130 * time.Second)) {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(service("A1", "app", "w1")(snap()), c.t.Add(-time.Second)))
+	}
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("stop", "A1", "A1", lab)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+	log.Reset()
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// A guessed up in one worktree: the start event's container has no
+// worktree, so the guess keys no lease. A1, stopped since its last
+// reading, exits during the reading that lists it: the reading binds it to
+// w1's up and judges it gated.
+func TestAGuessedUpOfAStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, _ := book(t)
+	stopped(b, c)
+	b.Check(guessed("w1", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Errorf("leases = %+v, want w1's bound to A1", ls)
+	}
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("A1, started by w1's checked up, is listed ungated: %+v", u)
+	}
+}
+
+// A container gated in its last life, stopped, then started through the
+// socket with no check, that exits during the reading that lists it: it
+// keeps its verdict, so it is not warned.
+func TestAGatedContainerRestartedUngatedThatDiesDuringTheReadingKeepsItsVerdict(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker run", CostBytes: gib, Name: "x"}, snap(), cfg)
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib/2), t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("stop", "x", "x", nil)
+	b.ContainerEvent("die", "x", "x", nil)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+	log.Reset()
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("start", "x", "x", nil)
+	began := c.t.Add(time.Second)
+	c.t = c.t.Add(3 * time.Second)
+	b.ContainerEvent("die", "x", "x", nil)
+	c.t = c.t.Add(time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib/2), began))
+	if strings.Contains(log.String(), "ungated") {
+		t.Errorf("x was warned ungated: %s", log)
+	}
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("ungated = %+v, want none", u)
 	}
 }

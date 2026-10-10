@@ -455,6 +455,38 @@ func TestALeaseOutlivesOneReadingWithoutItsContainer(t *testing.T) {
 	}
 }
 
+// Failed reads are no misses, however many in a row: a held container
+// missing from two stays held, and a run's lease whose only container is
+// missing from two stays open.
+func TestTwoFailedReadsAreNotMisses(t *testing.T) {
+	failed := func(c *clock) *protocol.Snapshot {
+		s := snap()
+		s.Sources = map[string]protocol.SourceStatus{"docker": {At: c.t, Stale: true}}
+		return s
+	}
+	b, c, s, _ := heldDB(t)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(failed(c)) // db missing
+	}
+	observe(b, c, s) // db back
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB once db is back, want 1024", r>>20)
+	}
+
+	b, c, _ = book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(req("w1", 2*gib), snap(), cfg)
+	observe(b, c, withRun(snap(), "c1", "w1", gib, d.LeaseID))
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(failed(c)) // c1 missing
+	}
+	if len(b.List()) != 1 {
+		t.Fatal("two failed reads ended c1's lease")
+	}
+}
+
 // A container missing from one reading keeps its last known use, as a
 // failed read does: what it uses is still in the host's reading.
 func TestAContainerMissingFromOneReadingKeepsItsUse(t *testing.T) {

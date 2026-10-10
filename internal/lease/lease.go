@@ -223,8 +223,8 @@ type verdict struct {
 	// event says nothing of whose a container is (#89).
 	owner string
 	lease string // the worktree of the lease it last bound
-	// runPID is the tart run process a VM was judged or last seen with:
-	// another (or a change to or from 0) is another run (#205).
+	// runPID is the tart run process a VM was judged or last seen with, 0
+	// while unknown: another known one is another run (#205).
 	runPID int
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
@@ -796,6 +796,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	present := map[string]uint64{}
 	for _, r := range res {
 		present[r.key] = r.bytes
+		// A VM run again under another tart run with no reading between
+		// is new, as after a reading without it (#205). A run PID of 0 is
+		// unknown: no change.
+		if v := b.verdicts[r.key]; r.kind == "vm" && v != nil && r.runPID != 0 && v.runPID != 0 && r.runPID != v.runPID {
+			delete(b.prev, r.key)
+		}
 	}
 	// A start of several's container that died, back in a reading begun
 	// after: a lease checked while it was dead that it binds takes it, else
@@ -935,12 +941,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present = now, true
-		if r.kind == "vm" && r.runPID != v.runPID {
-			// Run again with no reading between: another run, not the
-			// lease's, nor the owner's.
-			v.lease, v.owner = "", ""
-		}
-		v.runPID = r.runPID
+		// A run PID of 0 is unknown (a failed launch read): keep the last.
+		v.runPID = cmp.Or(r.runPID, v.runPID)
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed

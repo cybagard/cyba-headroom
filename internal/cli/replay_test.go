@@ -84,6 +84,16 @@ func TestAReplayCutTwiceKeepsTheFloorAtTheLiveDrop(t *testing.T) {
 	crashBeforeUp(t, cut(3200*time.Millisecond, "z"), cut(4*time.Second, "z2"))
 }
 
+// The same, with a reconnect whose clock cannot be read: its #146 stream
+// delivers an event, dated when it comes, and is cut. It does not move
+// the floor, so the replay that follows still dates the crash before the
+// up (#210).
+func TestAReplayAfterAFallbackStreamDatesACrashBeforeAnUp(t *testing.T) {
+	vm := h0.Add(500*time.Millisecond - 3*time.Second).UnixNano()
+	crashBeforeUp(t, attempt{3500 * time.Millisecond, errors.New("info: 500"), []fakeStream{
+		{events: []fakeEvent{{"kill", "z", "z", vm}}, err: io.ErrUnexpectedEOF}}})
+}
+
 // errRefused is Docker's socket refusing a connect.
 var errRefused = errors.New("connect: connection refused")
 

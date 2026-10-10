@@ -56,8 +56,10 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 	var newest int64 // the newest delivered event's time
 	var w window
 	// dropAt is when a live stream (until 0) known to have opened, because
-	// it delivered an event, last ended. A bounded replay never moves it,
-	// nor does a refused or failed connect (#170).
+	// it delivered an event, last ended, if it followed a replay that
+	// succeeded or opened with no newest. A bounded replay never moves it,
+	// nor does a refused or failed connect (#170), nor a #146 stream, whose
+	// events are dated when they come: the floor stays lower (#210).
 	var dropAt time.Time
 	delivered := false
 	// stream delivers the events from since to until (0: on), each dated
@@ -120,9 +122,10 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 	for ctx.Err() == nil {
 		delivered = false
 		since := max(newest-sec, 0)
-		if newest > 0 {
+		dated := newest == 0 // the stream may move dropAt
+		if !dated {
 			if until, ok := replay(); ok {
-				since = max(until, newest) - sec
+				since, dated = max(until, newest)-sec, true
 			}
 			if ctx.Err() != nil {
 				return
@@ -131,7 +134,7 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 		replayed := delivered
 		delivered = false
 		err := stream(ctx, since, 0, live)
-		if delivered {
+		if delivered && dated {
 			dropAt = now()
 		}
 		delivered = delivered || replayed

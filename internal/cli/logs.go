@@ -36,6 +36,9 @@ func runLogs(e Env) int {
 	if !follow {
 		return 0
 	}
+	if e.tailed != nil {
+		e.tailed()
+	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	every := e.watchEvery

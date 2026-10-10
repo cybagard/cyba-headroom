@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,49 @@ func TestLogsFollowAcrossRotation(t *testing.T) {
 	}
 	if strings.Count(out.String(), "first-line") != 1 {
 		t.Errorf("repeated lines:\n%s", out.String())
+	}
+}
+
+// A line logged after the tail is shown but before the follow begins is
+// shown once (#149).
+func TestLogsFollowShowsALineLoggedAsItStarts(t *testing.T) {
+	home := t.TempDir()
+	dir := logDirIn(home)
+	_ = os.MkdirAll(dir, 0o700)
+	path := filepath.Join(dir, "daemon.log")
+	_ = os.WriteFile(path, []byte("first-line\n"), 0o600)
+	appendTo := func(s string) error {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		_, err = f.WriteString(s)
+		return errors.Join(err, f.Close())
+	}
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(Env{Args: []string{"headroom", "logs", "-f"}, Stdout: &out, Stderr: &out,
+			Getenv: func(k string) string { return map[string]string{"HOME": home}[k] }, Context: ctx,
+			watchEvery: 5 * time.Millisecond,
+			tailed: func() {
+				if err := appendTo("in the window\n"); err != nil {
+					t.Error(err)
+				}
+			}})
+	}()
+	waitFor(t, func() bool { return strings.Contains(out.String(), "first-line") })
+	if err := appendTo("later\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(out.String(), "later") })
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if got := out.String(); strings.Count(got, "first-line") != 1 || strings.Count(got, "in the window") != 1 {
+		t.Errorf("want first-line and the window's line once each:\n%s", got)
 	}
 }
 

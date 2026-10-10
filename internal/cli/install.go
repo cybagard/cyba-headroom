@@ -269,6 +269,7 @@ func (in *installer) uninstall(ctx context.Context) int {
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
 	}
+	var shims []string // the shim links removed
 	if in.shimDir != "" {
 		bin := owned
 		if bin == "" {
@@ -281,16 +282,36 @@ func (in *installer) uninstall(ctx context.Context) int {
 		if dir, err := config.Dir(in.getenv); err == nil {
 			own = in.shimDir == config.Defaults(dir).ShimDir
 		}
-		if err := unlinkShims(in.shimDir, bin, own); err != nil {
+		var err error
+		if shims, err = unlinkShims(in.shimDir, bin, own); err != nil {
 			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
 		}
 	}
+	var gone []string // the paths in remove that were there
 	for _, p := range remove {
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		err := os.Remove(p)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return in.fail(err)
 		}
+		if err == nil {
+			gone = append(gone, p)
+		}
 	}
-	fmt.Fprintln(in.out, "headroom daemon removed from launchd; kept:")
+	fmt.Fprintln(in.out, "headroom daemon removed from launchd.")
+	if len(gone) > 0 || len(shims) > 0 {
+		fmt.Fprintln(in.out, "removed:")
+	}
+	for _, p := range gone {
+		what := "binary"
+		if p == in.plistPath() {
+			what = "agent"
+		}
+		fmt.Fprintf(in.out, "  %-8s %s\n", what, p)
+	}
+	if len(shims) > 0 {
+		fmt.Fprintf(in.out, "  shims    %s (%s)\n", in.shimDir, strings.Join(shims, ", "))
+	}
+	fmt.Fprintln(in.out, "kept:")
 	if kept != "" {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
 	}

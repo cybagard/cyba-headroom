@@ -471,6 +471,50 @@ func TestUninstallKeepsABrewLink(t *testing.T) {
 	}
 }
 
+// Uninstall lists what it removed (the LaunchAgent, the binary, the shims),
+// then what it kept; a second run removed nothing, so it lists nothing (#192).
+func TestUninstallSaysWhatItRemoved(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	removed := []string{f.plistPath(), f.in.bin, f.in.shimDir}
+	for run, want := range [][]string{removed, nil} {
+		f.out.Reset()
+		if code := f.in.uninstall(context.Background()); code != 0 {
+			t.Fatalf("run %d: exit %d: %s", run, code, f.errb.String())
+		}
+		before, after, ok := strings.Cut(f.out.String(), "kept:")
+		if !ok || !strings.Contains(after, "/Users/dev/cfg") {
+			t.Fatalf("run %d: no kept list:\n%s", run, f.out.String())
+		}
+		for _, p := range removed {
+			if listed := strings.Contains(before, p); listed != (want != nil) {
+				t.Errorf("run %d: %s listed as removed: %v, want %v:\n%s", run, p, listed, want != nil, f.out.String())
+			}
+		}
+	}
+}
+
+// A link install did not copy is listed as kept, not removed (#192).
+func TestUninstallListsABrewLinkAsKept(t *testing.T) {
+	f, link, _ := newBrewFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	before, after, _ := strings.Cut(f.out.String(), "kept:")
+	if strings.Contains(before, link) || !strings.Contains(after, link) {
+		t.Errorf("%s not listed as kept only:\n%s", link, f.out.String())
+	}
+	if !strings.Contains(before, f.plistPath()) || !strings.Contains(before, f.in.shimDir) {
+		t.Errorf("LaunchAgent or shims not listed as removed:\n%s", f.out.String())
+	}
+}
+
 // A plain install copies the binary to ~/.local/bin; uninstall run from
 // that copy, as it is once installed, still removes it (#181).
 func TestUninstallFromTheCopyRemovesIt(t *testing.T) {

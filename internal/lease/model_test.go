@@ -389,7 +389,9 @@ func (m *model) composeUp(st stack, guess int) bool {
 			case bound:
 			case guess == guessHit:
 				x.guess, x.taken = d.LeaseID, upOpen
-				if !upOpen {
+				if upOpen {
+					x.boundBy = m.binder(x) // the up's, not the guess's
+				} else {
 					x.boundBy = "" // not the guess's until a reading says so
 				}
 			case guess == guessMiss || guess == guessMissOther:
@@ -864,10 +866,8 @@ func play(t *testing.T, ops []op) *failure {
 
 // playCounting is play, and how often each guessed outcome ran.
 func playCounting(t *testing.T, ops []op) (f *failure, outcomes map[string]int) {
-	outcomes = map[string]int{}
-	b, c, log := book(t)
-	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
-		open: openIssues(), guesses: map[string]*mguess{}, outcomes: outcomes}
+	m := newModel(t)
+	outcomes = m.outcomes
 	defer func() {
 		if r := recover(); r != nil {
 			ff, ok := r.(failure)
@@ -877,9 +877,17 @@ func playCounting(t *testing.T, ops []op) (f *failure, outcomes map[string]int) 
 			f = &ff
 		}
 	}()
-	b.Observe(m.snapshot())
 	m.run(ops)
 	return nil, outcomes
+}
+
+// newModel is a model on a fresh book, which has read an empty snapshot.
+func newModel(t *testing.T) *model {
+	b, c, log := book(t)
+	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
+		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}}
+	b.Observe(m.snapshot())
+	return m
 }
 
 // shrink drops ops one at a time while the same kind of failure stays.
@@ -977,5 +985,42 @@ func TestTheLeaseModelOnAVerdictAged(t *testing.T) {
 	}
 	if f := play(t, ops); f != nil {
 		t.Errorf("a verdict aged:\n%s", f.msg)
+	}
+}
+
+// TestTheLeaseModelOnAGuessTakenAtItsStart plays a case random runs reach
+// and nothing asserts (#150): an up of p1, open in w1, takes what a guessed
+// hit of p1 starts at its start event (lease.go keyed). An up starts c1 and
+// c2 and its lease ends; an idle up holds them; they stop; the guessed hit
+// starts them. Both bind the idle up, as in the book, which binds the guess
+// nothing: it still reserves its whole cost after the next reading.
+func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {
+	m := newModel(t)
+	m.run([]op{
+		{0, 0, 0}, {10, 0, 0}, {10, 0, 0}, // w1: compose up p1 starts c1 and c2, its lease ends
+		{0, 0, 0}, // w1: compose up p1, idle, holds them
+		{3, 0, 0}, // compose stop p1
+	})
+	up := m.b.List()[0].ID
+	m.run([]op{{2, 0, 1}}) // w1: a guessed hit of p1 starts c1 and c2
+	ls := m.b.List()
+	guess := ls[len(ls)-1].ID
+	bound := func(when string) {
+		for _, x := range m.conts {
+			if x.boundBy != up {
+				t.Errorf("%s, %s boundBy = %s, want the up's %s (the guess is %s)", when, x.id, x.boundBy, up, guess)
+			}
+		}
+	}
+	bound("at its start")
+	m.run([]op{{10, 0, 0}}) // tick: the up's lease ends
+	bound("after the reading")
+	if i := slices.IndexFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == guess }); i < 0 {
+		t.Errorf("the guess %s ended: the book bound it something", guess)
+	} else if l := m.b.List()[i]; l.Bytes != 2*target {
+		t.Errorf("the guess %s reserves %d MiB, want all %d MiB: the book bound it something", guess, l.Bytes>>20, 2*target>>20)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
 	}
 }

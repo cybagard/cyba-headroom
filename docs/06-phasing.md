@@ -4,6 +4,8 @@
 
 No hard deadlines; each phase works on its own and gates the next.
 
+Releases are GitHub milestones: phase 2 ships as v0.1.0 (preview) and v0.2.0 (exit), phase 3 as v0.3.0, phase 4 as v0.4.0, and phase 5 is `Later`, with no release planned.
+
 1. **Spike.** Answer the four blocking questions. Exit when attribution and the Orca launch environment are confirmed to reach every agent's tool shells.
 2. **Observe.** Daemon, budget model, attribution and `headroom --watch` (R1–R4). Run for two weeks to collect the baseline and set default thresholds.
 3. **Gate.** Launch environment, shims, leases, macOS slot gate, fail-open and fixed-threshold policy (R5–R10). Exit when agents recover from denies without human help in most cases.

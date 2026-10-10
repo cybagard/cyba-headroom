@@ -97,8 +97,9 @@ type Book struct {
 	// began: when it died, for Book.markDead.
 	missed      map[string]int
 	missedSince map[string]time.Time
-	// verdicts say, for each resource seen within the lease timeout, how it
-	// started (#33). A container keeps its verdict when it comes back after
+	// verdicts say, for each resource seen within the lease timeout (a
+	// crashed container's within crashKept, if longer), how it started
+	// (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
 	// or Docker itself restarted.
 	verdicts map[string]*verdict
@@ -212,7 +213,9 @@ type verdict struct {
 	lease string // the worktree of the lease it last bound
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
-	// list it still. Until then its restart binds as bindsAfterCrash says.
+	// list it still. Until then its restart binds as bindsAfterCrash says,
+	// and the verdict is kept for crashKept if that outlasts the lease
+	// timeout: a restart policy's restart may come later than the timeout.
 	crashed bool
 	last    time.Time // last in a reading
 	present bool      // in the latest reading (or a failed read kept it)
@@ -233,6 +236,11 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 // dockerSettle is how long after the Docker engine comes back its
 // restart-policy containers count as a baseline.
 const dockerSettle = 30 * time.Second
+
+// crashKept is how long a crashed container's verdict lasts at least: the
+// engine's restart backoff (Docker caps it at a minute; Podman has none)
+// plus a reading and the start (#134).
+const crashKept = 2 * time.Minute
 
 // stale is how much newer the daemon's snapshot must be than the one leases
 // were settled on before checks use it instead: derive (which settles them)
@@ -894,7 +902,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
 	}
 	for k, v := range b.verdicts {
-		if !v.present && now.Sub(v.last) >= b.timeout {
+		keep := b.timeout
+		if v.crashed {
+			keep = max(keep, crashKept)
+		}
+		if !v.present && now.Sub(v.last) >= keep {
 			delete(b.verdicts, k)
 		}
 	}

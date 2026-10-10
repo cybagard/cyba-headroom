@@ -218,6 +218,7 @@ type verdict struct {
 	// timeout: a restart policy's restart may come later than the timeout.
 	crashed bool
 	last    time.Time // last in a reading
+	event   time.Time // its last start or die event
 	present bool      // in the latest reading (or a failed read kept it)
 }
 
@@ -237,9 +238,11 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 // restart-policy containers count as a baseline.
 const dockerSettle = 30 * time.Second
 
-// crashKept is how long a crashed container's verdict lasts at least: the
-// engine's restart backoff (Docker caps it at a minute; Podman has none)
-// plus a reading and the start (#134).
+// crashKept is how long a crashed container's verdict lasts at least,
+// counted from the later of the last reading that listed it and its last
+// start or die event: the engine's restart backoff (Docker caps each delay
+// at a minute; Podman restarts at once) plus a reading and the start. Each
+// death in a crash loop starts it again (#134).
 const crashKept = 2 * time.Minute
 
 // stale is how much newer the daemon's snapshot must be than the one leases
@@ -902,11 +905,16 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
 	}
 	for k, v := range b.verdicts {
-		keep := b.timeout
+		keep, since := b.timeout, v.last
 		if v.crashed {
+			// A crash loop's lives may be too short for any reading to list:
+			// it is absent only once its events stop too.
 			keep = max(keep, crashKept)
+			if v.event.After(since) {
+				since = v.event
+			}
 		}
-		if !v.present && now.Sub(v.last) >= keep {
+		if !v.present && now.Sub(since) >= keep {
 			delete(b.verdicts, k)
 		}
 	}
@@ -1106,6 +1114,9 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			b.seen[r.key] = v
 		}
 	case "start":
+		if v := b.verdicts[r.key]; v != nil {
+			v.event = now
+		}
 		last := b.seen[r.key]
 		stopped := last.stopped
 		b.seen[r.key] = seen{at: now}
@@ -1161,6 +1172,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound && !last.died, died: true}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
+			v.event = now
 		}
 		b.missed[r.key] = goneAfter(r.key) // gone at once
 		b.release(r.key)

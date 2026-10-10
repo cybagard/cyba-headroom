@@ -322,7 +322,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 		}
 	}
 	idle := cost == 0 && guess < 0 // Compose's dry run failed too: a guess is never idle
-	cmd := "docker compose -p " + project + " up -d"
+	cmd := upCommand(project)
 	taken := map[string]bool{} // its stack's leases it takes over, those not past their timeout
 	for _, l := range m.b.List() {
 		if guess >= 0 || l.Worktree != wt || !l.Expires.After(m.c.t) {
@@ -340,9 +340,10 @@ func (m *model) composeUp(st stack, guess int) bool {
 	}
 	// An up of the project in this worktree, open now, takes what a hit
 	// starts at its event (lease.go keyed: a key named before a guess).
-	upOpen := guess == guessHit && slices.ContainsFunc(m.b.List(), func(l protocol.Lease) bool {
-		return l.Worktree == wt && m.leases[l.ID] == cmd
-	})
+	var up string
+	if guess == guessHit {
+		up = m.upOf(project, wt)
+	}
 	d := m.check(r)
 	if !d.Allow {
 		return false
@@ -388,12 +389,8 @@ func (m *model) composeUp(st stack, guess int) bool {
 			switch {
 			case bound:
 			case guess == guessHit:
-				x.guess, x.taken = d.LeaseID, upOpen
-				if upOpen {
-					x.boundBy = m.binder(x) // the up's, not the guess's
-				} else {
-					x.boundBy = "" // not the guess's until a reading says so
-				}
+				// The up's, or not the guess's until a reading says so.
+				x.guess, x.taken, x.boundBy = d.LeaseID, up != "", up
 			case guess == guessMiss || guess == guessMissOther:
 				x.boundBy, x.unbound = "", true // as with no key
 			}
@@ -638,18 +635,28 @@ func (m *model) firstReading(x *mcont) {
 // of a compose project, to (lease.go keyed): an up of the project in x's
 // worktree before a guess of it, and the oldest of equals.
 func (m *model) binder(x *mcont) string {
-	up, guess := "docker compose -p "+x.project+" up -d", ""
+	if up := m.upOf(x.project, x.wt); up != "" {
+		return up
+	}
 	for _, l := range m.b.List() {
-		g := m.guesses[l.ID]
-		switch {
-		case l.Worktree != x.wt:
-		case m.leases[l.ID] == up:
+		if g := m.guesses[l.ID]; l.Worktree == x.wt && g != nil && g.name == x.project {
 			return l.ID
-		case guess == "" && g != nil && g.name == x.project:
-			guess = l.ID
 		}
 	}
-	return guess
+	return ""
+}
+
+// upCommand is the call of an up of project, named with -p.
+func upCommand(project string) string { return "docker compose -p " + project + " up -d" }
+
+// upOf is the oldest open lease of an up of project in wt, "" if none.
+func (m *model) upOf(project, wt string) string {
+	for _, l := range m.b.List() {
+		if l.Worktree == wt && m.leases[l.ID] == upCommand(project) {
+			return l.ID
+		}
+	}
+	return ""
 }
 
 func (m *model) invariants() {
@@ -989,36 +996,43 @@ func TestTheLeaseModelOnAVerdictAged(t *testing.T) {
 }
 
 // TestTheLeaseModelOnAGuessTakenAtItsStart plays a case random runs reach
-// and nothing asserts (#150): an up of p1, open in w1, takes what a guessed
-// hit of p1 starts at its start event (lease.go keyed). An up starts c1 and
-// c2 and its lease ends; an idle up holds them; they stop; the guessed hit
-// starts them. Both bind the idle up, as in the book, which binds the guess
-// nothing: it still reserves its whole cost after the next reading.
+// and nothing asserts (#120's probe P6, #150): an up of p1, open in w1,
+// takes what a guessed hit of p1 starts at its start event (lease.go keyed:
+// a key named before a guess). An up starts c1 and c2; they go; the hit
+// starts c3 and c4. Both are the up's, as in the book, which spends the
+// up's reservation on them at the next reading and binds the guess nothing.
 func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {
 	m := newModel(t)
-	m.run([]op{
-		{0, 0, 0}, {10, 0, 0}, {10, 0, 0}, // w1: compose up p1 starts c1 and c2, its lease ends
-		{0, 0, 0}, // w1: compose up p1, idle, holds them
-		{3, 0, 0}, // compose stop p1
-	})
+	m.run([]op{{0, 0, 0}}) // w1: compose up p1 starts c1 and c2
 	up := m.b.List()[0].ID
-	m.run([]op{{2, 0, 1}}) // w1: a guessed hit of p1 starts c1 and c2
+	m.run([]op{
+		{4, 0, 0}, // compose down p1
+		{2, 0, 1}, // w1: a guessed hit of p1 starts c3 and c4
+	})
 	ls := m.b.List()
 	guess := ls[len(ls)-1].ID
 	bound := func(when string) {
-		for _, x := range m.conts {
+		for _, x := range m.of("p1", "w1") {
 			if x.boundBy != up {
 				t.Errorf("%s, %s boundBy = %s, want the up's %s (the guess is %s)", when, x.id, x.boundBy, up, guess)
 			}
 		}
 	}
 	bound("at its start")
-	m.run([]op{{10, 0, 0}}) // tick: the up's lease ends
+	m.run([]op{{10, 0, 0}}) // tick
 	bound("after the reading")
-	if i := slices.IndexFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == guess }); i < 0 {
-		t.Errorf("the guess %s ended: the book bound it something", guess)
-	} else if l := m.b.List()[i]; l.Bytes != 2*target {
-		t.Errorf("the guess %s reserves %d MiB, want all %d MiB: the book bound it something", guess, l.Bytes>>20, 2*target>>20)
+	reserves := func(id string) (uint64, bool) {
+		i := slices.IndexFunc(m.b.List(), func(l protocol.Lease) bool { return l.ID == id })
+		if i < 0 {
+			return 0, false
+		}
+		return m.b.List()[i].Bytes, true
+	}
+	if n, ok := reserves(up); !ok || n != target {
+		t.Errorf("the up %s reserves %d MiB (open %v), want %d MiB: c3 and c4 use half its cost", up, n>>20, ok, target>>20)
+	}
+	if n, ok := reserves(guess); !ok || n != 2*target {
+		t.Errorf("the guess %s reserves %d MiB (open %v), want all %d MiB: the book bound it nothing", guess, n>>20, ok, 2*target>>20)
 	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))

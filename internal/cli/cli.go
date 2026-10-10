@@ -252,7 +252,7 @@ func runDaemon(e Env) int {
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
-	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEvent, sleepCtx) })
+	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEventAt, time.Now, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()
@@ -521,24 +521,53 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 
 // Eventer streams Docker's container starts and exits: the Docker source.
 type Eventer interface {
-	Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error
+	Events(ctx context.Context, since int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error
 }
 
 // followEvents feeds Docker's container events to fn until ctx ends (#67).
 // A stream that drops (Docker quit or restarting) is opened again after a
 // wait that doubles up to maxWait, and starts at a second again once a
 // stream delivered: meanwhile leases bind from readings alone.
-func followEvents(ctx context.Context, src Eventer, fn func(action, id, name string, labels map[string]string), wait func(context.Context, time.Duration)) {
+//
+// A stream opened again asks for the events since the last one delivered,
+// which Docker replays, that one included (#146): an event older than it,
+// or at its nanosecond with the same container and action, was delivered
+// already. Docker refusing the since, it is dropped. Each event reaches fn
+// dated when it happened, but no later than now: the time is the Docker
+// VM's clock.
+func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action, id, name string, labels map[string]string), now func() time.Time, wait func(context.Context, time.Duration)) {
 	const maxWait = 30 * time.Second
 	backoff := time.Second
+	var last int64                 // the last delivered event's time
+	atLast := map[[2]string]bool{} // the containers and actions delivered at last
 	for ctx.Err() == nil {
 		delivered := false
-		_ = src.Events(ctx, func(action, id string, attrs map[string]string) {
+		err := src.Events(ctx, last, func(action, id string, timeNano int64, attrs map[string]string) {
+			key := [2]string{id, action}
+			if timeNano > 0 {
+				if timeNano < last || timeNano == last && atLast[key] {
+					return // replayed
+				}
+				if timeNano > last {
+					last = timeNano
+					clear(atLast)
+				}
+				atLast[key] = true
+			}
 			delivered = true
-			fn(action, id, attrs["name"], attrs)
+			at := now()
+			if t := time.Unix(0, timeNano); timeNano > 0 && t.Before(at) {
+				at = t
+			}
+			fn(at, action, id, attrs["name"], attrs)
 		})
 		if ctx.Err() != nil {
 			return
+		}
+		if errors.Is(err, docker.ErrBadSince) {
+			last = 0
+			clear(atLast)
+			continue
 		}
 		if delivered {
 			backoff = time.Second

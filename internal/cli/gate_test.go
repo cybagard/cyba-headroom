@@ -271,36 +271,127 @@ func TestGateLooksUpEveryTarget(t *testing.T) {
 	}
 }
 
+// fakeEvents scripts Docker's events streams: each call plays the next
+// stream, and the last call ends the context.
 type fakeEvents struct {
-	calls  int
-	cancel context.CancelFunc
+	streams []fakeStream
+	since   []int64 // each call's
+	cancel  context.CancelFunc
 }
 
-func (f *fakeEvents) Events(_ context.Context, fn func(action, id string, attrs map[string]string)) error {
-	f.calls++
-	if f.calls == 1 {
-		fn("start", "Q", map[string]string{"name": "quick"})
+type fakeStream struct {
+	events []fakeEvent
+	err    error // else "stream dropped"
+}
+
+type fakeEvent struct {
+	action, id, name string
+	at               int64 // Unix ns, 0: Docker gave none
+}
+
+func (f *fakeEvents) Events(_ context.Context, since int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
+	f.since = append(f.since, since)
+	st := f.streams[len(f.since)-1]
+	for _, e := range st.events {
+		fn(e.action, e.id, e.at, map[string]string{"name": e.name})
 	}
-	if f.calls == 3 {
+	if len(f.since) == len(f.streams) {
 		f.cancel()
+	}
+	if st.err != nil {
+		return st.err
 	}
 	return errors.New("stream dropped")
 }
 
+// follow runs followEvents over streams at now, returning what it
+// delivered (with each event's time as Unix ns), each call's since, and
+// its waits.
+func follow(now time.Time, streams ...fakeStream) (got []string, since []int64, waits []time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeEvents{streams: streams, cancel: cancel}
+	followEvents(ctx, f, func(at time.Time, action, id, name string, _ map[string]string) {
+		got = append(got, fmt.Sprint(action, " ", id, " ", name, " ", at.UnixNano()))
+	}, func() time.Time { return now }, func(_ context.Context, d time.Duration) { waits = append(waits, d) })
+	return got, f.since, waits
+}
+
+// farOff is a now later than every event's time in these tests.
+var farOff = time.Unix(0, 1e18)
+
 // The daemon follows Docker's events, and reconnects with a growing wait
 // when the stream drops, back to the shortest once one delivered.
 func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	f := &fakeEvents{cancel: cancel}
-	var waits []time.Duration
-	var got []string
-	followEvents(ctx, f, func(action, id, name string, _ map[string]string) { got = append(got, action+" "+id+" "+name) },
-		func(_ context.Context, d time.Duration) { waits = append(waits, d) })
-	if fmt.Sprint(got) != "[start Q quick]" || f.calls != 3 {
-		t.Fatalf("events %v, calls %d", got, f.calls)
+	got, since, waits := follow(farOff, fakeStream{events: []fakeEvent{{"start", "Q", "quick", 0}}}, fakeStream{}, fakeStream{})
+	if fmt.Sprint(got) != "[start Q quick 1000000000000000000]" || len(since) != 3 {
+		t.Fatalf("events %v, calls %d", got, len(since))
 	}
 	if len(waits) != 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
 		t.Fatalf("waits = %v", waits)
+	}
+}
+
+// A reconnect asks Docker for the events since the last one delivered,
+// which Docker sends again: each event is delivered once, in order, with
+// its time. Another action at that nanosecond is a new event (#146).
+func TestFollowEventsReplaysFromTheLastDelivered(t *testing.T) {
+	got, since, _ := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}, {"kill", "A", "a", 200}}},
+		fakeStream{events: []fakeEvent{{"kill", "A", "a", 200}, {"die", "A", "a", 200}, {"start", "B", "b", 300}}},
+		fakeStream{})
+	want := []string{"start A a 100", "kill A a 200", "die A a 200", "start B b 300"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+	if fmt.Sprint(since) != "[0 200 300]" {
+		t.Errorf("since = %v, want none, then each stream's last event's time", since)
+	}
+}
+
+// An event is dated when Docker says it happened, but never later than
+// now (Docker's VM clock may run ahead), and at now when Docker gave no
+// time; such an event moves no since (#146).
+func TestFollowEventsDatesEventsNoLaterThanNow(t *testing.T) {
+	now := time.Unix(0, 1000)
+	got, since, _ := follow(now,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 900}, {"die", "A", "a", 1500}, {"start", "B", "b", 0}}},
+		fakeStream{})
+	if want := []string{"start A a 900", "die A a 1000", "start B b 1000"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+	if fmt.Sprint(since) != "[0 1500]" {
+		t.Errorf("since = %v, want the last time Docker gave", since)
+	}
+}
+
+// A stream that replays only what was delivered delivered nothing: the
+// wait keeps growing (#146).
+func TestFollowEventsAReplayedEventAloneKeepsTheBackoff(t *testing.T) {
+	_, _, waits := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
+		fakeStream{})
+	if fmt.Sprint(waits) != "[1s 2s]" {
+		t.Fatalf("waits = %v, want [1s 2s]", waits)
+	}
+}
+
+// Docker refusing the since (it restarted, say): followEvents asks again
+// at once without one, and delivers what comes, older or not (#146).
+func TestFollowEventsDropsASinceDockerRefuses(t *testing.T) {
+	got, since, waits := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
+		fakeStream{err: docker.ErrBadSince},
+		fakeStream{events: []fakeEvent{{"start", "B", "b", 50}}},
+		fakeStream{})
+	if fmt.Sprint(since) != "[0 100 0 50]" {
+		t.Errorf("since = %v, want the refused one dropped", since)
+	}
+	if want := []string{"start A a 100", "start B b 50"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+	if fmt.Sprint(waits) != "[1s 1s]" {
+		t.Errorf("waits = %v, want none after the refusal", waits)
 	}
 }
 

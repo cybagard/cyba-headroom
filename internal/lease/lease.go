@@ -1115,16 +1115,10 @@ func readingBegan(s *protocol.Snapshot) (began time.Time, fresh bool) {
 // call took, and its exit ends that lease at once. An event only binds:
 // whether an unbound container was gated is the next reading's to judge.
 func (b *Book) ContainerEvent(action, id, name string, labels map[string]string) {
-	b.ContainerEventAt(b.now(), action, id, name, labels)
-}
-
-// ContainerEventAt is ContainerEvent for an event that happened at at: one
-// the events stream replays after a reconnect (#146).
-func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels map[string]string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	r := containerResource(id, name, labels)
-	now := at
+	now := b.now()
 	switch action {
 	case "stop":
 		last := b.seen[r.key]

@@ -252,7 +252,7 @@ func runDaemon(e Env) int {
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
-	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEventAt, time.Now, sleepCtx) })
+	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEvent, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()
@@ -534,11 +534,10 @@ type Eventer interface {
 // not yet sent comes too (#146). Docker sends events out of time order, so
 // an event is dropped only when it was delivered already: the last
 // replayLen delivered are kept by their time, container and action.
-// Docker refusing the since, it is dropped. An event more than a second
-// old, a replay from a gap, reaches fn dated when it happened; any other
-// is dated now, since the time is the Docker VM's clock, which runs a few
-// ms off the host's.
-func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action, id, name string, labels map[string]string), now func() time.Time, wait func(context.Context, time.Duration)) {
+// Docker refusing the since, it is dropped. Every event, replayed or live,
+// reaches fn when it comes, and the book dates it then: the Docker VM's
+// clock can lag the host's.
+func followEvents(ctx context.Context, src Eventer, fn func(action, id, name string, labels map[string]string), wait func(context.Context, time.Duration)) {
 	const maxWait = 30 * time.Second
 	backoff := time.Second
 	var newest int64 // the newest delivered event's time
@@ -565,11 +564,7 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 				newest = max(newest, timeNano)
 			}
 			delivered = true
-			at := now()
-			if t := time.Unix(0, timeNano); timeNano > 0 && t.Before(at.Add(-time.Second)) {
-				at = t
-			}
-			fn(at, action, id, attrs["name"], attrs)
+			fn(action, id, attrs["name"], attrs)
 		})
 		if ctx.Err() != nil {
 			return

@@ -304,26 +304,22 @@ func (f *fakeEvents) Events(_ context.Context, since int64, fn func(action, id s
 	return errors.New("stream dropped")
 }
 
-// follow runs followEvents over streams at now, returning what it
-// delivered (with each event's time as Unix ns), each call's since, and
-// its waits.
-func follow(now time.Time, streams ...fakeStream) (got []string, since []int64, waits []time.Duration) {
+// follow runs followEvents over streams, returning what it delivered,
+// each call's since, and its waits.
+func follow(streams ...fakeStream) (got []string, since []int64, waits []time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &fakeEvents{streams: streams, cancel: cancel}
-	followEvents(ctx, f, func(at time.Time, action, id, name string, _ map[string]string) {
-		got = append(got, fmt.Sprint(action, " ", id, " ", name, " ", at.UnixNano()))
-	}, func() time.Time { return now }, func(_ context.Context, d time.Duration) { waits = append(waits, d) })
+	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
+		got = append(got, action+" "+id+" "+name)
+	}, func(_ context.Context, d time.Duration) { waits = append(waits, d) })
 	return got, f.since, waits
 }
-
-// farOff is a now later than every event's time in these tests.
-var farOff = time.Unix(0, 1e18)
 
 // The daemon follows Docker's events, and reconnects with a growing wait
 // when the stream drops, back to the shortest once one delivered.
 func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
-	got, since, waits := follow(farOff, fakeStream{events: []fakeEvent{{"start", "Q", "quick", 0}}}, fakeStream{}, fakeStream{})
-	if fmt.Sprint(got) != "[start Q quick 1000000000000000000]" || len(since) != 3 {
+	got, since, waits := follow(fakeStream{events: []fakeEvent{{"start", "Q", "quick", 0}}}, fakeStream{}, fakeStream{})
+	if fmt.Sprint(got) != "[start Q quick]" || len(since) != 3 {
 		t.Fatalf("events %v, calls %d", got, len(since))
 	}
 	if len(waits) != 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
@@ -332,14 +328,14 @@ func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
 }
 
 // A reconnect's replay sends again what was delivered: each event is
-// delivered once, in order, with its time. Another action at that
-// nanosecond is a new event (#146).
+// delivered once, in order. Another action at that nanosecond is a new
+// event (#146).
 func TestFollowEventsReplaysFromTheLastDelivered(t *testing.T) {
-	got, since, _ := follow(farOff,
+	got, since, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 5*sec + 100}, {"kill", "A", "a", 5*sec + 200}}},
 		fakeStream{events: []fakeEvent{{"kill", "A", "a", 5*sec + 200}, {"die", "A", "a", 5*sec + 200}, {"start", "B", "b", 5*sec + 300}}},
 		fakeStream{})
-	want := []string{fmt.Sprint("start A a ", 5*sec+100), fmt.Sprint("kill A a ", 5*sec+200), fmt.Sprint("die A a ", 5*sec+200), fmt.Sprint("start B b ", 5*sec+300)}
+	want := []string{"start A a", "kill A a", "die A a", "start B b"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
@@ -348,15 +344,12 @@ func TestFollowEventsReplaysFromTheLastDelivered(t *testing.T) {
 	}
 }
 
-// An event more than a second old, a replay from a gap, is dated when
-// Docker says it happened; any other at now (Docker's VM clock may run
-// ahead), as is one Docker gave no time, which moves no since (#146).
-func TestFollowEventsDatesEventsNoLaterThanNow(t *testing.T) {
-	now := time.Unix(0, 10*sec)
-	got, since, _ := follow(now,
+// An event Docker gave no time is delivered, and moves no since (#146).
+func TestFollowEventsAnEventWithNoTimeMovesNoSince(t *testing.T) {
+	got, since, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 8 * sec}, {"die", "A", "a", 11 * sec}, {"start", "B", "b", 0}}},
 		fakeStream{})
-	if want := []string{fmt.Sprint("start A a ", 8*sec), fmt.Sprint("die A a ", 10*sec), fmt.Sprint("start B b ", 10*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{"start A a", "die A a", "start B b"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
 	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 10 * sec}) {
@@ -367,7 +360,7 @@ func TestFollowEventsDatesEventsNoLaterThanNow(t *testing.T) {
 // A stream that replays only what was delivered delivered nothing: the
 // wait keeps growing (#146).
 func TestFollowEventsAReplayedEventAloneKeepsTheBackoff(t *testing.T) {
-	_, _, waits := follow(farOff,
+	_, _, waits := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
 		fakeStream{})
@@ -379,7 +372,7 @@ func TestFollowEventsAReplayedEventAloneKeepsTheBackoff(t *testing.T) {
 // Docker refusing the since (it restarted, say): followEvents asks again
 // at once without one, and delivers what comes, older or not (#146).
 func TestFollowEventsDropsASinceDockerRefuses(t *testing.T) {
-	got, since, waits := follow(farOff,
+	got, since, waits := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}}},
 		fakeStream{err: docker.ErrBadSince},
 		fakeStream{events: []fakeEvent{{"start", "B", "b", 3 * sec}}},
@@ -387,7 +380,7 @@ func TestFollowEventsDropsASinceDockerRefuses(t *testing.T) {
 	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 4 * sec, 0, 2 * sec}) {
 		t.Errorf("since = %v, want the refused one dropped", since)
 	}
-	if want := []string{fmt.Sprint("start A a ", 5*sec), fmt.Sprint("start B b ", 3*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{"start A a", "start B b"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
 	if fmt.Sprint(waits) != "[1s 1s]" {
@@ -403,10 +396,10 @@ const sec = int64(time.Second)
 // takes its publish lock, and sends each from its own goroutine. Every
 // event is delivered, however old (#146).
 func TestFollowEventsDeliversALiveEventOutOfOrder(t *testing.T) {
-	got, _, _ := follow(farOff,
+	got, _, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "X", "x", 100}, {"kill", "Y", "y", 300}, {"start", "Z", "z", 250}, {"die", "Y", "y", 400}}},
 		fakeStream{})
-	if want := []string{"start X x 100", "kill Y y 300", "start Z z 250", "die Y y 400"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{"start X x", "kill Y y", "start Z z", "die Y y"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)
 	}
 }
@@ -415,11 +408,11 @@ func TestFollowEventsDeliversALiveEventOutOfOrder(t *testing.T) {
 // its time order: an event in the gap older than one before it is
 // delivered (#146).
 func TestFollowEventsDeliversAReplayOutOfOrder(t *testing.T) {
-	got, _, _ := follow(farOff,
+	got, _, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}, {"start", "B", "b", 150}, {"die", "C", "c", 140}}},
 		fakeStream{})
-	if want := []string{"start A a 100", "start B b 150", "die C c 140"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{"start A a", "start B b", "die C c"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)
 	}
 }
@@ -427,25 +420,12 @@ func TestFollowEventsDeliversAReplayOutOfOrder(t *testing.T) {
 // The Docker VM's clock stepping back (a resync, or a VM restart while the
 // daemon stays up) drops no live event (#146).
 func TestFollowEventsDeliversEventsAfterTheClockSteppedBack(t *testing.T) {
-	got, _, _ := follow(farOff,
+	got, _, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 1000}}},
 		fakeStream{events: []fakeEvent{{"start", "B", "b", 900}, {"die", "B", "b", 950}}},
 		fakeStream{})
-	if want := []string{"start A a 1000", "start B b 900", "die B b 950"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{"start A a", "start B b", "die B b"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)
-	}
-}
-
-// A live event is dated now, though Docker's VM clock, a few ms behind,
-// dates it just before: else a die just after a reading began would be
-// dated before it, and its container's next run warned ungated (#146).
-func TestFollowEventsDatesALiveEventNow(t *testing.T) {
-	now := time.Unix(0, 10*sec)
-	got, _, _ := follow(now,
-		fakeStream{events: []fakeEvent{{"die", "A", "a", 10*sec - 2e6}, {"die", "B", "b", 9 * sec}}},
-		fakeStream{})
-	if want := []string{fmt.Sprint("die A a ", 10*sec), fmt.Sprint("die B b ", 10*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("events = %q, want both dated now", got)
 	}
 }
 
@@ -453,7 +433,7 @@ func TestFollowEventsDatesALiveEventNow(t *testing.T) {
 // its die frees the cost, with no "never appeared" (#146).
 func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
 	var log strings.Builder
-	now := farOff
+	now := time.Unix(0, 1e18)
 	book := lease.New(2*time.Minute, func() time.Time { return now }, slog.New(slog.NewTextHandler(&log, nil)))
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
@@ -464,11 +444,11 @@ func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
 	lab := map[string]string{protocol.LeaseLabel: d.LeaseID}
 	f := &fakeEvents{streams: []fakeStream{{}}, cancel: cancel}
 	f.streams[0].events = []fakeEvent{{"kill", "Y", "y", 300}, {"start", "Q", "quick", 250}, {"die", "Q", "quick", 400}}
-	followEvents(ctx, f, func(at time.Time, action, id, name string, _ map[string]string) {
+	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
 		if id == "Q" {
-			book.ContainerEventAt(at, action, id, name, lab)
+			book.ContainerEvent(action, id, name, lab)
 		}
-	}, func() time.Time { return now }, func(context.Context, time.Duration) {})
+	}, func(context.Context, time.Duration) {})
 	if l := book.List(); len(l) != 0 {
 		t.Errorf("leases = %+v after the die, want none", l)
 	}
@@ -483,11 +463,11 @@ func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
 // delivered, to nanosecond precision, so an event dated just before it but
 // not yet sent comes too; what was delivered already is not again (#146).
 func TestFollowEventsReplaysASecondBeforeTheNewest(t *testing.T) {
-	got, since, _ := follow(farOff,
+	got, since, _ := follow(
 		fakeStream{events: []fakeEvent{{"start", "A", "a", 5*sec + 1}, {"kill", "A", "a", 7*sec + 3}, {"start", "B", "b", 6*sec + 2}}},
 		fakeStream{events: []fakeEvent{{"die", "C", "c", 6*sec + 9}, {"kill", "A", "a", 7*sec + 3}}},
 		fakeStream{})
-	want := []string{fmt.Sprint("start A a ", 5*sec+1), fmt.Sprint("kill A a ", 7*sec+3), fmt.Sprint("start B b ", 6*sec+2), fmt.Sprint("die C c ", 6*sec+9)}
+	want := []string{"start A a", "kill A a", "start B b", "die C c"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
@@ -501,12 +481,12 @@ func TestFollowEventsReplaysASecondBeforeTheNewest(t *testing.T) {
 func TestFollowEventsRemembersTheLast256(t *testing.T) {
 	var first fakeStream
 	for i := range int64(257) {
-		first.events = append(first.events, fakeEvent{"start", "A", "a", 5*sec + i})
+		first.events = append(first.events, fakeEvent{"start", "A", fmt.Sprint(i), 5*sec + i})
 	}
-	got, _, _ := follow(farOff, first,
-		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}, {"start", "A", "a", 5*sec + 256}}},
+	got, _, _ := follow(first,
+		fakeStream{events: []fakeEvent{{"start", "A", "0", 5 * sec}, {"start", "A", "256", 5*sec + 256}}},
 		fakeStream{})
-	if len(got) != 258 || got[257] != fmt.Sprint("start A a ", 5*sec) {
+	if len(got) != 258 || got[257] != "start A 0" {
 		t.Fatalf("delivered %d, the last %q: want the oldest of 257 again, and only it", len(got), got[len(got)-1])
 	}
 }
@@ -583,5 +563,52 @@ func TestGatePassesAGuessedProjectOn(t *testing.T) {
 	check(&up, s)
 	if l := book.List(); len(l) != 2 {
 		t.Fatalf("leases = %+v, want both: the guess took the up's over", l)
+	}
+}
+
+// The Docker VM's clock 1.5 s behind the host's (after host sleep, until
+// its time sync catches up): a compose run's one-off dies 2 ms after a
+// reading began, and the die is dated now, not by the VM's clock before
+// the reading, so the run's next one-off is not warned ungated (#146,
+// review round 2's Q4 and L2).
+func TestFollowEventsALiveDieFromALaggingVMIsDatedNow(t *testing.T) {
+	var log strings.Builder
+	t0 := time.Unix(1000, 0)
+	now := t0
+	book := lease.New(2*time.Minute, func() time.Time { return now }, slog.New(slog.NewTextHandler(&log, nil)))
+	lab := map[string]string{protocol.ComposeProjectLabel: "p", protocol.ComposeOneoffLabel: "True"}
+	snap := func(began time.Time, oneoff string) *protocol.Snapshot {
+		headroom := int64(8 << 30)
+		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+			Budget:      &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
+			Docker:      &protocol.Docker{Running: true},
+			Tart:        &protocol.Tart{Installed: true},
+			Sources:     map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}},
+			CollectedAt: now}
+		s.Docker.Containers = []protocol.Container{{ID: oneoff, Name: oneoff, MemoryBytes: 1 << 28, Labels: lab}}
+		return s
+	}
+	composeRun := policy.Request{Worktree: "w1", Kind: "compose", Op: "run", Command: "docker compose run", CostBytes: 1 << 30, Target: "p"}
+	cfg := policy.Config{PressureGuard: "critical", DefaultContainerBytes: 1 << 30, DefaultTartBytes: 4 << 30}
+	empty := snap(t0, "")
+	empty.Docker.Containers = nil
+	book.Observe(empty)
+	book.Check(composeRun, empty, cfg)
+	now = t0.Add(2 * time.Second)
+	book.ContainerEvent("start", "r1", "r1", lab)
+	now = t0.Add(5 * time.Second)
+	book.Check(composeRun, empty, cfg)
+	now = t0.Add(6002 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeEvents{streams: []fakeStream{{events: []fakeEvent{{"die", "r1", "r1", now.Add(-1500 * time.Millisecond).UnixNano()}}}}, cancel: cancel}
+	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
+		book.ContainerEvent(action, id, name, lab)
+	}, func(context.Context, time.Duration) {})
+	now = t0.Add(7 * time.Second)
+	book.Observe(snap(t0.Add(6*time.Second), "r1"))
+	now = t0.Add(16 * time.Second)
+	book.Observe(snap(t0.Add(15*time.Second), "r2"))
+	if strings.Contains(log.String(), "ungated") {
+		t.Errorf("the run's own one-off was warned ungated: %s", log.String())
 	}
 }

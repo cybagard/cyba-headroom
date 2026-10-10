@@ -76,7 +76,7 @@ To upgrade, run `install` again.
 `headroom install` runs the daemon as a LaunchAgent. The LaunchAgent starts at login, and it restarts the daemon if the daemon crashes. The daemon writes its log to `~/Library/Logs/headroom/daemon.log`. The log rotates at 5 MB. The view and `status` read from the daemon.
 
 ```sh
-bin/headroom install          # daemon under launchd (or: headroom daemon, in a terminal)
+headroom install              # daemon under launchd (or: headroom daemon, in a terminal)
 headroom logs [-f]            # its log
 headroom                      # observe view, printed once
 headroom --watch              # redraws in place; Ctrl-C to quit
@@ -170,6 +170,8 @@ Each line of the output tells you what to fix. If a check fails, `headroom docto
 The config file is `~/.config/headroom/config.toml`. To change its directory, set `HEADROOM_CONFIG_DIR` or `XDG_CONFIG_HOME`. An unknown key is an error. `headroom config` prints each setting that is in effect. GB means GiB.
 
 `min_headroom_gb`, `per_worktree_cap_gb` and `host_baseline_gb` have the default 0 until the observe baseline run sets them. That run is [#63](https://github.com/cybagard/cyba-headroom/issues/63). A value of 0 means no margin, no cap and no baseline. The defaults for the Docker, LM Studio and Ollama overheads come from the spike measurements.
+
+The example below sets example values for the three thresholds. These values are not defaults.
 
 ```toml
 [policy]

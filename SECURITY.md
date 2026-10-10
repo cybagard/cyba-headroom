@@ -12,9 +12,12 @@ The daemon writes the sample files with mode 0600. The samples hold these data:
 
 - memory figures;
 - the name and path of each worktree;
+- the state of each agent in a worktree;
 - container names and images;
 - bind-mount paths;
-- Tart VM names and shared directories;
-- model names.
+- the Compose working directory of a container;
+- Tart VM names, shared directories and the directory that started the VM;
+- model names;
+- the names of containers and VMs that started without a check.
 
-The samples never hold container labels, environment or command lines.
+The samples hold no other container labels. They never hold environment or command lines.

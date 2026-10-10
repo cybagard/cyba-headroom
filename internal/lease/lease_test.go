@@ -1784,6 +1784,31 @@ func TestATakeoverKeepsWhatTheServicesItDoesNotStartNeed(t *testing.T) {
 	}
 }
 
+// web runs; compose up starts db, holding web; db crashes; compose up
+// again starts db. db is reserved once: the takeover's estimate, less
+// what db uses now, not also what it used before it crashed.
+func TestATakeoverReservesAServiceItStartsAgainOnce(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, map[string]uint64{"web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg)
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 4, "web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(time.Second)
+	if d := b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg); !d.Allow {
+		t.Fatalf("up again: %+v", d)
+	}
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(3 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 2, "web": gib}))
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB, want 512 for db: %+v", r>>20, b.List())
+	}
+}
+
 // As #112's case, then compose up -d once more, Compose's dry run saying it
 // starts nothing: it adds nothing to what is reserved.
 func TestAnIdleUpTakingOverWarmingServicesAddsNothing(t *testing.T) {

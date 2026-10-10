@@ -257,6 +257,18 @@ func (b *Book) runs(k string, v *verdict) bool {
 	return v.present || b.missed[k] > 0 && !b.gone(k)
 }
 
+// deadUse is what o's containers that died since the reading use showed
+// them used then: o.used still counts it.
+func (b *Book) deadUse(o *entry, use map[string]uint64) uint64 {
+	var n uint64
+	for k := range o.bound {
+		if v := b.verdicts[k]; !o.held[k] && v != nil && !b.runs(k, v) {
+			n += use[k]
+		}
+	}
+	return n
+}
+
 // takeover is what a compose up's lease carries over from a lease it takes
 // while services of its stack are down (Book.carry).
 type takeover struct{ carry, used uint64 }
@@ -508,7 +520,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			if t, ok := carries[o]; ok {
 				used += t.used // weighed in the check's cost
 			} else {
-				reserved, used = reserved+o.reserved(), used+o.used
+				// Not the last use of one that died since: this call
+				// starts it again.
+				reserved, used = reserved+o.reserved(), used+o.used-min(b.deadUse(o, use), o.used)
 			}
 			for k := range o.bound {
 				e.bound[k], e.held[k] = true, o.held[k]

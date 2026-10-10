@@ -1393,7 +1393,8 @@ func (ds deaths) takenBy(e *entry) bool {
 // the mark: the lease that reading binds it to takes it if
 // deaths.takenBy, else it stays the start's (entry.letGo): the start
 // covers starting each once. A start event with a lease deaths.takenBy
-// takes it at once. Leases it was all of ended first: they end quietly, as before.
+// takes it at once. Leases it was all of ended first: they end quietly,
+// as before.
 func (b *Book) markDead(key string, now time.Time) {
 	for _, e := range b.open {
 		if e.starts() < 2 || !e.bound[key] {

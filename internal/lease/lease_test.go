@@ -1779,6 +1779,12 @@ func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
 // as c2 runs again under docker start c1 c2: p1 reads c1 and c2 in w1's
 // compose project p1, and up is w1's compose up of p1.
 func p1Started(t *testing.T) (b *lease.Book, c *clock, log *bytes.Buffer, p1 func(mem1, mem2 uint64) *protocol.Snapshot, up policy.Request) {
+	return p1StartedBy(t, policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true})
+}
+
+// p1StartedBy is p1Started, c1 and c2 started again by start.
+func p1StartedBy(t *testing.T, start policy.Request) (b *lease.Book, c *clock, log *bytes.Buffer, p1 func(mem1, mem2 uint64) *protocol.Snapshot, up policy.Request) {
 	b, c, log = book(t)
 	p1 = func(mem1, mem2 uint64) *protocol.Snapshot {
 		s := snap()
@@ -1802,8 +1808,7 @@ func p1Started(t *testing.T) (b *lease.Book, c *clock, log *bytes.Buffer, p1 fun
 	}
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(p1(0, 0))
-	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
-		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
+	b.Check(start, p1(0, 0), cfg)
 	b.ContainerEvent("start", "c1", "c1", lab)
 	b.ContainerEvent("start", "c2", "c2", lab)
 	c.t = c.t.Add(5 * time.Second)
@@ -1857,6 +1862,50 @@ func TestAStartOfSeveralLeavesARestartTheEventCannotPlaceToTheReading(t *testing
 	b.Observe(p1(gib/8, gib))
 	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
 		t.Fatalf("leases = %+v, want w1's up %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+}
+
+// docker start c1 c2 with c1 resolved only by its name: when c1 dies, a
+// compose up checked since that starts it takes it, as it would c2 (#136).
+func TestAStartOfSeveralLetsGoOfAFirstContainerKeyedByItsName(t *testing.T) {
+	b, c, log, p1, up := p1StartedBy(t, policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true})
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c1", "c1", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	d := b.Check(up, p1(0, gib/8), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib, gib/8))
+	}
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) || strings.Contains(log.String(), "never appeared\" lease="+d.LeaseID) {
+		t.Fatalf("w1's up %s never took c1: leases = %+v\n%s", d.LeaseID, b.List(), log)
+	}
+}
+
+// As TestAStartOfSeveralLetsGoOfAFirstContainerKeyedByItsName: once it let
+// c1 go, the start waits on c2 alone, and ends when c2 exits rather than
+// hold its cost to its timeout (#136).
+func TestAStartOfSeveralThatLetGoOfItsFirstByNameEndsWithItsLast(t *testing.T) {
+	b, c, _, p1, up := p1StartedBy(t, policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true})
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c1", "c1", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	b.Check(up, p1(0, gib/8), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib, gib/8))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "c2", "c2", lab)
+	b.ContainerEvent("die", "c2", "c2", lab)
+	if ls := b.List(); slices.ContainsFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") }) {
+		t.Fatalf("leases = %+v, want the start's ended with c2", ls)
 	}
 }
 

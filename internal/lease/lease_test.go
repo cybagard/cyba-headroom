@@ -2385,6 +2385,9 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 		{"die, guessed up, start", []func(*book){die, guessedUp, start, back}, true},
 		{"die, w2's up, w1's up, start", []func(*book){die, upW2, up, start, back}, true},
 		{"die, reading, w2's up, w1's up, start in a reading", []func(*book){die, missing, upW2, up, startInReading, back}, true},
+		// A reading that misses c2 while it is still dead adds no death:
+		// the up, checked in the one it has, takes it (#136).
+		{"die, up, reading, start", []func(*book){die, up, missing, start, back}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &book{}
@@ -2421,6 +2424,112 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 				t.Fatalf("log: %s", k.log)
 			}
 		})
+	}
+}
+
+// docker start c1 c2 c3, c1 by its name and c3 not up yet: once it let c2,
+// keyed by its ID, go to w1's up, it still waits on c1 by its name and on
+// c3. c1 stopping does not end it, and c3, when it comes, binds it and is
+// not flagged ungated (#136).
+func TestAStartOfSeveralThatLetGoOfAContainerByItsIDWaitsForItsOthers(t *testing.T) {
+	b, c, log, p1, up := p1StartedBy(t, policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2 c3", Target: "c1",
+		Others: []policy.Start{{ID: "c2"}, {ID: "c3"}}, CostBytes: 2 * gib, OnEngine: true})
+	ls := b.List()
+	i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") })
+	if i < 0 {
+		t.Fatalf("leases = %+v, want the start's", ls)
+	}
+	startID := ls[i].ID
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", lab) // w1's up takes it
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib/8))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "c1", "c1", lab)
+	b.ContainerEvent("die", "c1", "c1", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(0, gib/8))
+	if !slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == startID }) {
+		t.Fatalf("leases = %+v, want %s open, waiting on c3", b.List(), startID)
+	}
+	withC3 := func() *protocol.Snapshot { return withComposeProject(p1(0, gib/8), "c3", "w1", "p1", gib/8) }
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c3", "c3", lab)
+	for range 3 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(withC3())
+	}
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// docker start c1 c2 c3 of containers no reading attributes, c2 a service
+// of compose project p1, c3 slow to come: c2 is gone long enough for the
+// book to drop its verdict, and comes back by a reading, w1's up checked
+// meanwhile. The up takes it as gated and as w1's: a later service of p1
+// is not flagged ungated, and after a crash c2's start binds w1's next up
+// (#136).
+func TestADeadContainerALeaseTakesFromItsStartIsGatedAndTheLeases(t *testing.T) {
+	b, c, log := book(t)
+	reading := func(c2, c4 bool) *protocol.Snapshot {
+		s := withContainerMem(snap(), "c1", "", gib/8)
+		if c2 {
+			withComposeProject(s, "c2", "", "p1", gib)
+		}
+		if c4 {
+			withComposeProject(s, "c4", "", "p1", gib/8)
+		}
+		return read(s, c.t)
+	}
+	b.Observe(reading(false, false))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2 c3", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}, {ID: "c3"}}, CostBytes: gib, OnEngine: true}, reading(false, false), cfg)
+	b.ContainerEvent("start", "c1", "c1", nil)
+	b.ContainerEvent("start", "c2", "c2", map[string]string{protocol.ComposeProjectLabel: "p1"})
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(reading(true, false))
+	// c2 exits with no event seen; docker start c3 again, at 100 s, keeps
+	// the start's lease past its timeout.
+	for i := range 26 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(reading(false, false))
+		if i == 18 {
+			b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c3", Target: "c3", ContainerID: "c3",
+				CostBytes: gib, OnEngine: true}, reading(false, false), cfg)
+		}
+	}
+	if lease.HasVerdict(b, "container:c2") {
+		t.Fatalf("c2's verdict is kept: the test needs it dropped")
+	}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p p1 up -d", CostBytes: gib, Target: "p1", OnEngine: true}
+	c.t = c.t.Add(time.Second)
+	first := b.Check(up, reading(false, false), cfg)
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(reading(true, false))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == first.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), first.LeaseID)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(reading(true, true)) // a later service of p1
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("log: %s", log)
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", map[string]string{protocol.ComposeProjectLabel: "p1"}) // a crash
+	c.t = c.t.Add(time.Second)
+	second := b.Check(up, reading(false, true), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", map[string]string{protocol.ComposeProjectLabel: "p1"})
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(reading(true, true))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == second.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), second.LeaseID)
 	}
 }
 

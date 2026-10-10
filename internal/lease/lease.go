@@ -686,9 +686,19 @@ type resource struct {
 	worktree string // "" when unattributed
 	os       string // a VM's OS
 	runPID   int    // a VM's tart run process
+	runPIDs  []int  // every tart run of the VM: none in an old or fake reading
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
 	bytes uint64
+}
+
+// runs reports whether pid is a tart run of VM r. Several may list, in no
+// stable order; a reading with none listed names only runPID (#205).
+func (r resource) runs(pid int) bool {
+	if len(r.runPIDs) == 0 {
+		return pid == r.runPID
+	}
+	return slices.Contains(r.runPIDs, pid)
 }
 
 // resources lists s's containers and VMs. Their worktree is the evidence's
@@ -721,7 +731,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
 		}
 	}
 	return out
@@ -799,7 +809,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		// A VM run again under another tart run with no reading between
 		// is new, as after a reading without it (#205). A run PID of 0 is
 		// unknown: no change.
-		if v := b.verdicts[r.key]; r.kind == "vm" && v != nil && r.runPID != 0 && v.runPID != 0 && r.runPID != v.runPID {
+		if v := b.verdicts[r.key]; r.kind == "vm" && v != nil && r.runPID != 0 && v.runPID != 0 && !r.runs(v.runPID) {
 			delete(b.prev, r.key)
 		}
 	}
@@ -941,8 +951,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present = now, true
-		// A run PID of 0 is unknown (a failed launch read): keep the last.
-		v.runPID = cmp.Or(r.runPID, v.runPID)
+		// A run PID of 0 is unknown (a failed launch read): keep the last,
+		// as while it still runs.
+		if r.runPID != 0 && !r.runs(v.runPID) {
+			v.runPID = r.runPID
+		}
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed

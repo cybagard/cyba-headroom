@@ -116,7 +116,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			vm.FootprintBytes = &fp
 		}
 		if l, ok := launches[v.Name]; ok {
-			vm.RunPID, vm.LaunchCwd, vm.SharedDirs = l.pid, l.cwd, l.dirs
+			vm.RunPID, vm.RunPIDs, vm.LaunchCwd, vm.SharedDirs = l.pid, l.pids, l.cwd, l.dirs
 		}
 		if vm.OS == "darwin" || vm.OS == "" {
 			t.MacOSRunning++
@@ -128,6 +128,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 
 type launch struct {
 	pid  int
+	pids []int // every tart run of the VM, pid among them
 	cwd  string
 	dirs []string
 }
@@ -147,7 +148,7 @@ func (s *Source) launches(ctx context.Context, running map[string]bool) (map[str
 		if !running[name] {
 			continue
 		}
-		l := launch{pid: p.PID}
+		l := launch{pid: p.PID, pids: append(out[name].pids, p.PID)}
 		if p.PPID > 1 { // reparented to launchd: the launcher is gone
 			l.cwd, _ = s.procs.Cwd(ctx, p.PPID)
 		}

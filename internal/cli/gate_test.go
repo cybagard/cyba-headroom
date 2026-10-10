@@ -162,17 +162,25 @@ func TestDeriveGivesALeasedVMItsWorktree(t *testing.T) {
 // is unknown (a failed launch read): it changes nothing (#205).
 func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 	p, q := os.Getpid(), os.Getppid()
+	type reading struct {
+		pid  int   // mac1's RunPID
+		pids []int // its RunPIDs: none in an old or fake reading
+	}
 	for _, tc := range []struct {
-		name    string
-		recheck bool  // a checked tart run of mac1 under q, before the readings
-		pids    []int // mac1's RunPID in the readings after it was bound
-		want    string
-		ungated bool // mac1 is listed as ungated
+		name     string
+		recheck  bool      // a checked tart run of mac1 under q, before the readings
+		readings []reading // mac1's in the readings after it was bound
+		want     string
+		ungated  bool // mac1 is listed as ungated
 	}{
-		{"another PID", false, []int{q}, "mac1 (manual)", true},
-		{"another PID, checked", true, []int{q}, `mac1 (worktree "A"`, false},
-		{"PID 0, then the same", false, []int{0, p}, `mac1 (worktree "A"`, false},
-		{"same PID", false, []int{p}, `mac1 (worktree "A"`, false},
+		{"another PID", false, []reading{{q, nil}}, "mac1 (manual)", true},
+		{"another PID, checked", true, []reading{{q, nil}}, `mac1 (worktree "A"`, false},
+		{"PID 0, then the same", false, []reading{{0, nil}, {p, nil}}, `mac1 (worktree "A"`, false},
+		{"same PID", false, []reading{{p, nil}}, `mac1 (worktree "A"`, false},
+		// Two tart runs of mac1, listed in either order: the first runs on.
+		{"two runs, in either order", false, []reading{{p, []int{p, q}}, {q, []int{p, q}}, {p, []int{p, q}}}, `mac1 (worktree "A"`, false},
+		{"two runs, then the first alone", false, []reading{{q, []int{p, q}}, {p, []int{p}}}, `mac1 (worktree "A"`, false},
+		{"another run alone", false, []reading{{q, []int{q}}}, "mac1 (manual)", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			book := lease.New(time.Minute, time.Now, discardLog())
@@ -190,8 +198,8 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 				tick(s)
 				return s
 			}
-			mac1 := func(pid int) protocol.TartVM {
-				return protocol.TartVM{Name: "mac1", OS: "darwin", MemoryBytes: 4 << 30, RunPID: pid}
+			mac1 := func(pid int, pids ...int) protocol.TartVM {
+				return protocol.TartVM{Name: "mac1", OS: "darwin", MemoryBytes: 4 << 30, RunPID: pid, RunPIDs: pids}
 			}
 			run := func(s *protocol.Snapshot, pid int) {
 				t.Helper()
@@ -209,11 +217,11 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 			if tc.recheck {
 				run(s, q)
 			}
-			for _, pid := range tc.pids {
-				snap(mac1(pid))
+			for _, r := range tc.readings {
+				snap(mac1(r.pid, r.pids...))
 			}
-			last := tc.pids[len(tc.pids)-1]
-			s = snap(mac1(last), protocol.TartVM{Name: "mac2", OS: "darwin", MemoryBytes: 4 << 30})
+			last := tc.readings[len(tc.readings)-1]
+			s = snap(mac1(last.pid, last.pids...), protocol.TartVM{Name: "mac2", OS: "darwin", MemoryBytes: 4 << 30})
 			d := check(&protocol.CheckRequest{Worktree: "w2", Kind: "tart", Command: "tart run mac3", MacOS: true}, s)
 			if d.Allow || len(d.Reasons) == 0 || d.Reasons[0].Code != policy.VMSlots {
 				t.Fatalf("third macOS VM: %+v", d)

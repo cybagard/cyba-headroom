@@ -421,9 +421,10 @@ func composeFileEnv(getenv func(string) string) []string {
 // docker) give --workdir, Compose's hidden alias of --project-directory;
 // the working directory is unknown and the dir would be relative to it;
 // the search finds no compose file or gives up; the file is remote (a git
-// or OCI reference); or, with neither --project-directory nor an -f nor
-// COMPOSE_FILE in the call's environment, an env file sets COMPOSE_FILE,
-// or could (composeEnvFileValue).
+// or OCI reference); a COMPOSE_FILE entry is stdin (-); or, with neither
+// --project-directory nor an -f, an env file sets, or could set
+// (composeEnvFileValue), COMPOSE_FILE when the call's environment has
+// none, or COMPOSE_PATH_SEPARATOR when it has COMPOSE_FILE but not that.
 func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), left time.Duration,
 	stat func(string) (fs.FileInfo, error)) string {
 	global, ok := shim.ComposeConfig(args, false)
@@ -433,7 +434,9 @@ func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool
 	getenv := getenvOf(lookupEnv)
 	files := c.ComposeFiles
 	if c.ComposeProjectDir == "" && len(files) == 0 {
-		files = composeFileEnv(getenv)
+		if files = composeFileEnv(getenv); slices.Contains(files, "-") {
+			return ""
+		}
 	}
 	if c.ComposeProjectDir == "" {
 		if i := firstComposeFile(files); i >= 0 && remoteComposeFile(files[i]) {
@@ -447,8 +450,16 @@ func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool
 		}
 		return ""
 	}
-	if c.ComposeProjectDir == "" && len(files) == 0 {
-		if _, set, done := composeEnvFileValue(c, lookupEnv, "COMPOSE_FILE", cwd, []string{cwd}, left); set || !done {
+	key := "" // the setting an env file could move the dir with
+	switch {
+	case c.ComposeProjectDir != "" || len(c.ComposeFiles) > 0:
+	case len(files) == 0:
+		key = "COMPOSE_FILE"
+	case getenv("COMPOSE_PATH_SEPARATOR") == "":
+		key = "COMPOSE_PATH_SEPARATOR" // it splits the environment's COMPOSE_FILE
+	}
+	if key != "" {
+		if _, set, done := composeEnvFileValue(c, lookupEnv, key, cwd, []string{cwd}, left); set || !done {
 			return ""
 		}
 	}

@@ -1831,7 +1831,10 @@ func TestComposeDir(t *testing.T) {
 
 // A COMPOSE_FILE that an env file sets moves the label (the probe's .env and
 // --env-file cases): the shim does not follow it, and sends no dir. One in
-// the call's environment beats the env files, and -f beats both (#158).
+// the call's environment beats the env files, and -f beats both (#158). So
+// does a COMPOSE_PATH_SEPARATOR an env file sets, which splits the
+// environment's COMPOSE_FILE, and a COMPOSE_FILE entry of stdin (review
+// round 1).
 func TestComposeDirWithEnvFiles(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
@@ -1845,6 +1848,7 @@ func TestComposeDirWithEnvFiles(t *testing.T) {
 	}
 	write("compose.yaml", "services: {}\n")
 	write("other.env", "COMPOSE_FILE=sub/y.yaml\n")
+	write("sep.env", "COMPOSE_PATH_SEPARATOR=;\n")
 	wd := func() (string, error) { return dir, nil }
 	for _, tc := range []struct {
 		name string
@@ -1861,6 +1865,12 @@ func TestComposeDirWithEnvFiles(t *testing.T) {
 		{"the environment's COMPOSE_FILE beats .env's", "COMPOSE_FILE=sub/y.yaml\n", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml"}, "/srv/c"},
 		{"-f beats .env's", "COMPOSE_FILE=sub/y.yaml\n", []string{"-f", "/srv/c/x.yaml"}, nil, "/srv/c"},
 		{"an --env-file that does not exist", "", []string{"--env-file", "missing.env"}, nil, ""},
+		{".env sets COMPOSE_PATH_SEPARATOR", "COMPOSE_PATH_SEPARATOR=;\n", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b"}, ""},
+		{"--env-file sets COMPOSE_PATH_SEPARATOR", "", []string{"--env-file", "sep.env"}, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b"}, ""},
+		{"the environment's COMPOSE_PATH_SEPARATOR beats .env's", "COMPOSE_PATH_SEPARATOR=,\n", nil,
+			map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b", "COMPOSE_PATH_SEPARATOR": ";"}, "/srv/c"},
+		{"COMPOSE_FILE is stdin", "", nil, map[string]string{"COMPOSE_FILE": "-"}, ""},
+		{"a COMPOSE_FILE entry is stdin", "", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml" + string(filepath.ListSeparator) + "-"}, ""},
 	} {
 		_ = os.Remove(filepath.Join(dir, ".env"))
 		if tc.dot != "" {

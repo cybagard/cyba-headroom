@@ -25,3 +25,10 @@ jobs:
       - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
+
+  docs:
+    # The docs linters run in containers, so this job needs Linux and Docker.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: make lint-docs

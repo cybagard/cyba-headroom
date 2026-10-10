@@ -2,3 +2,5 @@
 /dist/
 *.test
 *.out
+/.vale/styles/*
+!/.vale/styles/config/

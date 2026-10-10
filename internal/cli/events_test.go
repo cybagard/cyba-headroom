@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/source/docker"
 )
 
 // The Docker VM's clock steps back more than 1 s between Y, logged before
@@ -113,4 +115,100 @@ func TestFollowEventsAReplayKeepsAPendingStart(t *testing.T) {
 		{events: pair},
 		{events: append([]fakeEvent{{"kill", "Y", "y", 98*sec + 400e6}}, pair...)},
 		{}})
+}
+
+// An event Docker dated exactly a second before the newest, sent after
+// it, is still remembered: a reconnect replays it, and it is not
+// delivered again (#165).
+func TestFollowEventsRemembersAnEventOnTheSecondBeforeTheNewest(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 6 * sec}, {"start", "B", "b", 5 * sec}}},
+		fakeStream{events: []fakeEvent{{"start", "B", "b", 5 * sec}, {"start", "A", "a", 6 * sec}}},
+		fakeStream{})
+	if want := []string{"start A a", "start B b"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}
+
+// The window forgets what is more than a second older than the newest,
+// and does not keep one that is when it comes (#165).
+func TestTheWindowForgetsWhatIsOlderThanASecond(t *testing.T) {
+	var w window
+	for _, at := range []int64{100 * sec, 100*sec + sec/2, 102 * sec} {
+		w.add(eventKey{at, "A", "kill"}, at)
+	}
+	w.add(eventKey{100 * sec, "B", "kill"}, 102*sec)
+	if got, want := w.pinned(0), map[eventKey]bool{{102 * sec, "A", "kill"}: true}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("window = %v, want %v", got, want)
+	}
+}
+
+// Docker refusing the since keeps what was delivered: a later replay that
+// sends it again does not deliver it twice (#165).
+func TestFollowEventsARefusedSinceForgetsNothing(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}}},
+		fakeStream{err: docker.ErrBadSince},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}}},
+		fakeStream{})
+	if want := []string{"start A a"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}
+
+// Events Docker gave no time are never taken for one delivered (#165).
+func TestFollowEventsDeliversEveryEventWithNoTime(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"start", "Q", "q", 0}}},
+		fakeStream{events: []fakeEvent{{"start", "Q", "q", 0}}},
+		fakeStream{})
+	if want := []string{"start Q q", "start Q q"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}
+
+// Two containers' same action at the same nanosecond are two events
+// (#165).
+func TestFollowEventsTellsContainersApartAtOneNanosecond(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}, {"start", "B", "b", 5 * sec}}},
+		fakeStream{})
+	if want := []string{"start A a", "start B b"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}
+
+// storm sends n kills a second, each newer than the last, until the
+// context ends.
+type storm struct{ n int }
+
+func (s storm) Events(ctx context.Context, _ int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
+	attrs := map[string]string{"name": "x"}
+	ids := make([]string, 1000)
+	for i := range ids {
+		ids[i] = fmt.Sprint("c", i)
+	}
+	for i := 0; ctx.Err() == nil; i++ {
+		fn("kill", ids[i%len(ids)], 100*sec+int64(i)*sec/int64(s.n), attrs)
+	}
+	return ctx.Err()
+}
+
+// A kill storm costs followEvents the same per event at any rate: it
+// forgets each event once, not on each newer one (#165). ns/op is per
+// event.
+func BenchmarkFollowEventsStorm(b *testing.B) {
+	for _, n := range []int{1000, 5000, 20000} {
+		b.Run(fmt.Sprintf("%d/s", n), func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			k := 0
+			b.ResetTimer()
+			followEvents(ctx, storm{n}, func(_, _, _ string, _ map[string]string) {
+				if k++; k == b.N {
+					cancel()
+				}
+			}, func(context.Context, time.Duration) {})
+		})
+	}
 }

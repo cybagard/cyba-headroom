@@ -70,29 +70,44 @@ type eventKey struct {
 }
 
 // window is what followEvents delivered from a second before the newest
-// on, as far back as a reconnect replays, in the order it was delivered
-// (#165).
-type window struct{ keys []eventKey }
+// on, as far back as a reconnect replays, in the order it was delivered:
+// a ring of n keys from head (#165).
+type window struct {
+	ring    []eventKey
+	head, n int
+}
 
 // add keeps k if it is from a second before newest on, and forgets the
 // oldest delivered while they are older: each key is kept and forgotten
-// once. One newer that came before is forgotten first.
+// once. A key delivered after a newer one is forgotten after it.
 func (w *window) add(k eventKey, newest int64) {
 	from := newest - int64(time.Second)
 	if k.timeNano >= from {
-		w.keys = append(w.keys, k)
+		if w.n == len(w.ring) {
+			ring := make([]eventKey, max(2*w.n, 16))
+			for i := range w.n {
+				ring[i] = w.at(i)
+			}
+			w.ring, w.head = ring, 0
+		}
+		w.ring[(w.head+w.n)%len(w.ring)] = k
+		w.n++
 	}
-	for len(w.keys) > 0 && w.keys[0].timeNano < from {
-		w.keys[0] = eventKey{}
-		w.keys = w.keys[1:]
+	for w.n > 0 && w.at(0).timeNano < from {
+		w.ring[w.head] = eventKey{}
+		w.head = (w.head + 1) % len(w.ring)
+		w.n--
 	}
 }
+
+// at is the i-th key kept.
+func (w *window) at(i int) eventKey { return w.ring[(w.head+i)%len(w.ring)] }
 
 // pinned is the keys from since on.
 func (w *window) pinned(since int64) map[eventKey]bool {
 	p := map[eventKey]bool{}
-	for _, k := range w.keys {
-		if k.timeNano >= since {
+	for i := range w.n {
+		if k := w.at(i); k.timeNano >= since {
 			p[k] = true
 		}
 	}

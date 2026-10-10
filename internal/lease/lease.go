@@ -1582,8 +1582,9 @@ func (e *entry) hasKey() bool {
 // (#145), and only for one its call could have started. With a dir, one
 // Compose labelled with that dir, whatever the attribution: the dir tells
 // another stack of the same project name, and a compose file in another
-// worktree is the call's (#158). Without, one its worktree could have
-// started: a guess's, its own worktree's (entry.guessed); a real key's,
+// worktree is the call's (#158). A worktree's also, dir or not, one its
+// worktree could have started, so a dir the shim got wrong costs it
+// nothing: a guess's, its own worktree's (entry.guessed); a real key's,
 // its own worktree's or an unattributed one, which a reading that drops
 // attribution shows; never another worktree's. A guess binds only its own
 // worktree's either way (key). It is spent on a compose run's one-off,
@@ -1600,8 +1601,10 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 			return false
 		case !now.Before(o.Expires.Add(b.timeout)):
 			return true
-		case o.dir != "":
-			return r.dir != o.dir
+		case o.dir != "" && r.dir == o.dir:
+			return false
+		case o.Worktree == "":
+			return true
 		}
 		return r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree
 	}), r, true)

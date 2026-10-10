@@ -1240,9 +1240,10 @@ func withServiceIn(s *protocol.Snapshot, sv, wt, dir string) *protocol.Snapshot 
 // A compose up whose shim knew Compose's working dir, and whose stack
 // appears after its timeout (a slow pull): its lapsed lease vouches for
 // every service labelled with that dir, manual or a worktree's, real key
-// or guess, until a further timeout, and reserves nothing again. The dir,
-// not the attribution, tells its stack from another of the same project
-// name; a guess still binds only its own worktree's (#158).
+// or guess, until a further timeout, and reserves nothing again. For a
+// manual lease the dir alone tells its stack from another of the same
+// project name; a worktree's also vouches for what it does without a dir,
+// and a guess still binds only its own worktree's (#158).
 func TestALapsedComposeLeaseWithADirVouchesForItsStack(t *testing.T) {
 	const own, other = "/src/one", "/src/two"
 	type service struct{ sv, wt, dir string }
@@ -1264,12 +1265,14 @@ func TestALapsedComposeLeaseWithADirVouchesForItsStack(t *testing.T) {
 		{"two services in one reading",
 			[]reading{{3 * time.Minute, []service{{"web", "w1", own}, {"db", "w1", own}}}}, nil, nil, nil},
 		{"another dir's same-name service", []reading{{3 * time.Minute, []service{{"web", "w1", other}}}},
-			[]string{"web"}, []string{"web"}, []string{"web"}},
+			[]string{"web"}, nil, nil},
 		{"its stack and another dir's",
 			[]reading{{3 * time.Minute, []service{{"x", "w2", other}, {"web", "w1", own}, {"db", "w1", own}}}},
 			[]string{"x"}, []string{"x"}, []string{"x"}},
 		{"no dir label", []reading{{3 * time.Minute, []service{{"web", "w1", ""}}}},
-			[]string{"web"}, []string{"web"}, []string{"web"}},
+			[]string{"web"}, nil, nil},
+		{"another dir's, unattributed", []reading{{3 * time.Minute, []service{{"web", "", other}}}},
+			[]string{"web"}, nil, []string{"web"}},
 		{"a first service gone before the second",
 			[]reading{{3 * time.Minute, []service{{"web", "w1", own}}}, {3*time.Minute + 10*time.Second, []service{{"db", "w1", own}}}},
 			nil, nil, nil},
@@ -1312,6 +1315,24 @@ func TestALapsedComposeLeaseWithADirVouchesForItsStack(t *testing.T) {
 				t.Errorf("%s, %s: a lapsed lease reserves again: %+v", tc.name, key.name, l)
 			}
 		}
+	}
+}
+
+// A worktree's compose up whose shim sent a dir Compose did not label its
+// stack with (an env file's COMPOSE_PATH_SEPARATOR): its lapsed lease still
+// vouches for its own worktree's stack, as with no dir (review round 1).
+func TestALapsedWorktreeComposeLeaseWithAWrongDirVouchesForItsStack(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := appUp
+	up.ComposeDir = "/src/w1/a/compose.yaml;b"
+	b.Check(up, snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap())
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(withServiceIn(withServiceIn(snap(), "web", "w1", "/src/w1/a"), "db", "w1", "/src/w1/a"))
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("ungated %+v, want none", u)
 	}
 }
 

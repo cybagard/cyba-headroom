@@ -1842,6 +1842,33 @@ func TestAStartOfSeveralDatesADeathAtTheFirstReadingThatMissedIt(t *testing.T) {
 	}
 }
 
+// With no events, c2 ran again by the reading that shows it, not by when
+// that reading began: a compose up checked during the reading takes it
+// (#136).
+func TestAStartOfSeveralDatesARestartNoEventSawAtTheReadingThatShowsIt(t *testing.T) {
+	b, c, log, p1, up := p1Started(t)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, 0)) // c2 crashed: gone
+	}
+	c.t = c.t.Add(4 * time.Second)
+	began := c.t
+	c.t = c.t.Add(time.Second)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(time.Second)
+	b.Observe(read(p1(gib/8, gib), began))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
 // c2's start event, after a crash and a reading, finds w2's up for its own
 // project p1 first, which may not bind it: the event leaves it to the
 // reading, which gives it to w1's up, checked since c2 died (#111).
@@ -1906,6 +1933,71 @@ func TestAStartOfSeveralThatLetGoOfItsFirstByNameEndsWithItsLast(t *testing.T) {
 	b.ContainerEvent("die", "c2", "c2", lab)
 	if ls := b.List(); slices.ContainsFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") }) {
 		t.Fatalf("leases = %+v, want the start's ended with c2", ls)
+	}
+}
+
+// c2, once its start let it go to w1's up, is no longer dead in the start:
+// when it dies again and a later up starts it, its start event binds that
+// up, as for any container, though no reading came between (#136).
+func TestAContainerAStartOfSeveralLetGoOfBindsALaterUpAtItsStart(t *testing.T) {
+	b, c, log, p1, up := p1Started(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	first := b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(time.Second)
+	began := c.t
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", lab) // w1's up takes it
+	c.t = c.t.Add(2 * time.Second)
+	b.Observe(read(p1(gib/8, gib), began)) // begun before the start
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == first.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), first.LeaseID)
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab)
+	c.t = c.t.Add(time.Second)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared\" lease="+d.LeaseID) {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// docker start c1 c2 c3, c3 never starting: when ups checked while c1
+// and c2 were dead take both, the start is left bound to nothing, and
+// still ends quietly at its timeout: they appeared (#136).
+func TestAStartOfSeveralThatLetGoOfAllItBoundEndsQuietly(t *testing.T) {
+	b, c, log, p1, up := p1StartedBy(t, policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2 c3", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}, {ID: "c3"}}, CostBytes: 2 * gib, OnEngine: true})
+	ls := b.List()
+	i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") })
+	if i < 0 {
+		t.Fatalf("leases = %+v, want the start's", ls)
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	for _, id := range []string{"c2", "c1"} {
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("die", id, id, lab) // a crash
+		c.t = c.t.Add(time.Second)
+		b.Check(up, p1(gib/8, gib/8), cfg)
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("start", id, id, lab)
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib, gib))
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib, gib))
+	}
+	if strings.Contains(log.String(), "never appeared\" lease="+ls[i].ID) {
+		t.Fatalf("log: %s", log)
 	}
 }
 

@@ -55,12 +55,14 @@ type mcont struct {
 	read                     int       // the last reading it was in
 	multi                    bool      // its call started others too (docker start a b)
 	// guess is the guessed up that started it as its own stack's (a hit),
-	// until its first reading, which decides whether the guess binds it.
+	// until its first reading, which decides whether the guess binds it, or
+	// another call's start, whose lease it is then (lease.go keyed).
 	// taken is set when an open up of its project in its worktree took it at
 	// its start, before the reading (lease.go keyed).
 	guess string
 	taken bool
-	began int // the reading count when it last started
+	began int  // the reading count when it last started
+	miss  bool // a guessed up that missed created it: no lease binds it, so it is ungated (vouched)
 }
 
 // mguess is a guessed up's lease (lease.go entry.guessed): what its
@@ -85,6 +87,10 @@ type model struct {
 	starts   map[string]int    // lease → containers its call started
 	guesses  map[string]*mguess
 	outcomes map[string]int // how often each guessed outcome ran (coverage)
+	// vouched are the stacks (project, worktree) a call that is not a miss
+	// started a container of: as on main, its container's verdict, and its
+	// gated one's for a later service (lease.go gatedProject), stand.
+	vouched  map[stack]bool
 	trace    []string
 	last     time.Time // the last allowed call
 	ticks    int
@@ -159,7 +165,7 @@ func (m *model) start(x *mcont, by string) {
 		x.boundBy = by
 	}
 	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, false, "", 0
-	x.began = m.ticks
+	x.began, x.guess, x.taken = m.ticks, "", false
 	if by != "" {
 		m.starts[by]++
 	}
@@ -348,6 +354,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 				protocol.ComposeServiceLabel: sv, protocol.ComposeConfigHashLabel: "h", protocol.ComposeWorkingDirLabel: "/src/" + wt})
 			// A miss's container is ungated, as with no key.
 			x.firstGated = guess < 0 || guess == guessHit
+			x.miss = !x.firstGated
 		}
 		if !x.running {
 			m.start(x, d.LeaseID)
@@ -356,6 +363,13 @@ func (m *model) composeUp(st stack, guess int) bool {
 				if !upOpen {
 					x.boundBy = "" // not the guess's until a reading says so
 				}
+			}
+			if guess == guessMiss || guess == guessMissOther {
+				if !m.vouched[stack{project, wt}] {
+					x.boundBy = "" // as with no key
+				}
+			} else {
+				m.vouched[stack{project, wt}] = true
 			}
 			m.step("  started %s", x.id)
 		}
@@ -425,6 +439,9 @@ func (m *model) dockerStart(xs ...*mcont) bool {
 	for _, x := range xs {
 		m.start(x, by)
 		x.multi = len(xs) > 1
+		if x.project != "" {
+			m.vouched[stack{x.project, x.wt}] = true
+		}
 	}
 	return true
 }
@@ -566,6 +583,8 @@ func (m *model) invariants() {
 			m.fail("false ungated: %s was started by a checked call", x.id)
 		case x.raw && !ungated[x.id] && m.c.t.Sub(x.startedAt) >= 5*time.Second:
 			m.fail("missing ungated: %s started past the shim", x.id)
+		case x.miss && !m.vouched[stack{x.project, x.wt}] && !ungated[x.id] && m.c.t.Sub(x.startedAt) >= 5*time.Second:
+			m.fail("miss not ungated: %s was started by a guessed up that missed", x.id)
 		}
 		if x.startedBy != "" && x.cur < target && m.c.t.Sub(x.startedAt) < 2*time.Minute {
 			need += target - x.cur
@@ -762,7 +781,7 @@ func playCounting(t *testing.T, ops []op) (f *failure, outcomes map[string]int) 
 	outcomes = map[string]int{}
 	b, c, log := book(t)
 	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
-		open: openIssues(), guesses: map[string]*mguess{}, outcomes: outcomes}
+		open: openIssues(), guesses: map[string]*mguess{}, outcomes: outcomes, vouched: map[stack]bool{}}
 	defer func() {
 		if r := recover(); r != nil {
 			ff, ok := r.(failure)

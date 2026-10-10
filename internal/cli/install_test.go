@@ -378,3 +378,111 @@ func TestUninstallRemovesLinksToARelativeBin(t *testing.T) {
 		t.Fatalf("shims stayed: %v", err)
 	}
 }
+
+// brewLayout makes a fake Homebrew prefix in a short temp dir: the formula's
+// binary in the Cellar, and prefix/bin/headroom linking to it (#181). It
+// returns the link and the binary it resolves to.
+func brewLayout(t *testing.T, data []byte) (link, target string) {
+	t.Helper()
+	prefix, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(prefix) })
+	target = filepath.Join(prefix, "Cellar", "headroom", "0.1.0", "bin", "headroom")
+	link = filepath.Join(prefix, "bin", "headroom")
+	for _, d := range []string{filepath.Dir(target), filepath.Dir(link)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(target, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "Cellar", "headroom", "0.1.0", "bin", "headroom"), link); err != nil {
+		t.Fatal(err)
+	}
+	return link, target
+}
+
+// newBrewFixture is `$(brew --prefix)/bin/headroom install --bin <link>`:
+// the running binary is the Cellar one the link resolves to.
+func newBrewFixture(t *testing.T) (f *installFixture, link, target string) {
+	t.Helper()
+	f = newInstallFixture(t)
+	link, target = brewLayout(t, f.exeData)
+	f.in.exe, f.in.bin, f.in.binGiven = target, link, true
+	return f, link, target
+}
+
+// A Homebrew install makes no copy: the agent runs the stable link, which
+// survives `brew upgrade` (#181).
+func TestInstallWithABrewLinkMakesNoCopy(t *testing.T) {
+	f, link, target := newBrewFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a link: %v %v", link, fi, err)
+	}
+	if b, err := os.ReadFile(target); err != nil || !bytes.Equal(b, f.exeData) {
+		t.Fatalf("Cellar binary: %q %v", b, err)
+	}
+	if p, _ := os.ReadFile(f.plistPath()); !strings.Contains(string(p), "<string>"+link+"</string>") {
+		t.Fatalf("the agent does not run %s:\n%s", link, p)
+	}
+	if got, err := os.Readlink(filepath.Join(f.in.shimDir, "docker")); err != nil || got != link {
+		t.Fatalf("docker -> %q, %v", got, err)
+	}
+}
+
+// Uninstall removes only a binary install copied: Homebrew's link and the
+// formula's binary stay; the agent and the shims go (#181).
+func TestUninstallKeepsABrewLink(t *testing.T) {
+	for name, binGiven := range map[string]bool{"with --bin": true, "without --bin": false} {
+		t.Run(name, func(t *testing.T) {
+			f, link, target := newBrewFixture(t)
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("install: exit %d: %s", code, f.errb.String())
+			}
+			if !binGiven {
+				f.in.bin, f.in.binGiven = filepath.Join(f.home, ".local", "bin", "headroom"), false
+			}
+			f.out.Reset()
+			if code := f.in.uninstall(context.Background()); code != 0 {
+				t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+			}
+			if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("link removed: %v %v", fi, err)
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("Cellar binary removed: %v", err)
+			}
+			if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+				t.Errorf("plist left: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(f.in.shimDir, "docker")); !os.IsNotExist(err) {
+				t.Errorf("shims stayed: %v", err)
+			}
+			if !strings.Contains(f.out.String(), link) {
+				t.Errorf("output does not say %s was kept:\n%s", link, f.out.String())
+			}
+		})
+	}
+}
+
+// A plain install copies the binary to ~/.local/bin; uninstall run from
+// that copy, as it is once installed, still removes it (#181).
+func TestUninstallFromTheCopyRemovesIt(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.in.exe = f.in.bin // `~/.local/bin/headroom uninstall`
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Lstat(filepath.Join(f.home, ".local", "bin", "headroom")); !os.IsNotExist(err) {
+		t.Fatalf("copy left: %v", err)
+	}
+}

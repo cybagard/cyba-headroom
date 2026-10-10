@@ -81,8 +81,10 @@ type Book struct {
 	seen map[string]seen
 	// missed counts, for each container or VM in prev or bound by an open
 	// lease, the fresh readings in a row it was missing from; a die sets it
-	// to gone (Book.gone).
-	missed map[string]int
+	// to gone (Book.gone). missedSince is when the first of those readings
+	// began: when it died, for Book.markDead.
+	missed      map[string]int
+	missedSince map[string]time.Time
 	// verdicts say, for each resource seen within the lease timeout, how it
 	// started (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
@@ -197,7 +199,7 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 	var r [3]byte
 	_, _ = rand.Read(r[:])
 	return &Book{timeout: timeout, now: now, log: log, run: hex.EncodeToString(r[:]), alive: processAlive,
-		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, seen: map[string]seen{}, missed: map[string]int{}}
+		verdicts: map[string]*verdict{}, prev: map[string]bool{}, based: map[string]bool{}, seen: map[string]seen{}, missed: map[string]int{}, missedSince: map[string]time.Time{}}
 }
 
 // dockerSettle is how long after the Docker engine comes back its
@@ -725,7 +727,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return !now.Before(e.Expires.Add(b.timeout)) })
 	// What was there, in the last reading or bound by an open lease, and is
 	// missing from this one: gone only after goneAfter readings (Book.gone).
-	missed := map[string]int{}
+	missed, since := map[string]int{}, map[string]time.Time{}
 	count := func(k string) {
 		n := b.missed[k]
 		switch _, ok := present[k]; {
@@ -738,6 +740,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			n = min(n+1, goneAfter(k)) // a failed read keeps the count
 		}
 		missed[k] = n
+		switch at, ok := b.missedSince[k]; {
+		case n == 0:
+		case b.missed[k] > 0 && ok:
+			since[k] = at
+		case !began.IsZero():
+			since[k] = began
+		default:
+			since[k] = now
+		}
 	}
 	for k := range b.prev {
 		count(k)
@@ -747,7 +758,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			count(k)
 		}
 	}
-	b.missed = missed
+	b.missed, b.missedSince = missed, since
 	next := map[string]bool{}
 	for _, r := range res {
 		next[r.key] = true
@@ -806,7 +817,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	for _, e := range b.open {
 		for k := range e.bound {
 			if b.gone(k) {
-				b.markDead(k, now)
+				b.markDead(k, cmp.Or(b.missedSince[k], now))
 			}
 		}
 	}

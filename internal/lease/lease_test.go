@@ -1505,6 +1505,68 @@ func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
 	}
 }
 
+// p1Started is the book of TestAContainerThatDiedLeavesItsStartOfSeveral
+// as c2 runs again under docker start c1 c2: p1 reads c1 and c2 in w1's
+// compose project p1, and up is w1's compose up of p1.
+func p1Started(t *testing.T) (b *lease.Book, c *clock, log *bytes.Buffer, p1 func(mem1, mem2 uint64) *protocol.Snapshot, up policy.Request) {
+	b, c, log = book(t)
+	p1 = func(mem1, mem2 uint64) *protocol.Snapshot {
+		s := snap()
+		if mem1 > 0 {
+			withComposeProject(s, "c1", "w1", "p1", mem1)
+		}
+		if mem2 > 0 {
+			withComposeProject(s, "c2", "w1", "p1", mem2)
+		}
+		return read(s, c.t)
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	up = policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p p1 up -d", CostBytes: 2 * gib, Target: "p1", OnEngine: true}
+	b.Observe(read(snap(), c.t))
+	b.Check(up, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib, gib))
+	for _, id := range []string{"c1", "c2"} {
+		b.ContainerEvent("stop", id, id, lab)
+		b.ContainerEvent("die", id, id, lab)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(0, 0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib/8))
+	up.CostBytes = gib
+	return b, c, log, p1, up
+}
+
+// With no events, c2 died when the first reading missed it, not when the
+// second made it gone: a compose up checked between the two that starts it
+// takes it (#111).
+func TestAStartOfSeveralDatesADeathAtTheFirstReadingThatMissedIt(t *testing.T) {
+	b, c, log, p1, up := p1Started(t)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, 0)) // c2 crashed: missing once
+	c.t = c.t.Add(time.Second)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(p1(gib/8, 0)) // gone
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
 // startTwo is docker start c1 c2, both resolved.
 var startTwo = policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
 	Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}

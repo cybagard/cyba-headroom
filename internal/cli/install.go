@@ -269,7 +269,7 @@ func (in *installer) uninstall(ctx context.Context) int {
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
 	}
-	var shims []string // the shim links removed
+	var shims, brewShims []string // the shim links removed, and Homebrew's kept
 	if in.shimDir != "" {
 		bin := owned
 		if bin == "" {
@@ -282,8 +282,12 @@ func (in *installer) uninstall(ctx context.Context) int {
 		if dir, err := config.Dir(in.getenv); err == nil {
 			own = in.shimDir == config.Defaults(dir).ShimDir
 		}
+		// With both agents, Homebrew's daemon may already hold the lock and
+		// have linked the shims to its own path, also while ours stopped
+		// (--wait): those links stay, or it would run ungated (#192).
+		both := brewPlist(in.home) != ""
 		var err error
-		if shims, err = unlinkShims(in.shimDir, bin, own); err != nil {
+		if shims, brewShims, err = unlinkShims(in.shimDir, bin, own, both); err != nil {
 			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
 		}
 	}
@@ -314,6 +318,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 	fmt.Fprintln(in.out, "kept:")
 	if kept != "" {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
+	}
+	if len(brewShims) > 0 {
+		fmt.Fprintf(in.out, "  shims    %s (%s), which lead to another headroom, such as Homebrew's\n", in.shimDir, strings.Join(brewShims, ", "))
 	}
 	if dir, err := config.Dir(in.getenv); err == nil {
 		fmt.Fprintf(in.out, "  config   %s\n  samples  %s\n", dir, filepath.Join(dir, "samples"))

@@ -85,21 +85,29 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 
 // unlinkShims removes the shim links in dir that lead to a headroom binary,
 // and, if removeDir (dir is headroom's own), dir itself once it is empty.
-// removed names the links it removed.
-func unlinkShims(dir, bin string, removeDir bool) (removed []string, err error) {
+// With onlyBin, it removes only the links to bin itself and keeps those to
+// any other headroom binary: another daemon's. removed and kept name the
+// links.
+func unlinkShims(dir, bin string, removeDir, onlyBin bool) (removed, kept []string, err error) {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
-		if target, err := os.Readlink(p); err == nil && ownLink(p, target, bin) {
-			if err := os.Remove(p); err != nil {
-				return removed, err
-			}
-			removed = append(removed, n)
+		target, err := os.Readlink(p)
+		switch {
+		case err != nil || !ownLink(p, target, bin):
+			continue
+		case onlyBin && target != bin:
+			kept = append(kept, n)
+			continue
 		}
+		if err := os.Remove(p); err != nil {
+			return removed, kept, err
+		}
+		removed = append(removed, n)
 	}
 	if entries, err := os.ReadDir(dir); removeDir && err == nil && len(entries) == 0 {
-		return removed, os.Remove(dir)
+		return removed, kept, os.Remove(dir)
 	}
-	return removed, nil
+	return removed, kept, nil
 }
 
 // ownLink reports whether the link at p, to target, is headroom's to

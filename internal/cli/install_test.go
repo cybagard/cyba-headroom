@@ -18,6 +18,7 @@ type fakeAgent struct {
 	calls    []string
 	loadErr  error
 	onLoad   func() // e.g. bring the fake daemon up
+	onUnload func() // e.g. another daemon takes over
 	unloaded bool
 }
 
@@ -38,6 +39,9 @@ func (f *fakeAgent) Load(_ context.Context, plist string) error {
 func (f *fakeAgent) Unload(context.Context) error {
 	f.calls = append(f.calls, "unload")
 	f.loaded, f.unloaded, f.pid = false, true, 0
+	if f.onUnload != nil {
+		f.onUnload()
+	}
 	return nil
 }
 
@@ -665,6 +669,62 @@ func TestUninstallWithBothAgentsRemovesHeadrooms(t *testing.T) {
 				t.Error("agent not unloaded")
 			}
 		})
+	}
+}
+
+// With both agents, Homebrew's daemon links the shims to its opt path once
+// it holds the lock: before uninstall (it won the lock at login) or while
+// ours stops (--wait). Uninstall keeps those links and says so; removing
+// them would leave that daemon running ungated (#192).
+func TestUninstallWithBothAgentsKeepsHomebrewsShims(t *testing.T) {
+	for _, bin := range []string{"copy", "brew link"} {
+		for _, when := range []string{"before", "while ours stops"} {
+			t.Run(bin+"/"+when, func(t *testing.T) {
+				var f *installFixture
+				var link string
+				if bin == "brew link" { // install --bin <brew link>
+					f, link, _ = newBrewFixture(t)
+				} else {
+					f = newInstallFixture(t)
+					link, _ = brewLayout(t, f.exeData)
+				}
+				if code := f.in.install(context.Background()); code != 0 {
+					t.Fatalf("install: exit %d: %s", code, f.errb.String())
+				}
+				f.in.bin, f.in.binGiven = filepath.Join(f.home, ".local", "bin", "headroom"), false
+				f.writeBrewPlist(t, "homebrew.mxcl.headroom.plist")
+				opt := filepath.Join(filepath.Dir(filepath.Dir(link)), "opt", "headroom", "bin", "headroom")
+				if err := os.MkdirAll(filepath.Dir(opt), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "..", "..", "Cellar", "headroom", "0.1.0", "bin", "headroom"), opt); err != nil {
+					t.Fatal(err)
+				}
+				brewLinks := func() {
+					if _, err := linkShims(f.in.shimDir, opt); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if when == "before" {
+					brewLinks()
+				} else {
+					f.agent.onUnload = brewLinks
+				}
+				if code := f.in.uninstall(context.Background()); code != 0 {
+					t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+				}
+				for _, n := range []string{"docker", "podman", "tart"} {
+					if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != opt {
+						t.Errorf("Homebrew's %s shim: -> %q, %v", n, got, err)
+					}
+				}
+				_, out, _ := strings.Cut(f.out.String(), "removed from launchd.")
+				removed, kept, _ := strings.Cut(out, "kept:")
+				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" (docker, podman, tart)") {
+					t.Errorf("output does not list Homebrew's shims as kept:\n%s", out)
+				}
+			})
+		}
 	}
 }
 

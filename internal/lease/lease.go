@@ -774,18 +774,25 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	// A start of several's container that died, back in a reading begun
 	// after: a lease checked while it was dead that it binds takes it, else
-	// it is the start's again (Book.markDead).
+	// it is the start's again (Book.markDead). A start event dated its
+	// restart even when no reading missed it, or when a reading begun
+	// before the event showed it: prev holds it then.
 	for _, r := range res {
 		from, d := b.deadIn(r.key)
 		if from == nil || b.seen[r.key].at.After(began) || !readable(s, kindOf(r.key)) {
 			continue
 		}
 		delete(from.dead, r.key)
-		if d.last().ran.IsZero() {
+		evented := !d.last().ran.IsZero()
+		if !evented {
 			d.last().ran = now // no event saw it: by this reading
 		}
-		if e := b.binder(b.unmark(r)); !b.prev[r.key] && e != nil && d.takenBy(e) {
+		r = b.unmark(r)
+		if e := b.binder(r); (evented || !b.prev[r.key]) && e != nil && d.takenBy(e) {
 			from.letGo(r.key)
+			e.bind(r)
+			b.judge(r, gated, now)
+			b.boundBy(r, e)
 		}
 	}
 	// A start keyed by its container's ID binds it whenever it is there,

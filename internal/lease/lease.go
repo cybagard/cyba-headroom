@@ -20,13 +20,15 @@
 // call with no project (podman compose without -p, or a file on stdin the
 // shim cannot name), or a start whose target follows an option the shim
 // does not know. A start is keyed by the IDs of the containers Docker
-// resolved that it starts, and by its first target's name when Docker did
-// not resolve it; one whose first target runs, is an open lease's or is
-// missing, and whose other targets Docker did not resolve, has neither
-// (docker start a b, a running, b unresolved). A compose project
-// the shim guessed, Compose's config having failed (#84), binds only
-// containers its own worktree's reading shows, and when it binds none,
-// ends as one with no key (entry.guessed).
+// resolved that it starts (entry.containerIDs), and by its first target
+// as given, a name or an ID, when Docker did not resolve it
+// (entry.target). It has neither when its first target was resolved or
+// missing and Docker resolved none of the targets it starts (docker start
+// a b, a running, b unresolved). It does not start those that run, or
+// that a worktree's open lease holds or waits for (Book.covered). A
+// compose project the shim guessed, Compose's config having failed (#84),
+// binds only containers its own worktree's reading shows, and when it
+// binds none, ends as one with no key (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -156,9 +158,9 @@ type entry struct {
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
 	// resolved them. name: a run's or create's --name, for a client that
 	// sends it without Labelled (the shim labels every run and create it
-	// parses, and key tries the label first). target: a start's container
-	// as given, when Docker could not resolve it, or a tart run's VM. A
-	// compose lease's key is its project.
+	// parses; a labelled lease is keyed by its label alone). target: a
+	// start's container as given, when Docker could not resolve it, or a
+	// tart run's VM. A compose lease's key is its project.
 	labelled bool
 	// oneoff is set for a compose run's lease: it binds the one one-off
 	// container Compose labels as such (hasOneoff once it has), and the

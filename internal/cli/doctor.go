@@ -175,7 +175,12 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 			via = filepath.Dir(first)
 		}
 	}
-	const restart = ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after `headroom install`)"
+	// headroom install refuses while Homebrew's agent is there (#185).
+	start := "`headroom install`"
+	if home := getenv("HOME"); home != "" && brewPlist(home) != "" {
+		start = "`brew services start headroom`"
+	}
+	restart := ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after " + start + ")"
 	switch {
 	case len(wrong) > 0:
 		return finding{mark: fail, name: "PATH", detail: strings.Join(wrong, "; ") + restart, more: more}

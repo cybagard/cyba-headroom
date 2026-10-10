@@ -615,3 +615,36 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 		})
 	}
 }
+
+// With Homebrew's LaunchAgent in place, install refuses, so the PATH hint
+// names brew services instead (#185).
+func TestDoctorPATHHintNamesWhatStartsTheDaemon(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plist     string
+		want, not string
+	}{
+		"no agent": {want: "(after `headroom install`)"},
+		"homebrew": {plist: "sh.brew.headroom.plist", want: "(after `brew services start headroom`)", not: "headroom install"},
+		"legacy":   {plist: "homebrew.mxcl.headroom.plist", want: "(after `brew services start headroom`)", not: "headroom install"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			r.env["HOME"] = filepath.Join(r.cfg, "home")
+			r.env["PATH"] = r.tools + ":/usr/bin"
+			if tc.plist != "" {
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", tc.plist)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, out := r.run()
+			wantMark(t, out, "PATH", "✗", "headroom run -- <agent>", tc.want)
+			if l := doctorLine(t, out, "PATH"); tc.not != "" && strings.Contains(l, tc.not) {
+				t.Errorf("PATH line %q says %q", l, tc.not)
+			}
+		})
+	}
+}

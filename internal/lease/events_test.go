@@ -641,3 +641,30 @@ func TestAGatedContainerRestartedUngatedThatDiesDuringTheReadingKeepsItsVerdict(
 		t.Errorf("ungated = %+v, want none", u)
 	}
 }
+
+// x1's die and its second start come only when the events stream
+// reconnects, replayed and dated then (#146). The die that follows ends
+// docker start x, with no "never appeared" (#131's F1, which lost them).
+func TestAReplayedDieAndStartEndTheStartThatRanAgain(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(named("w1", "x", "alpine"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "x1", "x", nil)
+	c.t = t0.Add(3 * time.Second)
+	b.Check(startOf("w1", "x"), snap(), cfg)
+	c.t = t0.Add(5 * time.Second) // the reconnect
+	b.ContainerEvent("die", "x1", "x", nil)
+	b.ContainerEvent("start", "x1", "x", nil)
+	b.ContainerEvent("die", "x1", "x", nil)
+	c.t = t0.Add(6 * time.Second)
+	b.Observe(read(snap(), t0.Add(5500*time.Millisecond)))
+	if ls := b.List(); len(ls) != 0 {
+		t.Errorf("leases = %+v, want docker start x bound to x1 and ended", ls)
+	}
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Errorf("warned never appeared: %s", log)
+	}
+}

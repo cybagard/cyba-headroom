@@ -327,19 +327,56 @@ func TestInspectResolvesAContainer(t *testing.T) {
 
 func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 	sock, _ := engine(t, map[string]string{
-		docker.EventsPath: `{"Type":"container","Action":"start","Actor":{"ID":"abc","Attributes":{"name":"quick","dev.headroom.lease":"lease-1-2"}}}
-{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"name":"quick","exitCode":"0"}}}
+		docker.EventsPath: `{"Type":"container","Action":"start","Actor":{"ID":"abc","Attributes":{"name":"quick","dev.headroom.lease":"lease-1-2"}},"time":1700000000,"timeNano":1700000000000000001}
+{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"name":"quick","exitCode":"0"}},"time":1700000002}
+{"Type":"container","Action":"die","Actor":{"ID":"def","Attributes":{"name":"old"}}}
 `,
 	})
 	var got []string
-	err := docker.New(sock, nil).Events(context.Background(), func(action, id string, attrs map[string]string) {
-		got = append(got, action+" "+id+" "+attrs["name"]+" "+attrs["dev.headroom.lease"])
+	err := docker.New(sock, nil).Events(context.Background(), 0, func(action, id string, timeNano int64, attrs map[string]string) {
+		got = append(got, fmt.Sprint(action, " ", id, " ", attrs["name"], " ", attrs["dev.headroom.lease"], " ", timeNano))
 	})
-	if want := []string{"start abc quick lease-1-2", "die abc quick "}; fmt.Sprint(got) != fmt.Sprint(want) {
+	// A first stream asks for no since; an event's time is its timeNano,
+	// else its time in seconds, else 0 (#146).
+	want := []string{"start abc quick lease-1-2 1700000000000000001", "die abc quick  1700000002000000000", "die def old  0"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)
 	}
 	if err == nil {
 		t.Fatal("a stream that ends must say so: the caller reconnects")
+	}
+}
+
+// A reconnect asks for the events since a time, as Docker reads it:
+// seconds, and nine digits of nanoseconds (#146).
+func TestEventsAskForThoseSinceATime(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		docker.EventsPath + "&since=1700000000.050000007": `{"Type":"container","Action":"start","Actor":{"ID":"abc"},"timeNano":1700000000050000007}
+`,
+	})
+	var got []string
+	_ = docker.New(sock, nil).Events(context.Background(), 1700000000050000007, func(action, id string, _ int64, _ map[string]string) {
+		got = append(got, action+" "+id)
+	})
+	if fmt.Sprint(got) != "[start abc]" {
+		t.Fatalf("events = %q, want the stream since 1700000000.050000007", got)
+	}
+}
+
+// Docker refusing the since is ErrBadSince, for the caller to ask again
+// without it; a refusal of a stream with no since is not (#146).
+func TestEventsSinceRefusedIsErrBadSince(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		docker.EventsPath + "&since=1700000000.000000000": "!400",
+		docker.EventsPath: "!400",
+	})
+	src := docker.New(sock, nil)
+	noop := func(string, string, int64, map[string]string) {}
+	if err := src.Events(context.Background(), 1700000000000000000, noop); !errors.Is(err, docker.ErrBadSince) {
+		t.Fatalf("err = %v, want ErrBadSince", err)
+	}
+	if err := src.Events(context.Background(), 0, noop); err == nil || errors.Is(err, docker.ErrBadSince) {
+		t.Fatalf("err = %v, want an error that is not ErrBadSince", err)
 	}
 }
 

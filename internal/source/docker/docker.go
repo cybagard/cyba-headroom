@@ -4,6 +4,7 @@
 package docker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -294,16 +295,26 @@ func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]st
 // EventsPath streams container starts, stops and exits (#67).
 var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die"],"type":["container"]}`}}.Encode()
 
+// ErrBadSince is Docker refusing an events stream's since: the caller asks
+// again without it (#146).
+var ErrBadSince = errors.New("docker: events: since refused")
+
 // Events streams Docker's container start and die events to fn, with the
-// container's ID and attributes (its labels, and name), until ctx ends or
-// the stream drops: it always returns an error, and the caller reconnects.
-// Events are what a 5 s reading misses: a container that lives between
-// two readings.
-func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs map[string]string)) error {
+// container's ID, the event's time in Unix nanoseconds (0 if Docker gave
+// none) and the container's attributes (its labels, and name), until ctx
+// ends or the stream drops: it always returns an error, and the caller
+// reconnects. Events are what a 5 s reading misses: a container that lives
+// between two readings. With since > 0, Docker first replays the events
+// from since on, that one included, from the few it keeps (#146).
+func (s *Source) Events(ctx context.Context, since int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
 	if s.socket == "" {
 		return errors.New("docker: socket unknown")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+EventsPath, nil)
+	path := EventsPath
+	if since > 0 {
+		path += fmt.Sprintf("&since=%d.%09d", since/1e9, since%1e9)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
 		return err
 	}
@@ -312,6 +323,9 @@ func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs ma
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusBadRequest && since > 0 {
+		return fmt.Errorf("%w: %s", ErrBadSince, resp.Status)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET /events: %s", resp.Status)
 	}
@@ -324,12 +338,14 @@ func (s *Source) Events(ctx context.Context, fn func(action, id string, attrs ma
 				ID         string
 				Attributes map[string]string
 			}
+			Time     int64 `json:"time"`
+			TimeNano int64 `json:"timeNano"`
 		}
 		if err := dec.Decode(&ev); err != nil {
 			return fmt.Errorf("docker: events: %w", err)
 		}
 		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die") {
-			fn(ev.Action, ev.Actor.ID, ev.Actor.Attributes)
+			fn(ev.Action, ev.Actor.ID, cmp.Or(ev.TimeNano, ev.Time*1e9), ev.Actor.Attributes)
 		}
 	}
 }

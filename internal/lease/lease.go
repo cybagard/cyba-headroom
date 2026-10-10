@@ -13,11 +13,17 @@
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
 // cost, when they are gone, or at its timeout; one that never saw its
-// resource is logged as expired. A lease with no key (a headroom check
-// sends none) never binds: a worktree's holds its cost to its timeout. A
-// compose project the shim guessed, Compose's config having failed (#84),
-// binds only containers its own worktree's reading shows, and when it binds
-// none, ends as one with no key (entry.guessed).
+// resource is logged as expired. A lease with no key (entry.hasKey), its
+// call having named nothing a new resource could match, never binds: a
+// worktree's holds its cost to its timeout. A headroom check sends no key,
+// nor does the shim for a call whose resource it cannot name: for example
+// a compose call with no project (podman compose without -p, or a file on
+// stdin the shim cannot name), a start whose target follows an option the
+// shim does not know, or a start whose containers Docker resolved all run
+// or are an open lease's (docker start a b, a running). A compose project
+// the shim guessed, Compose's config having failed (#84), binds only
+// containers its own worktree's reading shows, and when it binds none,
+// ends as one with no key (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -145,9 +151,11 @@ type entry struct {
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
-	// resolved them. name: a run's --name, for a call the shim did not label.
-	// target: a start's container as given, when Docker could not resolve
-	// it, or a tart run's VM. A compose lease's key is its project.
+	// resolved them. name: a run's or create's --name, for a client that
+	// sends it without Labelled (the shim labels every run and create it
+	// parses, and key tries the label first). target: a start's container
+	// as given, when Docker could not resolve it, or a tart run's VM. A
+	// compose lease's key is its project.
 	labelled bool
 	// oneoff is set for a compose run's lease: it binds the one one-off
 	// container Compose labels as such (hasOneoff once it has), and the

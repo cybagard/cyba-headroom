@@ -1085,7 +1085,7 @@ func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {
 	}
 }
 
-// TestTheLeaseModelOnAGuessTiedAtItsStart plays #150's F1 (its probe Q1):
+// TestTheLeaseModelOnAGuessOfAnotherDirAtItsStart plays #150's F1 (its probe Q1):
 // a guessed hit starts containers while an up of their project is open in
 // its worktree, and another worktree's open guess names that project. That
 // guess's dir is not the one Compose labels them with, so the start event
@@ -1093,7 +1093,7 @@ func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {
 // p2 starts c1 and c2; a minute on, w1's guessed up names p2; w2's idle up
 // of p2 holds c1 and c2; they stop; w2's guessed hit of p2 starts them
 // again.
-func TestTheLeaseModelOnAGuessTiedAtItsStart(t *testing.T) {
+func TestTheLeaseModelOnAGuessOfAnotherDirAtItsStart(t *testing.T) {
 	m := newModel(t)
 	m.runOK(
 		op{2, 177, 196}, // w2: compose up p2 starts c1 and c2

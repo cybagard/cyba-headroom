@@ -2948,3 +2948,44 @@ func TestAComposeLeaseBindsItsStackOutsideItsDir(t *testing.T) {
 		}
 	}
 }
+
+// w2's up of app is open when w1's guessed up of app starts a container in
+// w1's dir (#109 review B1): at its start event the dir does not give it to
+// w2's up, whose dir it is not, so the reading gives it to w1's guess and
+// w2's up keeps its reservation.
+func TestAGuessesContainerInItsDirLeavesAnotherUpItsReservation(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w2", "/src/b"), snap(), cfg)
+	g := guessed("w1", "app")
+	g.ComposeDir = "/src/a"
+	b.Check(g, snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, "w1"), c.t))
+	got := map[string]uint64{}
+	for _, l := range b.List() {
+		got[l.Worktree] = l.Bytes
+	}
+	if want := map[string]uint64{"w1": gib - gib/2, "w2": 2 * gib}; !maps.Equal(got, want) {
+		t.Fatalf("leases hold %v bytes, want w2's up's 2 GiB and w1's guess less a1: %v", got, want)
+	}
+}
+
+// A container labelled by hand with w1's project name and no working dir
+// binds w1's up at its start event no more than at a reading (#109): w1's
+// up keeps its reservation.
+func TestAHandLabelledContainerBindsNoComposeLeaseAtItsStart(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/a"), snap(), cfg)
+	labels := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "x1", "x1", labels)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "x1", Name: "x1", MemoryBytes: gib, Labels: labels}, "w2"), c.t))
+	if got := reserved(b); got != 2*gib {
+		t.Fatalf("reserved = %d MiB, want w1's up's 2048 MiB: %+v", got>>20, b.List())
+	}
+}

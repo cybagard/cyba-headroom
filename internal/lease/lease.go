@@ -1478,8 +1478,9 @@ func rank(e *entry, r resource) int {
 }
 
 // tied reports whether another worktree's lease in es keys r as surely as
-// e does, open, its dir too (keyed): only r's attribution can tell them
-// apart.
+// e does, open: only r's attribution can tell them apart. The dir breaks
+// the tie only for e (keyed): when o's dir is r's, o may be a guess, which
+// keyed cannot pick at an event (#109).
 func tied(es []*entry, r resource, e *entry) bool {
 	return slices.ContainsFunc(es, func(o *entry) bool {
 		// A manual call's lease reserves nothing: the worktree's wins, as
@@ -1490,7 +1491,7 @@ func tied(es []*entry, r resource, e *entry) bool {
 			a.worktree = o.Worktree
 		}
 		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.binds(a, true, true) && rank(o, r) == rank(e, r) &&
-			o.inDir(r) == e.inDir(r)
+			(o.inDir(r) || !e.inDir(r))
 	})
 }
 

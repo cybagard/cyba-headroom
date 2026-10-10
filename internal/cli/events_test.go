@@ -156,6 +156,22 @@ func TestFollowEventsARefusedSinceForgetsNothing(t *testing.T) {
 	}
 }
 
+// Docker logs x1's start as the stream opens, and sends it in the replay
+// and again live: moby publishes an event after it unlocks its ring. It is
+// delivered once (#165).
+func TestFollowEventsDeliversAnEventSentTwiceInAStreamOnce(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"kill", "Y", "y", 98*sec + 400e6}}},
+		fakeStream{events: []fakeEvent{
+			{"kill", "Y", "y", 98*sec + 400e6},
+			{"start", "x1", "x", 98*sec + 500e6},
+			{"start", "x1", "x", 98*sec + 500e6}}},
+		fakeStream{})
+	if want := []string{"kill Y y", "start x1 x"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}
+
 // Events Docker gave no time are never taken for one delivered (#165).
 func TestFollowEventsDeliversEveryEventWithNoTime(t *testing.T) {
 	got, _, _ := follow(

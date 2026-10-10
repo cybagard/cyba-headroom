@@ -24,9 +24,10 @@ type Eventer interface {
 // an event is dropped only when it was delivered already: those delivered
 // from that second on are pinned, by their time, container and action,
 // when the stream opens, so a newer event the replay brings first forgets
-// none of them (#165). Docker refusing the since, it is dropped. Every
-// event, replayed or live, reaches fn when it comes, and the book dates it
-// then: the Docker VM's clock can lag the host's.
+// none of them, and one the stream sends twice is in the window (#165).
+// Docker refusing the since, it is dropped. Every event, replayed or live,
+// reaches fn when it comes, and the book dates it then: the Docker VM's
+// clock can lag the host's.
 func followEvents(ctx context.Context, src Eventer, fn func(action, id, name string, labels map[string]string), wait func(context.Context, time.Duration)) {
 	const maxWait = 30 * time.Second
 	backoff := time.Second
@@ -39,7 +40,7 @@ func followEvents(ctx context.Context, src Eventer, fn func(action, id, name str
 		err := src.Events(ctx, since, func(action, id string, timeNano int64, attrs map[string]string) {
 			if timeNano > 0 {
 				k := eventKey{timeNano, id, action}
-				if pinned[k] {
+				if pinned[k] || w.has(k) {
 					return // replayed
 				}
 				newest = max(newest, timeNano)
@@ -71,10 +72,11 @@ type eventKey struct {
 
 // window is what followEvents delivered from a second before the newest
 // on, as far back as a reconnect replays, in the order it was delivered:
-// a ring of n keys from head (#165).
+// a ring of n keys from head, and the same keys as a set (#165).
 type window struct {
 	ring    []eventKey
 	head, n int
+	kept    map[eventKey]bool
 }
 
 // add keeps k if it is from a second before newest on, and forgets the
@@ -92,13 +94,21 @@ func (w *window) add(k eventKey, newest int64) {
 		}
 		w.ring[(w.head+w.n)%len(w.ring)] = k
 		w.n++
+		if w.kept == nil {
+			w.kept = map[eventKey]bool{}
+		}
+		w.kept[k] = true
 	}
 	for w.n > 0 && w.at(0).timeNano < from {
+		delete(w.kept, w.at(0))
 		w.ring[w.head] = eventKey{}
 		w.head = (w.head + 1) % len(w.ring)
 		w.n--
 	}
 }
+
+// has is whether k is kept.
+func (w *window) has(k eventKey) bool { return w.kept[k] }
 
 // at is the i-th key kept.
 func (w *window) at(i int) eventKey { return w.ring[(w.head+i)%len(w.ring)] }

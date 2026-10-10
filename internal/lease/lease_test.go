@@ -1440,3 +1440,301 @@ func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
 	}
 }
+
+// docker start c1 c2 covers starting each once: c2 died while its lease
+// waits on c1, so a compose up checked since that starts it again takes it,
+// and its use counts against the up's lease, not the start's (#111).
+func TestAContainerThatDiedLeavesItsStartOfSeveral(t *testing.T) {
+	b, c, log := book(t)
+	p1 := func(mem1, mem2 uint64) *protocol.Snapshot {
+		s := snap()
+		if mem1 > 0 {
+			withComposeProject(s, "c1", "w1", "p1", mem1)
+		}
+		if mem2 > 0 {
+			withComposeProject(s, "c2", "w1", "p1", mem2)
+		}
+		return read(s, c.t)
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p p1 up -d", CostBytes: 2 * gib, Target: "p1", OnEngine: true}
+	b.Observe(read(snap(), c.t))
+	b.Check(up, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib, gib)) // the up's lease ends
+	for _, id := range []string{"c1", "c2"} {
+		b.ContainerEvent("stop", id, id, lab)
+		b.ContainerEvent("die", id, id, lab)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(0, 0))
+	start := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib/8))
+	held := func() uint64 {
+		i := slices.IndexFunc(b.List(), func(l protocol.Lease) bool { return l.ID == start.LeaseID })
+		if i < 0 {
+			t.Fatalf("leases = %+v, want %s open", b.List(), start.LeaseID)
+		}
+		return b.List()[i].Bytes
+	}
+	cost := held() + gib/4
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(time.Second)
+	up.CostBytes = gib
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+	if got, want := held(), cost-gib/8; got != want {
+		t.Fatalf("%s holds %d MiB, want %d MiB: its cost less c1's use", start.LeaseID, got>>20, want>>20)
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// p1Started is the book of TestAContainerThatDiedLeavesItsStartOfSeveral
+// as c2 runs again under docker start c1 c2: p1 reads c1 and c2 in w1's
+// compose project p1, and up is w1's compose up of p1.
+func p1Started(t *testing.T) (b *lease.Book, c *clock, log *bytes.Buffer, p1 func(mem1, mem2 uint64) *protocol.Snapshot, up policy.Request) {
+	b, c, log = book(t)
+	p1 = func(mem1, mem2 uint64) *protocol.Snapshot {
+		s := snap()
+		if mem1 > 0 {
+			withComposeProject(s, "c1", "w1", "p1", mem1)
+		}
+		if mem2 > 0 {
+			withComposeProject(s, "c2", "w1", "p1", mem2)
+		}
+		return read(s, c.t)
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	up = policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p p1 up -d", CostBytes: 2 * gib, Target: "p1", OnEngine: true}
+	b.Observe(read(snap(), c.t))
+	b.Check(up, snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib, gib))
+	for _, id := range []string{"c1", "c2"} {
+		b.ContainerEvent("stop", id, id, lab)
+		b.ContainerEvent("die", id, id, lab)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(0, 0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+		Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}, p1(0, 0), cfg)
+	b.ContainerEvent("start", "c1", "c1", lab)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib/8))
+	up.CostBytes = gib
+	return b, c, log, p1, up
+}
+
+// With no events, c2 died when the first reading missed it, not when the
+// second made it gone: a compose up checked between the two that starts it
+// takes it (#111).
+func TestAStartOfSeveralDatesADeathAtTheFirstReadingThatMissedIt(t *testing.T) {
+	b, c, log, p1, up := p1Started(t)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, 0)) // c2 crashed: missing once
+	c.t = c.t.Add(time.Second)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(p1(gib/8, 0)) // gone
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib/8, gib))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// c2's start event, after a crash and a reading, finds w2's up for its own
+// project p1 first, which may not bind it: the event leaves it to the
+// reading, which gives it to w1's up, checked since c2 died (#111).
+func TestAStartOfSeveralLeavesARestartTheEventCannotPlaceToTheReading(t *testing.T) {
+	b, c, _, p1, up := p1Started(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", lab) // a crash
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(p1(gib/8, 0))
+	c.t = c.t.Add(time.Second)
+	up2 := up
+	up2.Worktree = "w2"
+	b.Check(up2, p1(gib/8, 0), cfg)
+	d := b.Check(up, p1(gib/8, 0), cfg)
+	b.ContainerEvent("start", "c2", "c2", lab)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(p1(gib/8, gib))
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) {
+		t.Fatalf("leases = %+v, want w1's up %s bound to c2 and ended", b.List(), d.LeaseID)
+	}
+}
+
+// startTwo is docker start c1 c2, both resolved.
+var startTwo = policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c1 c2", Target: "c1", ContainerID: "c1",
+	Others: []policy.Start{{ID: "c2"}}, CostBytes: 2 * gib, OnEngine: true}
+
+// withC1C2 is a reading of c1 and c2 in w1, each at its use in cs.
+func withC1C2(head uint64, cs map[string]uint64) *protocol.Snapshot {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(int64(head))
+	for _, id := range []string{"c1", "c2"} {
+		if m, ok := cs[id]; ok {
+			withContainerMem(s, id, "w1", m)
+		}
+	}
+	return s
+}
+
+// docker stop c2 && docker start c2 after docker start c1 c2: the start's
+// lease still covers c2, so the second start is allowed, with no lease,
+// however low headroom is (#111).
+func TestAStartOfSeveralCoversItsStopAndStart(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(withC1C2(8*gib, nil), c.t))
+	b.Check(startTwo, withC1C2(8*gib, nil), cfg)
+	b.ContainerEvent("start", "c1", "c1", nil)
+	b.ContainerEvent("start", "c2", "c2", nil)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withC1C2(8*gib, map[string]uint64{"c1": gib / 8, "c2": gib / 8}), c.t))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "c2", "c2", nil)
+	b.ContainerEvent("die", "c2", "c2", nil)
+	c.t = c.t.Add(4 * time.Second)
+	s := read(withC1C2(2*gib+gib/2, map[string]uint64{"c1": gib / 8}), c.t)
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c2", Target: "c2", ContainerID: "c2", CostBytes: gib, OnEngine: true}, s, cfg)
+	if !d.Allow || d.LeaseID != "" {
+		t.Fatalf("docker start c2 = %+v, want allowed by the start's lease", d)
+	}
+}
+
+// A restart policy restarting c2 after a crash: c2 stays the start's, and
+// its use counts against the start's reservation (#111).
+func TestAStartOfSeveralCountsARestartByPolicy(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(withC1C2(8*gib, nil), c.t))
+	b.Check(startTwo, withC1C2(8*gib, nil), cfg)
+	b.ContainerEvent("start", "c1", "c1", nil)
+	b.ContainerEvent("start", "c2", "c2", nil)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withC1C2(8*gib, map[string]uint64{"c1": gib / 8, "c2": gib / 8}), c.t))
+	cost := reserved(b) + gib/4
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c2", "c2", nil) // a crash
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "c2", "c2", nil) // its restart policy
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(withC1C2(4*gib+gib/2, map[string]uint64{"c1": gib / 2, "c2": gib}), c.t))
+	}
+	if got, want := reserved(b), cost-gib/2-gib; got != want {
+		t.Fatalf("reserved = %d MiB, want %d MiB: the cost less c1's and c2's use", got>>20, want>>20)
+	}
+}
+
+// Who takes c2, a container of docker start c1 c2 that died, when it runs
+// again: only a lease checked after it died and before it ran again, that
+// binds it. The start keeps its own restart and a restart policy's, and a
+// lease checked after the restart never takes it, however the death and
+// the restart were seen: by events or by readings (#111).
+func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *testing.T) {
+	type book struct {
+		b    *lease.Book
+		c    *clock
+		log  *bytes.Buffer
+		p1   func(mem1, mem2 uint64) *protocol.Snapshot
+		up   policy.Request
+		upID string
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	tick := func(k *book) { k.c.t = k.c.t.Add(time.Second) }
+	die := func(k *book) { tick(k); k.b.ContainerEvent("die", "c2", "c2", lab) } // a crash
+	missing := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, 0)) }
+	gone := func(k *book) { missing(k); missing(k) } // with no events
+	up := func(k *book) { tick(k); k.upID = k.b.Check(k.up, k.p1(gib/8, 0), cfg).LeaseID }
+	runP1 := func(k *book) { tick(k); k.b.Check(run("w1", "p1"), k.p1(gib/8, 0), cfg) }
+	upW2 := func(k *book) {
+		tick(k)
+		w2 := k.up
+		w2.Worktree = "w2"
+		k.b.Check(w2, k.p1(gib/8, 0), cfg)
+	}
+	start := func(k *book) { tick(k); k.b.ContainerEvent("start", "c2", "c2", lab) }
+	back := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, gib)) }
+	for _, tc := range []struct {
+		name  string
+		steps []func(*book)
+		takes bool // the up's lease takes c2
+	}{
+		{"die, reading, up, start", []func(*book){die, missing, up, start, back}, true},
+		{"die, up, start", []func(*book){die, up, start, back}, true},
+		{"gone by readings, up, start", []func(*book){gone, up, start, back}, true},
+		{"missing, up, gone, reading shows it", []func(*book){missing, up, missing, back}, true},
+		{"die, reading, w2's up, w1's up, start", []func(*book){die, missing, upW2, up, start, back}, true},
+		{"die, run, start, die, up, start: a crash loop", []func(*book){die, missing, runP1, start, die, up, start, back}, true},
+		{"up, die, start: a restart policy's", []func(*book){up, die, start, back}, false},
+		{"die, start, up", []func(*book){die, missing, start, up, back}, false},
+		{"die, run, start, up", []func(*book){die, missing, runP1, start, up, back}, false},
+		{"die, w2's up, start, w1's up", []func(*book){die, missing, upW2, start, up, back}, false},
+		{"gone by readings, start, up", []func(*book){gone, start, up, back}, false},
+		{"gone by readings, run, start, up", []func(*book){gone, runP1, start, up, back}, false},
+		{"gone by readings, reading shows it, up", []func(*book){gone, back, up, back}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &book{}
+			k.b, k.c, k.log, k.p1, k.up = p1Started(t)
+			ls := k.b.List()
+			i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") })
+			if i < 0 {
+				t.Fatalf("leases = %+v, want the start's", ls)
+			}
+			startID, cost := ls[i].ID, ls[i].Bytes+gib/4
+			for _, s := range tc.steps {
+				s(k)
+			}
+			ls = k.b.List()
+			if took := !slices.ContainsFunc(ls, func(l protocol.Lease) bool { return l.ID == k.upID }); took != tc.takes {
+				t.Fatalf("up's lease took c2 = %v, want %v; leases = %+v\n%s", took, tc.takes, ls, k.log)
+			}
+			// The start holds its cost less what it still has: c2's use too
+			// while c2 is its (S-D: it keeps c2's share once let go).
+			want := cost - gib/8 - gib
+			if tc.takes {
+				want = cost - gib/8
+			}
+			if i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return l.ID == startID }); i < 0 || ls[i].Bytes != want {
+				t.Fatalf("leases = %+v, want %s open holding %d MiB", ls, startID, want>>20)
+			}
+			if !tc.takes {
+				return
+			}
+			for range 30 {
+				back(k)
+			}
+			if strings.Contains(k.log.String(), "never appeared\" lease="+k.upID) {
+				t.Fatalf("log: %s", k.log)
+			}
+		})
+	}
+}

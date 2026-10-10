@@ -82,7 +82,6 @@ type model struct {
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
-	111: "a crashed container stays bound to a two-container start's lease: a compose up restarting it binds nothing",
 	112: "an up taking over its stack's lease while that lease's services warm holds the larger estimate, not both",
 }
 
@@ -219,9 +218,6 @@ func (m *model) composeUp(st stack) bool {
 	var cost uint64 // what the services it starts will use
 	for _, sv := range []string{"a", "b"} {
 		if x := have[sv]; x == nil || !x.running {
-			if x != nil && x.multi && !m.on(111) {
-				return true // left out (#111)
-			}
 			cost += target
 		}
 	}
@@ -282,6 +278,9 @@ func (m *model) stop(x *mcont, crash bool) {
 		x.crashed = time.Time{}
 	}
 	x.running, x.heldBy = false, ""
+	if x.multi {
+		x.boundBy = "" // a start of several lets it go (#111)
+	}
 }
 
 // held reports whether x is held: an up found it running and bound to no

@@ -82,7 +82,6 @@ type model struct {
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
 var openBugs = map[int]string{
 	109: "a project name used in w1 and w2: an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
-	112: "an up taking over its stack's lease while that lease's services warm holds the larger estimate, not both",
 }
 
 // openIssues are the issues HEADROOM_MODEL_OPEN turns on.
@@ -222,11 +221,6 @@ func (m *model) composeUp(st stack) bool {
 		}
 	}
 	idle := cost == 0
-	if !idle && !m.on(112) && slices.ContainsFunc(m.of(project, wt), func(x *mcont) bool {
-		return x.running && x.cur < target && (x.startedBy == "covered" || strings.HasPrefix(m.leases[x.startedBy], "docker compose"))
-	}) {
-		return true // left out: it takes over a lease whose services warm (#112)
-	}
 	cmd := "docker compose -p " + project + " up -d"
 	taken := map[string]bool{} // its stack's leases it takes over, those not past their timeout
 	for _, l := range m.b.List() {

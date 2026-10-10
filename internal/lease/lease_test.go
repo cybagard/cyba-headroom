@@ -2,6 +2,7 @@ package lease_test
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -1022,6 +1023,106 @@ func TestAGuessThatHitsAfterItsTimeout(t *testing.T) {
 		if strings.Contains(log.String(), "never appeared") {
 			t.Errorf("%s: log: %s", tc.name, log)
 		}
+	}
+}
+
+// withService adds sv, a service of compose project app, attributed to wt
+// ("" = none) and run from wt's directory: its name is its ID.
+func withService(s *protocol.Snapshot, sv, wt string) *protocol.Snapshot {
+	return addContainer(s, protocol.Container{ID: sv, Name: sv, MemoryBytes: gib / 4, Labels: map[string]string{
+		protocol.ComposeProjectLabel: "app", protocol.ComposeServiceLabel: sv, protocol.ComposeWorkingDirLabel: "/src/" + cmp.Or(wt, "none")}}, wt)
+}
+
+// A compose up whose stack appears after its timeout (a slow pull): its
+// lapsed lease vouches for every service its worktree's readings show,
+// for a real key and a guess, until a further timeout, and reserves
+// nothing again. Another worktree's same-named stack is never its; an
+// unattributed one is a real key's, not a guess's (#145).
+func TestALapsedComposeLeaseVouchesForItsWholeStack(t *testing.T) {
+	type service struct{ sv, wt string }
+	type reading struct {
+		at       time.Duration // from the check
+		services []service
+	}
+	for _, tc := range []struct {
+		name     string
+		readings []reading
+		byKey    []string // ungated, for a real key
+		byGuess  []string // ungated, for a guess
+	}{
+		{"one service", []reading{{3 * time.Minute, []service{{"web", "w1"}}}}, nil, nil},
+		{"two services in one reading",
+			[]reading{{3 * time.Minute, []service{{"web", "w1"}, {"db", "w1"}}}}, nil, nil},
+		{"its services and another worktree's",
+			[]reading{{3 * time.Minute, []service{{"other", "w2"}, {"web", "w1"}, {"db", "w1"}}}}, []string{"other"}, []string{"other"}},
+		{"another worktree's alone", []reading{{3 * time.Minute, []service{{"other", "w2"}}}}, []string{"other"}, []string{"other"}},
+		{"unattributed", []reading{{3 * time.Minute, []service{{"web", ""}}}}, nil, []string{"web"}},
+		{"a first service gone before the second",
+			[]reading{{3 * time.Minute, []service{{"web", "w1"}}}, {3*time.Minute + 10*time.Second, []service{{"db", "w1"}}}}, nil, nil},
+		{"after a further timeout", []reading{{5 * time.Minute, []service{{"web", "w1"}}}}, []string{"web"}, []string{"web"}},
+	} {
+		for _, key := range []struct {
+			name string
+			up   policy.Request
+			want []string
+		}{{"real key", appUp, tc.byKey}, {"guess", guessed("w1", "app"), tc.byGuess}} {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			b.Check(key.up, snap(), cfg)
+			c.t = t0.Add(2 * time.Minute)
+			b.Observe(snap()) // past its timeout, nothing yet
+			for _, r := range tc.readings {
+				c.t = t0.Add(r.at - time.Second)
+				b.Observe(snap())
+				c.t = t0.Add(r.at)
+				s := snap()
+				for _, sv := range r.services {
+					withService(s, sv.sv, sv.wt)
+				}
+				b.Observe(s)
+			}
+			var got []string
+			for _, u := range b.Ungated() {
+				got = append(got, u.Name)
+			}
+			if !slices.Equal(got, key.want) {
+				t.Errorf("%s, %s: ungated %v, want %v", tc.name, key.name, got, key.want)
+			}
+			if l := b.List(); len(l) != 0 {
+				t.Errorf("%s, %s: a lapsed lease reserves again: %+v", tc.name, key.name, l)
+			}
+		}
+	}
+}
+
+// A manual compose up's lapsed lease vouches for every unattributed service.
+func TestALapsedManualComposeLeaseVouchesForItsWholeStack(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := appUp
+	up.Worktree = ""
+	b.Check(up, snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap())
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(withService(withService(snap(), "web", ""), "db", ""))
+	if u := b.Ungated(); len(u) != 0 {
+		t.Fatalf("ungated %+v", u)
+	}
+}
+
+// A compose run's lapsed lease names one one-off container: it vouches
+// for one.
+func TestALapsedComposeRunVouchesForOneOneoff(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap())
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(oneoff("r2", "p", "w1")(oneoff("r1", "p", "w1")(snap())))
+	if u := b.Ungated(); len(u) != 1 {
+		t.Fatalf("ungated %+v, want one of the two one-offs", u)
 	}
 }
 

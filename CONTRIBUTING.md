@@ -84,6 +84,6 @@ To release a version, do these steps:
 git tag -a vX.Y.Z -m "headroom vX.Y.Z" && git push origin vX.Y.Z
 ```
 
-The [release workflow](.github/workflows/release.yml) tests and lints the tag. It builds `headroom` for darwin/arm64, with the tag as its version. Then it publishes `headroom-vX.Y.Z-darwin-arm64.tar.gz` and `SHA256SUMS` as a GitHub release. The tarball holds the binary, LICENSE and README. The workflow marks each `v0.*` release as a pre-release.
+The [release workflow](.github/workflows/release.yml) first checks the tag: it fails, before building anything, if the tag is not `vX.Y.Z` or `vX.Y.Z-suffix`, or if the tagged commit is not on `main`. Then it tests and lints the tag. It builds `headroom` for darwin/arm64, with the tag as its version. Then it publishes `headroom-vX.Y.Z-darwin-arm64.tar.gz` and `SHA256SUMS` as a GitHub release. The tarball holds the binary, LICENSE and README. The workflow marks a release as a pre-release if its tag is any `v0.*` or has a `-suffix` (`v1.2.3-rc1`). Just before it publishes, it fails if the tag on GitHub no longer points at the commit it built.
 
 After the release, close the milestone of the version.

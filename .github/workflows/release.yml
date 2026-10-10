@@ -21,7 +21,6 @@ jobs:
       - name: check the tag
         id: tag
         run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
           pre=$(scripts/release-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA")
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -51,6 +50,9 @@ jobs:
           tar -czf "dist/$tarball" -C dist/stage headroom LICENSE README.md
           (cd dist && shasum -a 256 "$tarball" > SHA256SUMS)
           cat dist/SHA256SUMS
+      # The tag may have moved since checkout: release only the commit built.
+      - name: check the tag is still at the commit
+        run: scripts/release-tag.sh --still "$GITHUB_REF_NAME" "$GITHUB_SHA"
       - name: create the release
         env:
           GH_TOKEN: ${{ github.token }}

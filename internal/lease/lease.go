@@ -119,8 +119,8 @@ type entry struct {
 	// entry.letGo) still appeared, so the lease ends quietly.
 	found bool
 	// dead are a start of several's containers that died while it waited
-	// on others, and when (Book.markDead).
-	dead map[string]time.Time
+	// on others (Book.markDead).
+	dead map[string]death
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
@@ -374,7 +374,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, dead: map[string]time.Time{}, macOS: r.MacOS, pid: r.PID,
+		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, dead: map[string]death{}, macOS: r.MacOS, pid: r.PID,
 		labelled: r.Labelled, name: r.Name, target: r.Target, guessed: r.Kind == "compose" && r.Guessed,
 	}
 	if idle {
@@ -600,15 +600,18 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		present[r.key] = r.bytes
 	}
 	// A start of several's container that died, back in a reading begun
-	// after: a lease checked since that it binds takes it, else it is the
-	// start's again (Book.markDead).
+	// after: a lease checked while it was dead that it binds takes it, else
+	// it is the start's again (Book.markDead).
 	for _, r := range res {
-		from, at := b.deadIn(r.key)
+		from, d := b.deadIn(r.key)
 		if from == nil || b.seen[r.key].at.After(began) || !readable(s, kindOf(r.key)) {
 			continue
 		}
 		delete(from.dead, r.key)
-		if e := b.binder(b.unmark(r)); !b.prev[r.key] && e != nil && !e.Created.Before(at) {
+		if d.ran.IsZero() {
+			d.ran = cmp.Or(began, now) // no event saw it: by this reading
+		}
+		if e := b.binder(b.unmark(r)); !b.prev[r.key] && e != nil && d.takenBy(e) {
 			from.letGo(r.key)
 		}
 	}
@@ -916,17 +919,15 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		stopped := last.stopped
 		b.seen[r.key] = seen{at: now}
 		delete(b.missed, r.key) // it runs again
-		from, diedAt := b.deadIn(r.key)
+		from, d := b.deadIn(r.key)
 		if from == nil && b.boundAnywhere(r.key) {
 			return
 		}
-		// The start's own restart: it is no longer dead. A return that
-		// leaves it to the reading keeps the mark, for the reading to
-		// hand it over (Book.markDead).
-		own := func() {
-			if from != nil {
-				delete(from.dead, r.key)
-			}
+		if from != nil && d.ran.IsZero() {
+			// It runs again: the mark keeps when, for the reading to
+			// settle whose it is if this event does not (Book.markDead).
+			d.ran = now
+			from.dead[r.key] = d
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
@@ -936,12 +937,10 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		checkedSinceCrash := e != nil && last.gone && e.Created.After(last.at)
 		switch {
 		case e == nil:
-			own()
 			return
-		case from != nil && e.Created.Before(diedAt):
+		case from != nil && !d.takenBy(e):
 			// Not checked since it died: its start's restart, a restart
 			// policy's (Book.markDead).
-			own()
 			return
 		case crashed && !b.bindsAfterCrash(r, e):
 			// It was gated before the crash, so it is not flagged.
@@ -951,7 +950,6 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			// a stop (a restart policy's restart): no name's or project's.
 			// After docker or compose stop it is a start like any, and so
 			// after a crash it is for a call checked since (compose up).
-			own()
 			return
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run
@@ -1155,32 +1153,46 @@ func (b *Book) release(key string) {
 	}
 }
 
+// death is when a start of several's container died and, once it runs
+// again, when it ran (Book.markDead).
+type death struct{ at, ran time.Time }
+
+// takenBy reports whether e, the lease that binds the container as it runs
+// again, takes it from its start: only a lease checked since it died and by
+// when it ran again can have started it.
+func (d death) takenBy(e *entry) bool {
+	return !e.Created.Before(d.at) && !e.Created.After(d.ran)
+}
+
 // markDead marks key, a container that is gone, dead in each open start of
 // several still waiting on others (#111). It stays bound: the lease still
 // covers its own start of it (docker stop && docker start), and a restart
-// policy's restart is still its. A lease checked since it died that starts
-// it takes it (entry.letGo): the start covers starting each once. Leases it
-// was all of ended first: they end quietly, as before.
+// policy's restart is still its. When it runs again, its start event or the
+// reading that shows it keeps when, and the first reading begun after that
+// ends the mark: the lease that reading binds it to takes it if
+// death.takenBy, else it stays the start's (entry.letGo): the start covers
+// starting each once. A start event with a lease death.takenBy takes it at
+// once. Leases it was all of ended first: they end quietly, as before.
 func (b *Book) markDead(key string, now time.Time) {
 	for _, e := range b.open {
 		if e.starts() < 2 || !e.bound[key] || !slices.ContainsFunc(e.containerIDs, func(id string) bool { return "container:"+id == key }) {
 			continue
 		}
-		if _, ok := e.dead[key]; !ok {
-			e.dead[key] = now
+		if d, ok := e.dead[key]; !ok || !d.ran.IsZero() {
+			e.dead[key] = death{at: now} // dead again after it ran: anew
 		}
 	}
 }
 
-// deadIn returns the open lease key is dead in (Book.markDead), and when it
-// died.
-func (b *Book) deadIn(key string) (*entry, time.Time) {
+// deadIn returns the open lease key is dead in (Book.markDead), and its
+// death.
+func (b *Book) deadIn(key string) (*entry, death) {
 	for _, e := range b.open {
-		if at, ok := e.dead[key]; ok {
-			return e, at
+		if d, ok := e.dead[key]; ok {
+			return e, d
 		}
 	}
-	return nil, time.Time{}
+	return nil, death{}
 }
 
 // letGo lets go of key, a container of e's that died, for a lease checked

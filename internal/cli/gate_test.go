@@ -327,16 +327,25 @@ func TestGateLooksUpEveryTarget(t *testing.T) {
 }
 
 // fakeEvents scripts Docker's events streams: each call plays the next
-// stream, and the last call ends the context.
+// stream, and the last call ends the context. A call with an until ends
+// cleanly. Its Clock reads vmNow, taking rtt on the host's clock, and
+// fails with no vmNow, as with no Docker.
 type fakeEvents struct {
-	streams []fakeStream
-	since   []int64 // each call's
-	cancel  context.CancelFunc
+	streams  []fakeStream
+	since    []int64 // each call's
+	until    []int64 // each call's
+	cancel   context.CancelFunc
+	vmNow    func() int64        // the VM's clock, Unix ns
+	clockErr error               // each Clock call's
+	rtt      time.Duration       // each Clock call's
+	advance  func(time.Duration) // the host's clock
+	clocks   int                 // Clock calls
 }
 
 type fakeStream struct {
 	events []fakeEvent
-	err    error // else "stream dropped"
+	err    error // else "stream dropped", or nil with an until
+	block  bool  // until the context ends
 }
 
 type fakeEvent struct {
@@ -344,8 +353,9 @@ type fakeEvent struct {
 	at               int64 // Unix ns, 0: Docker gave none
 }
 
-func (f *fakeEvents) Events(_ context.Context, since int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
+func (f *fakeEvents) Events(ctx context.Context, since, until int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
 	f.since = append(f.since, since)
+	f.until = append(f.until, until)
 	st := f.streams[len(f.since)-1]
 	for _, e := range st.events {
 		fn(e.action, e.id, e.at, map[string]string{"name": e.name})
@@ -353,10 +363,29 @@ func (f *fakeEvents) Events(_ context.Context, since int64, fn func(action, id s
 	if len(f.since) == len(f.streams) {
 		f.cancel()
 	}
-	if st.err != nil {
+	if st.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if st.err != nil || until > 0 {
 		return st.err
 	}
 	return errors.New("stream dropped")
+}
+
+func (f *fakeEvents) Clock(context.Context) (int64, error) {
+	f.clocks++
+	if f.clockErr != nil {
+		return 0, f.clockErr
+	}
+	if f.vmNow == nil {
+		return 0, errors.New("no clock")
+	}
+	if f.advance != nil {
+		f.advance(f.rtt / 2)
+		defer f.advance(f.rtt - f.rtt/2)
+	}
+	return f.vmNow(), nil
 }
 
 // follow runs followEvents over streams, returning what it delivered,
@@ -364,9 +393,9 @@ func (f *fakeEvents) Events(_ context.Context, since int64, fn func(action, id s
 func follow(streams ...fakeStream) (got []string, since []int64, waits []time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &fakeEvents{streams: streams, cancel: cancel}
-	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
+	followEvents(ctx, f, func(_ time.Time, action, id, name string, _ map[string]string) {
 		got = append(got, action+" "+id+" "+name)
-	}, func(_ context.Context, d time.Duration) { waits = append(waits, d) })
+	}, time.Now, discardLog(), func(_ context.Context, d time.Duration) { waits = append(waits, d) })
 	return got, f.since, waits
 }
 
@@ -499,11 +528,11 @@ func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
 	lab := map[string]string{protocol.LeaseLabel: d.LeaseID}
 	f := &fakeEvents{streams: []fakeStream{{}}, cancel: cancel}
 	f.streams[0].events = []fakeEvent{{"kill", "Y", "y", 300}, {"start", "Q", "quick", 250}, {"die", "Q", "quick", 400}}
-	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
+	followEvents(ctx, f, func(_ time.Time, action, id, name string, _ map[string]string) {
 		if id == "Q" {
 			book.ContainerEvent(action, id, name, lab)
 		}
-	}, func(context.Context, time.Duration) {})
+	}, time.Now, discardLog(), func(context.Context, time.Duration) {})
 	if l := book.List(); len(l) != 0 {
 		t.Errorf("leases = %+v after the die, want none", l)
 	}
@@ -612,12 +641,12 @@ func TestFollowEventsADenseReplayKeepsAPendingStart(t *testing.T) {
 	streams := densely(fakeEvent{"start", "x1", "x", 100*sec + sec}, fakeEvent{"die", "x1", "x", 100*sec + sec + 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	waited := 0
-	followEvents(ctx, &fakeEvents{streams: streams, cancel: cancel}, func(action, id, name string, _ map[string]string) {
+	followEvents(ctx, &fakeEvents{streams: streams, cancel: cancel}, func(_ time.Time, action, id, name string, _ map[string]string) {
 		if id == "x1" {
 			now = now.Add(time.Second)
 			book.ContainerEvent(action, id, name, nil)
 		}
-	}, func(context.Context, time.Duration) {
+	}, time.Now, discardLog(), func(context.Context, time.Duration) {
 		now = now.Add(time.Second)
 		if waited++; waited == 1 {
 			book.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", CostBytes: 1 << 30, Target: "x"}, snap(t0, false), cfg)
@@ -777,9 +806,9 @@ func TestFollowEventsALiveDieFromALaggingVMIsDatedNow(t *testing.T) {
 	now = t0.Add(6002 * time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &fakeEvents{streams: []fakeStream{{events: []fakeEvent{{"die", "r1", "r1", now.Add(-1500 * time.Millisecond).UnixNano()}}}}, cancel: cancel}
-	followEvents(ctx, f, func(action, id, name string, _ map[string]string) {
+	followEvents(ctx, f, func(_ time.Time, action, id, name string, _ map[string]string) {
 		book.ContainerEvent(action, id, name, lab)
-	}, func(context.Context, time.Duration) {})
+	}, time.Now, discardLog(), func(context.Context, time.Duration) {})
 	now = t0.Add(7 * time.Second)
 	book.Observe(snap(t0.Add(6*time.Second), "r1"))
 	now = t0.Add(16 * time.Second)

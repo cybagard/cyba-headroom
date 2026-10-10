@@ -668,3 +668,48 @@ func TestAReplayedDieAndStartEndTheStartThatRanAgain(t *testing.T) {
 		t.Errorf("warned never appeared: %s", log)
 	}
 }
+
+// A crash, then compose up, then its start, the crash and the start
+// replayed after the up: the crash is dated before the up, so the up was
+// checked since, and its start binds db. The up then reserves only what db
+// does not use yet, rather than count db twice (#146).
+func TestAReplayedCrashBeforeAnUpBindsTheStart(t *testing.T) {
+	b, c, _ := book(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	s := read(withComposeContainer(snap(), "db", "w1", gib), c.t)
+	b.Observe(s)
+	b.Observe(s)
+	crash := c.t.Add(time.Second)
+	c.t = c.t.Add(2 * time.Second)
+	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
+	start := c.t.Add(time.Second)
+	c.t = c.t.Add(2 * time.Second) // the reconnect
+	b.ContainerEventAt(crash, "die", "db", "db", lab)
+	b.ContainerEventAt(start, "start", "db", "db", lab)
+	observe(b, c, withComposeContainer(snap(), "db", "w1", gib/4))
+	if r := reserved(b); r != gib-gib/4 {
+		t.Fatalf("reserved %d MiB once db is back, want 768", r>>20)
+	}
+}
+
+// docker start c1 c2, then c1 crashes and a compose up starts it, the
+// crash and the start replayed after the up: the up was checked between
+// them, so it takes c1 (deaths.takenBy, #146).
+func TestAReplayedDeathOfAStartOfSeveralIsTakenByTheUpBetween(t *testing.T) {
+	b, c, log, p1, up := p1Started(t)
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	crash := c.t.Add(time.Second)
+	c.t = c.t.Add(2 * time.Second)
+	d := b.Check(up, p1(0, gib/8), cfg)
+	start := c.t.Add(time.Second)
+	c.t = c.t.Add(2 * time.Second) // the reconnect
+	b.ContainerEventAt(crash, "die", "c1", "c1", lab)
+	b.ContainerEventAt(start, "start", "c1", "c1", lab)
+	for range 30 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(p1(gib, gib/8))
+	}
+	if slices.ContainsFunc(b.List(), func(l protocol.Lease) bool { return l.ID == d.LeaseID }) || strings.Contains(log.String(), "never appeared\" lease="+d.LeaseID) {
+		t.Fatalf("w1's up %s never took c1: leases = %+v\n%s", d.LeaseID, b.List(), log)
+	}
+}

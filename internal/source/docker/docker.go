@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -292,6 +294,23 @@ func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]st
 	return c.ID, c.Config.Labels, c.State.Running, nil
 }
 
+// Clock is the time on the Docker VM's clock, in Unix nanoseconds: /info's
+// SystemTime, the clock Docker dates its events by (#170).
+func (s *Source) Clock(ctx context.Context) (int64, error) {
+	if s.socket == "" {
+		return 0, errors.New("docker: socket unknown")
+	}
+	var info struct{ SystemTime string }
+	if err := s.get(ctx, "/info", &info); err != nil {
+		return 0, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, info.SystemTime)
+	if err != nil {
+		return 0, fmt.Errorf("docker: /info SystemTime: %w", err)
+	}
+	return t.UnixNano(), nil
+}
+
 // EventsPath streams container starts, stops and exits (#67).
 var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die"],"type":["container"]}`}}.Encode()
 
@@ -305,14 +324,19 @@ var ErrBadSince = errors.New("docker: events: since refused")
 // ends or the stream drops: it always returns an error, and the caller
 // reconnects. Events are what a 5 s reading misses: a container that lives
 // between two readings. With since > 0, Docker first replays the events
-// from since on, that one included, from the few it keeps (#146).
-func (s *Source) Events(ctx context.Context, since int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
+// from since on, that one included, from the few it keeps (#146). With
+// until > 0 as well, the stream ends after the events up to until, that
+// one included, and a stream that ends so returns nil (#170).
+func (s *Source) Events(ctx context.Context, since, until int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
 	if s.socket == "" {
 		return errors.New("docker: socket unknown")
 	}
 	path := EventsPath
 	if since > 0 {
-		path += fmt.Sprintf("&since=%d.%09d", since/1e9, since%1e9)
+		path += "&since=" + unixNano(since)
+	}
+	if until > 0 {
+		path += "&until=" + unixNano(until)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
@@ -342,6 +366,9 @@ func (s *Source) Events(ctx context.Context, since int64, fn func(action, id str
 			TimeNano int64 `json:"timeNano"`
 		}
 		if err := dec.Decode(&ev); err != nil {
+			if until > 0 && errors.Is(err, io.EOF) {
+				return nil
+			}
 			return fmt.Errorf("docker: events: %w", err)
 		}
 		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die") {
@@ -349,3 +376,7 @@ func (s *Source) Events(ctx context.Context, since int64, fn func(action, id str
 		}
 	}
 }
+
+// unixNano is a Unix time in ns as Docker reads one: seconds, and nine
+// digits of nanoseconds.
+func unixNano(ns int64) string { return fmt.Sprintf("%d.%09d", ns/1e9, ns%1e9) }

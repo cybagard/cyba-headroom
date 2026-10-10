@@ -1115,6 +1115,78 @@ func TestALapsedManualComposeLeaseVouchesForItsWholeStack(t *testing.T) {
 	}
 }
 
+// Once a manual compose up's lapsed lease vouched for a worktree's
+// service, it vouches for attributed ones only in that service's working
+// directory: another worktree's unchecked stack of the same project name
+// is warned, in the same reading or a later one, as on main after its one
+// vouch (#145).
+func TestALapsedManualComposeLeaseKeepsToItsFirstDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readings [][]string // each reading's w2 services, after w1's web
+		dirs     bool       // each w2 service in its own directory
+		want     []string
+	}{
+		{"another worktree's stack in a later reading", [][]string{nil, {"x", "y"}}, false, []string{"x", "y"}},
+		{"another worktree's stack in the same reading", [][]string{{"x", "y"}}, false, []string{"x", "y"}},
+		{"another worktree's containers over readings, each in its own directory",
+			[][]string{nil, {"e1"}, {"e1", "e2"}, {"e1", "e2", "e3"}}, true, []string{"e1", "e2", "e3"}},
+	} {
+		b, c, _ := book(t)
+		b.Observe(snap())
+		up := appUp
+		up.Worktree = ""
+		b.Check(up, snap(), cfg)
+		c.t = t0.Add(2 * time.Minute)
+		b.Observe(snap())
+		for i, w2 := range tc.readings {
+			c.t = t0.Add(3*time.Minute + time.Duration(i)*10*time.Second)
+			s := withService(snap(), "web", "w1")
+			for _, sv := range w2 {
+				withService(s, sv, "w2")
+				if tc.dirs {
+					s.Docker.Containers[len(s.Docker.Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/src/w2/" + sv
+				}
+			}
+			b.Observe(s)
+		}
+		var got []string
+		for _, u := range b.Ungated() {
+			got = append(got, u.Name)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: ungated %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A lapsed lease that names one container keeps it however late it
+// appears, with no reading between to drop the lease (a sleep): its label
+// or name says it is that call's (#145).
+func TestALapsedSingleContainerLeaseVouchesPastAFurtherTimeout(t *testing.T) {
+	for _, after := range []time.Duration{4 * time.Minute, 30 * time.Minute} {
+		for _, key := range []string{"label", "name"} {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			var s *protocol.Snapshot
+			if key == "label" {
+				d := b.Check(req("w1", gib), snap(), cfg)
+				s = withRun(snap(), "c1", "w1", gib/4, d.LeaseID)
+			} else {
+				b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker run --name c1 x", CostBytes: gib, Name: "c1"}, snap(), cfg)
+				s = withContainerMem(snap(), "c1", "w1", gib/4)
+			}
+			c.t = t0.Add(2*time.Minute + 5*time.Second)
+			b.Observe(snap()) // lapses it
+			c.t = t0.Add(after)
+			b.Observe(s)
+			if u := b.Ungated(); len(u) != 0 {
+				t.Errorf("%s at %v: ungated %+v", key, after, u)
+			}
+		}
+	}
+}
+
 // A lapsed compose lease vouches for nothing from a timeout after it
 // lapsed, though no reading came between to drop it (a sleep, #145).
 func TestALapsedComposeLeaseVouchesForNothingAfterAFurtherTimeout(t *testing.T) {

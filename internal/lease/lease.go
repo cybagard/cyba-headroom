@@ -113,9 +113,9 @@ type Book struct {
 	// lapsed are leases that expired before their resource appeared (a
 	// slow image pull), kept for another timeout: a resource they name is
 	// their call's, so not ungated, though they no longer reserve. One
-	// that names one container is spent on it; a compose lease vouches
-	// for every service of its stack until a timeout after it lapsed
-	// (lapsedFor), when Observe drops it.
+	// that names one container is spent on it, until Observe drops it; a
+	// compose lease vouches for every service of its stack until a timeout
+	// after it lapsed (lapsedFor).
 	lapsed []*entry
 }
 
@@ -169,6 +169,12 @@ type entry struct {
 	// labels cannot tell a checked container from an unchecked one of one
 	// project in one worktree.
 	guessed bool
+	// pinned is set for a manual compose lease, once lapsed, at the first
+	// container a reading attributes to a worktree that it vouches for:
+	// from then it vouches for attributed ones only in that container's
+	// working directory, dir (lapsedFor).
+	pinned bool
+	dir    string
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
 	// resolved them. name: a run's or create's --name, for a client that
@@ -1566,20 +1572,30 @@ func (e *entry) hasKey() bool {
 // spends it where its key names one container. A compose lease's service
 // spends nothing: it has no list of its services, so it vouches for every
 // one until a timeout after it lapsed, though no reading came between
-// to drop it (#145). Only one its worktree could have started is
-// eligible, before keyed picks the best: a guess's, its own worktree's
-// (entry.guessed); a real key's, its own worktree's or an unattributed
-// one, which a reading that drops attribution shows. Never another
-// worktree's. A manual one's is any, as its open lease binds: a manual
-// call may name a worktree's compose file. A vouch only gates r: the
-// lease reserves nothing again.
+// to drop it (#145). A key that names one container keeps no such
+// deadline: it is spent on its match, until Observe drops it. Only one
+// its worktree could have started is eligible, before keyed picks the
+// best: a guess's, its own worktree's (entry.guessed); a real key's, its
+// own worktree's or an unattributed one, which a reading that drops
+// attribution shows. Never another worktree's. A manual one's is any
+// unattributed one, and an attributed one in the working directory of
+// the first attributed one it vouched for (entry.pinned): a manual call
+// may name a worktree's compose file, but one only. A vouch
+// only gates r: the lease reserves nothing again.
 func (b *Book) lapsedFor(r resource, now time.Time) bool {
+	manual := func(e *entry) bool {
+		return e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree == ""
+	}
 	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(e *entry) bool {
-		return !now.Before(e.Expires.Add(b.timeout)) ||
-			e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree != "" && r.worktree != e.Worktree
+		return e.Kind == "compose" && !now.Before(e.Expires.Add(b.timeout)) ||
+			e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree != "" && r.worktree != e.Worktree ||
+			manual(e) && e.pinned && r.dir != e.dir
 	}), r, true)
 	if e == nil {
 		return false
+	}
+	if manual(e) && !e.pinned {
+		e.pinned, e.dir = true, r.dir
 	}
 	if e.Kind != "compose" || r.oneoff {
 		b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })

@@ -132,8 +132,9 @@ type entry struct {
 	// entry.letGo) still appeared, so the lease ends quietly.
 	found bool
 	// dead are a start of several's containers that died while it waited
-	// on others (Book.markDead).
-	dead map[string]death
+	// on others, each with its deaths since a reading showed it
+	// (Book.markDead).
+	dead map[string]deaths
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
@@ -527,7 +528,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, dead: map[string]death{}, macOS: r.MacOS, pid: r.PID,
+		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, dead: map[string]deaths{}, macOS: r.MacOS, pid: r.PID,
 		labelled: r.Labelled, name: r.Name, target: r.Target, guessed: r.Kind == "compose" && r.Guessed,
 	}
 	if idle {
@@ -780,8 +781,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			continue
 		}
 		delete(from.dead, r.key)
-		if d.ran.IsZero() {
-			d.ran = now // no event saw it: by this reading
+		if d.last().ran.IsZero() {
+			d.last().ran = now // no event saw it: by this reading
 		}
 		if e := b.binder(b.unmark(r)); !b.prev[r.key] && e != nil && d.takenBy(e) {
 			from.letGo(r.key)
@@ -1127,11 +1128,10 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		if from == nil && b.boundAnywhere(r.key) {
 			return
 		}
-		if from != nil && d.ran.IsZero() {
+		if from != nil && d.last().ran.IsZero() {
 			// It runs again: the mark keeps when, for the reading to
 			// settle whose it is if this event does not (Book.markDead).
-			d.ran = now
-			from.dead[r.key] = d
+			d.last().ran = now
 		}
 		r = b.unmark(r)
 		e := keyed(b.open, r, b.based[source(r.kind)])
@@ -1363,42 +1363,50 @@ func (b *Book) release(key string) {
 // again, when it ran (Book.markDead).
 type death struct{ at, ran time.Time }
 
+// deaths are a container's deaths since a reading last showed it, oldest
+// first: it may die and run again more than once between two readings.
+type deaths []*death
+
+// last is the latest death.
+func (ds deaths) last() *death { return ds[len(ds)-1] }
+
 // takenBy reports whether e, the lease that binds the container as it runs
 // again, takes it from its start: only a lease checked since it died and by
-// when it ran again can have started it.
-func (d death) takenBy(e *entry) bool {
-	return !e.Created.Before(d.at) && !e.Created.After(d.ran)
+// when it ran again, in any of its deaths, can have started it.
+func (ds deaths) takenBy(e *entry) bool {
+	return slices.ContainsFunc(ds, func(d *death) bool { return !e.Created.Before(d.at) && !e.Created.After(d.ran) })
 }
 
 // markDead marks key, a container that is gone, dead in each open start of
 // several still waiting on others (#111). It stays bound: the lease still
 // covers its own start of it (docker stop && docker start), and a restart
 // policy's restart is still its. When it runs again, its start event or the
-// reading that shows it keeps when, and the first reading begun after that
-// ends the mark: the lease that reading binds it to takes it if
-// death.takenBy, else it stays the start's (entry.letGo): the start covers
-// starting each once. A start event with a lease death.takenBy takes it at
-// once. Leases it was all of ended first: they end quietly, as before.
+// reading that shows it keeps when; dead again after that, before a
+// reading, is another death. The first reading begun after it runs ends
+// the mark: the lease that reading binds it to takes it if
+// deaths.takenBy, else it stays the start's (entry.letGo): the start
+// covers starting each once. A start event with a lease deaths.takenBy
+// takes it at once. Leases it was all of ended first: they end quietly, as before.
 func (b *Book) markDead(key string, now time.Time) {
 	for _, e := range b.open {
 		if e.starts() < 2 || !e.bound[key] || !slices.ContainsFunc(e.containerIDs, func(id string) bool { return "container:"+id == key }) {
 			continue
 		}
-		if d, ok := e.dead[key]; !ok || !d.ran.IsZero() {
-			e.dead[key] = death{at: now} // dead again after it ran: anew
+		if ds := e.dead[key]; len(ds) == 0 || !ds.last().ran.IsZero() {
+			e.dead[key] = append(ds, &death{at: now}) // dead again after it ran: another
 		}
 	}
 }
 
 // deadIn returns the open lease key is dead in (Book.markDead), and its
-// death.
-func (b *Book) deadIn(key string) (*entry, death) {
+// deaths.
+func (b *Book) deadIn(key string) (*entry, deaths) {
 	for _, e := range b.open {
-		if d, ok := e.dead[key]; ok {
-			return e, d
+		if ds, ok := e.dead[key]; ok {
+			return e, ds
 		}
 	}
-	return nil, death{}
+	return nil, nil
 }
 
 // letGo lets go of key, a container of e's that died, for a lease checked

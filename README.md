@@ -18,7 +18,7 @@ Admission control for a fleet of parallel coding agents on one Mac.
 
 ## Background
 
-headroom shows what each coding agent costs in Docker, Tart, LM Studio and Ollama. It shows one row for each Orca worktree in which agents work. headroom needs [Orca](https://github.com/stablyai/orca) to find each worktree.
+headroom shows what each coding agent costs in Docker and Tart, and what LM Studio and Ollama reserve on the host. It shows one row for each Orca worktree in which agents work. headroom needs [Orca](https://github.com/stablyai/orca) to find each worktree.
 
 headroom also gates the containers and VMs that an agent in an Orca worktree starts through `docker`, `podman` or `tart`. Before a call starts something, headroom checks that the call fits in the memory budget. If it does not fit, headroom stops the call and tells the agent what it can reuse or stop.
 

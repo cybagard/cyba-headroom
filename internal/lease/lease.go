@@ -1396,7 +1396,7 @@ func (ds deaths) takenBy(e *entry) bool {
 // takes it at once. Leases it was all of ended first: they end quietly, as before.
 func (b *Book) markDead(key string, now time.Time) {
 	for _, e := range b.open {
-		if e.starts() < 2 || !e.bound[key] || !slices.ContainsFunc(e.containerIDs, func(id string) bool { return "container:"+id == key }) {
+		if e.starts() < 2 || !e.bound[key] {
 			continue
 		}
 		if ds := e.dead[key]; len(ds) == 0 || !ds.last().ran.IsZero() {
@@ -1417,11 +1417,15 @@ func (b *Book) deadIn(key string) (*entry, deaths) {
 }
 
 // letGo lets go of key, a container of e's that died, for a lease checked
-// since to bind.
+// since to bind: by its ID, or the first by its name (target).
 func (e *entry) letGo(key string) {
 	delete(e.bound, key)
 	delete(e.dead, key)
-	e.containerIDs = slices.DeleteFunc(e.containerIDs, func(id string) bool { return "container:"+id == key })
+	byID := func(id string) bool { return "container:"+id == key }
+	if !slices.ContainsFunc(e.containerIDs, byID) {
+		e.target = ""
+	}
+	e.containerIDs = slices.DeleteFunc(e.containerIDs, byID)
 	e.found = true
 }
 

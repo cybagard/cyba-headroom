@@ -55,9 +55,11 @@ The make targets do these tasks:
 - `make test-host`: the tests as darwin binaries. The container compiles them, and the host runs them.
 - `make test-tart`: the same binaries in a clean macOS Tart VM, `headroom-mac`. This VM is a clone of `macos-xcode`. The target stops the VM after the run.
 - `make lint-docs`: markdownlint and Vale on README.md, SECURITY.md and CONTRIBUTING.md. Each tool runs in its official container image. [`.markdownlint-cli2.yaml`](.markdownlint-cli2.yaml) and [`.vale.ini`](.vale.ini) hold their rules.
-- `make hooks`: copies [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit) into the git hooks of the clone, as `pre-commit` and `commit-msg`.
+- `make hooks`: copies [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit) into the git hooks of the clone, as `pre-commit` and `commit-msg`, with its list of public names.
 
 The hook blocks a commit when its staged file names, added lines or message name other projects. It reads these project names from Orca and from the uncommitted `.git/info/scrub-names`. It also blocks the home path, the user name, and likely secrets such as API keys, tokens and private keys.
+
+Some of these projects are public, and the docs must name them. [`scripts/hooks/public-names`](scripts/hooks/public-names) lists these names, and the hook lets them through. To add a name, edit this list and run `make hooks`. The hook reads only the copy in the git hooks, so a branch cannot change it. A name in `.git/info/scrub-names` still blocks.
 
 **Global boundaries.** The dev Mac runs Objective-See's LuLu as its egress gate and BlockBlock as its persistence monitor. Nothing in this repo installs or configures them.
 

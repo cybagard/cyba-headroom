@@ -12,6 +12,10 @@
 #     branches and display names
 #   - $HOME and the user name
 #
+# Names in .git/hooks/public-names belong to public repos and are not taken
+# from Orca; scrub-names still blocks them. `make hooks` copies that list
+# from scripts/hooks/public-names; the copy in the tree is never read.
+#
 # Install with `make hooks`, which copies this file into .git/hooks as both
 # hooks; re-run it after changing this file. Bypass with --no-verify.
 set -euo pipefail
@@ -35,6 +39,13 @@ origin=${origin%.git}
 own="${origin##*/}
 $(basename "$top")"
 
+# Public names, from the copy `make hooks` made, so a checked-out branch
+# cannot change what is allowed.
+public=""
+if [[ -f $common/hooks/public-names ]]; then
+	public=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$common/hooks/public-names" | grep -v '^$' || true)
+fi
+
 orca=$(command -v orca || true)
 for p in "$HOME/Applications/Orca.app/Contents/Resources/bin/orca" /Applications/Orca.app/Contents/Resources/bin/orca; do
 	[[ -z $orca && -x $p ]] && orca=$p
@@ -42,7 +53,7 @@ done
 if [[ -n $orca ]]; then
 	if ! command -v python3 >/dev/null; then
 		echo "pre-commit: warning: python3 not found; names from Orca are not checked" >&2
-	elif ! "$orca" worktree ps --json 2>/dev/null | TOP="$top" OWN="$own" python3 -c '
+	elif ! "$orca" worktree ps --json 2>/dev/null | TOP="$top" OWN="$own" PUBLIC="$public" python3 -c '
 import json, os, sys
 try:
     rows = json.load(sys.stdin)["result"]["worktrees"]
@@ -52,11 +63,13 @@ top = os.path.realpath(os.environ["TOP"])
 own = {n for n in os.environ["OWN"].split("\n") if n}
 own |= {r.get("repo") for r in rows if os.path.realpath(r.get("path") or "/") == top}
 generic = {"main", "master", "trunk", "develop", "dev", "head"}
+# A public repo name is never a term; its folders and branches still are.
+public = {n.lower() for n in os.environ["PUBLIC"].split("\n") if n}
 
 def emit(name):
     # Short or generic names would match ordinary words (api in "rapid").
     name = (name or "").strip()
-    if len(name) >= 4 and name.lower() not in generic and name not in own:
+    if len(name) >= 4 and name.lower() not in generic | public and name not in own:
         print(name)
 
 for r in rows:

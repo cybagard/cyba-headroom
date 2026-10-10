@@ -35,14 +35,16 @@ test-tart: darwin-tests
 	scripts/tart-test.sh
 
 # Git hooks run on the host (they read Orca and the local scrub list). The
-# hook is copied, not linked or set via core.hooksPath, so a checked-out
-# branch cannot change what runs; re-run after changing scripts/hooks.
+# hook and its list of public names are copied, not linked or set via
+# core.hooksPath, so a checked-out branch cannot change what runs or what
+# passes; re-run after changing scripts/hooks.
 hooks:
 	@d=$$(git rev-parse --git-common-dir)/hooks; mkdir -p $$d; \
 	install -m 0755 scripts/hooks/pre-commit $$d/pre-commit; \
 	install -m 0755 scripts/hooks/pre-commit $$d/commit-msg; \
+	install -m 0644 scripts/hooks/public-names $$d/public-names; \
 	git config --unset core.hooksPath || true; \
-	echo "installed pre-commit and commit-msg into $$d"
+	echo "installed pre-commit, commit-msg and public-names into $$d"
 
 test-hooks:
 	scripts/hooks/pre-commit_test.sh

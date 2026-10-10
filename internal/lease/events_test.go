@@ -1,6 +1,7 @@
 package lease_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +299,36 @@ func TestATiedOneoffThatDiesDuringTheReadingEndsItsLease(t *testing.T) {
 	b.Observe(read(snap(), c.t.Add(-time.Second)))
 	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
 		t.Errorf("w1's run warned never appeared: %s", log)
+	}
+}
+
+// A tied start newer than the reading is no die: a one-off judged in an
+// earlier run, gone since, and started again while w1 and w2 each run one
+// of project p, binds w1's lease from the reading that lists it.
+func TestATiedStartDuringTheReadingOfAJudgedOneoffBindsItsLease(t *testing.T) {
+	b, c, _ := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(4*time.Second))) // judged: its run's
+	for i := range 3 {
+		c.t = t0.Add(time.Duration(10+5*i) * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second))) // gone: its lease ends
+	}
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(32 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(33 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(31*time.Second))) // began before r1's start
+	ls := b.List()
+	i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return l.Worktree == "w1" })
+	if i < 0 || ls[i].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want w1's bound to r1", ls)
 	}
 }
 

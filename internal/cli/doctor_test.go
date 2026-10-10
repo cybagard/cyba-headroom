@@ -574,7 +574,8 @@ func TestAskLoginShellReal(t *testing.T) {
 func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 	agents := map[string]string{
 		"headroom": agentLabel + ".plist",
-		"homebrew": "homebrew.mxcl.headroom.plist",
+		"homebrew": "sh.brew.headroom.plist",
+		"legacy":   "homebrew.mxcl.headroom.plist",
 	}
 	for name, tc := range map[string]struct {
 		plists    []string
@@ -585,8 +586,10 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 	}{
 		"headroom's":     {plists: []string{"headroom"}, mark: "✓", subs: []string{"headroom's LaunchAgent", "headroom install"}},
 		"homebrew's":     {plists: []string{"homebrew"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
+		"legacy":         {plists: []string{"legacy"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
 		"none":           {mark: "✓", subs: []string{"no LaunchAgent"}},
 		"both":           {plists: []string{"headroom", "homebrew"}, mark: "!", subs: []string{"both", "headroom uninstall", "brew services restart headroom"}},
+		"both, legacy":   {plists: []string{"headroom", "legacy"}, mark: "!", subs: []string{"both", "headroom uninstall", "brew services restart headroom"}},
 		"homebrew's off": {plists: []string{"homebrew"}, down: true, mark: "!", subs: []string{"brew services start headroom"}, forbidden: "headroom install"},
 	} {
 		t.Run(name, func(t *testing.T) {

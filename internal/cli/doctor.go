@@ -96,7 +96,7 @@ func doctor(e Env) []finding {
 // and which LaunchAgent runs it: headroom's or Homebrew's (#185).
 func daemonFinding(home, socket string, err error) finding {
 	exists := func(p string) bool { _, err := os.Stat(p); return home != "" && err == nil }
-	ours, brew := exists(agentPlist(home)), exists(brewPlist(home))
+	ours, brew := exists(agentPlist(home)), home != "" && brewPlist(home) != ""
 	// headroom install refuses while Homebrew's agent is there.
 	start := "`headroom install`"
 	if brew {

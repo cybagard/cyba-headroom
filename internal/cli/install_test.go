@@ -18,6 +18,7 @@ type fakeAgent struct {
 	calls    []string
 	loadErr  error
 	onLoad   func() // e.g. bring the fake daemon up
+	onUnload func() // e.g. another daemon takes over
 	unloaded bool
 }
 
@@ -38,6 +39,9 @@ func (f *fakeAgent) Load(_ context.Context, plist string) error {
 func (f *fakeAgent) Unload(context.Context) error {
 	f.calls = append(f.calls, "unload")
 	f.loaded, f.unloaded, f.pid = false, true, 0
+	if f.onUnload != nil {
+		f.onUnload()
+	}
 	return nil
 }
 
@@ -471,6 +475,50 @@ func TestUninstallKeepsABrewLink(t *testing.T) {
 	}
 }
 
+// Uninstall lists what it removed (the LaunchAgent, the binary, the shims),
+// then what it kept; a second run removed nothing, so it lists nothing (#192).
+func TestUninstallSaysWhatItRemoved(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	removed := []string{f.plistPath(), f.in.bin, f.in.shimDir}
+	for run, want := range [][]string{removed, nil} {
+		f.out.Reset()
+		if code := f.in.uninstall(context.Background()); code != 0 {
+			t.Fatalf("run %d: exit %d: %s", run, code, f.errb.String())
+		}
+		before, after, ok := strings.Cut(f.out.String(), "kept:")
+		if !ok || !strings.Contains(after, "/Users/dev/cfg") {
+			t.Fatalf("run %d: no kept list:\n%s", run, f.out.String())
+		}
+		for _, p := range removed {
+			if listed := strings.Contains(before, p); listed != (want != nil) {
+				t.Errorf("run %d: %s listed as removed: %v, want %v:\n%s", run, p, listed, want != nil, f.out.String())
+			}
+		}
+	}
+}
+
+// A link install did not copy is listed as kept, not removed (#192).
+func TestUninstallListsABrewLinkAsKept(t *testing.T) {
+	f, link, _ := newBrewFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	before, after, _ := strings.Cut(f.out.String(), "kept:")
+	if strings.Contains(before, link) || !strings.Contains(after, link) {
+		t.Errorf("%s not listed as kept only:\n%s", link, f.out.String())
+	}
+	if !strings.Contains(before, f.plistPath()) || !strings.Contains(before, f.in.shimDir) {
+		t.Errorf("LaunchAgent or shims not listed as removed:\n%s", f.out.String())
+	}
+}
+
 // A plain install copies the binary to ~/.local/bin; uninstall run from
 // that copy, as it is once installed, still removes it (#181).
 func TestUninstallFromTheCopyRemovesIt(t *testing.T) {
@@ -516,5 +564,229 @@ func TestInstallRefusesWhenHomebrewRunsTheDaemon(t *testing.T) {
 				t.Errorf("touched launchd: %v", f.agent.calls)
 			}
 		})
+	}
+}
+
+// install --bin with Homebrew's link, run from an older copy, would replace
+// the link with that copy: it refuses, changes nothing, and names the
+// binary to run (#183).
+func TestInstallRefusesALinkToAnotherBinary(t *testing.T) {
+	f, link, target := newBrewFixture(t)
+	f.in.exe = filepath.Join(f.home, ".local", "bin", "headroom") // an older copy
+	if err := os.MkdirAll(filepath.Dir(f.in.exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.in.exe, []byte("#!binary v0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 1 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if want := `"` + link + `" install --bin "` + link + `"`; !strings.Contains(f.errb.String(), want) {
+		t.Errorf("message lacks %s:\n%s", want, f.errb.String())
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a link: %v %v", link, fi, err)
+	}
+	if b, err := os.ReadFile(target); err != nil || !bytes.Equal(b, f.exeData) {
+		t.Errorf("Cellar binary: %q %v", b, err)
+	}
+	for _, p := range []string{f.plistPath(), f.in.shimDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written: %v", p, err)
+		}
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+}
+
+// writeBrewPlist puts Homebrew's LaunchAgent for headroom in the fixture's
+// home under name, as `brew services start headroom` does.
+func (f *installFixture) writeBrewPlist(t *testing.T, name string) {
+	t.Helper()
+	brew := filepath.Join(f.home, "Library", "LaunchAgents", name)
+	if err := os.MkdirAll(filepath.Dir(brew), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brew, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// When only Homebrew runs the daemon, uninstall would remove the formula's
+// shims and leave its agent running: it refuses and changes nothing (#186).
+func TestUninstallRefusesWhenOnlyHomebrewRunsTheDaemon(t *testing.T) {
+	for _, name := range brewPlistNames {
+		t.Run(name, func(t *testing.T) {
+			f, link, target := newBrewFixture(t)
+			if _, err := linkShims(f.in.shimDir, link); err != nil {
+				t.Fatal(err)
+			}
+			f.writeBrewPlist(t, name)
+			if code := f.in.uninstall(context.Background()); code != 1 || !strings.Contains(f.errb.String(), "brew services stop headroom") {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			// homebrew/cask has a headroom too: the bare name makes brew
+			// warn "Treating headroom as a formula" (#192).
+			if msg := f.errb.String(); !strings.Contains(msg, "`brew uninstall cybagard/tap/headroom`") || strings.Contains(msg, "`brew uninstall headroom`") {
+				t.Errorf("refusal does not name the tap:\n%s", msg)
+			}
+			for _, n := range []string{"docker", "podman", "tart"} {
+				if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != link {
+					t.Errorf("%s -> %q, %v", n, got, err)
+				}
+			}
+			if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("link removed: %v %v", fi, err)
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("Cellar binary removed: %v", err)
+			}
+			if len(f.agent.calls) != 0 {
+				t.Errorf("touched launchd: %v", f.agent.calls)
+			}
+		})
+	}
+}
+
+// With both agents, uninstall removes headroom's, as doctor advises (#186).
+func TestUninstallWithBothAgentsRemovesHeadrooms(t *testing.T) {
+	for _, name := range brewPlistNames {
+		t.Run(name, func(t *testing.T) {
+			f := newInstallFixture(t)
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("install: exit %d: %s", code, f.errb.String())
+			}
+			f.writeBrewPlist(t, name)
+			if code := f.in.uninstall(context.Background()); code != 0 {
+				t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+			}
+			if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+				t.Errorf("plist left: %v", err)
+			}
+			if !f.agent.unloaded {
+				t.Error("agent not unloaded")
+			}
+		})
+	}
+}
+
+// With both agents, Homebrew's daemon links the shims to its opt path once
+// it holds the lock: before uninstall (it won the lock at login) or while
+// ours stops (--wait). Uninstall keeps those links and says so; removing
+// them would leave that daemon running ungated (#192).
+func TestUninstallWithBothAgentsKeepsHomebrewsShims(t *testing.T) {
+	for _, bin := range []string{"copy", "brew link"} {
+		for _, when := range []string{"before", "while ours stops"} {
+			t.Run(bin+"/"+when, func(t *testing.T) {
+				var f *installFixture
+				var link string
+				if bin == "brew link" { // install --bin <brew link>
+					f, link, _ = newBrewFixture(t)
+				} else {
+					f = newInstallFixture(t)
+					link, _ = brewLayout(t, f.exeData)
+				}
+				if code := f.in.install(context.Background()); code != 0 {
+					t.Fatalf("install: exit %d: %s", code, f.errb.String())
+				}
+				f.in.bin, f.in.binGiven = filepath.Join(f.home, ".local", "bin", "headroom"), false
+				f.writeBrewPlist(t, "homebrew.mxcl.headroom.plist")
+				opt := filepath.Join(filepath.Dir(filepath.Dir(link)), "opt", "headroom", "bin", "headroom")
+				if err := os.MkdirAll(filepath.Dir(opt), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "..", "..", "Cellar", "headroom", "0.1.0", "bin", "headroom"), opt); err != nil {
+					t.Fatal(err)
+				}
+				brewLinks := func() {
+					if _, err := linkShims(f.in.shimDir, opt); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if when == "before" {
+					brewLinks()
+				} else {
+					f.agent.onUnload = brewLinks
+				}
+				if code := f.in.uninstall(context.Background()); code != 0 {
+					t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+				}
+				for _, n := range []string{"docker", "podman", "tart"} {
+					if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != opt {
+						t.Errorf("Homebrew's %s shim: -> %q, %v", n, got, err)
+					}
+				}
+				_, out, _ := strings.Cut(f.out.String(), "removed from launchd.")
+				removed, kept, _ := strings.Cut(out, "kept:")
+				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" (docker, podman, tart)") {
+					t.Errorf("output does not list Homebrew's shims as kept:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+// A dangling link at --bin is refused as broken, with its target named and
+// no command that would run it (#183).
+func TestInstallRefusesABrokenLink(t *testing.T) {
+	f := newInstallFixture(t)
+	missing := filepath.Join(f.home, "Cellar", "headroom", "0.0.9", "bin", "headroom")
+	f.in.bin, f.in.binGiven = filepath.Join(f.home, "opt", "bin", "headroom"), true
+	if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(missing, f.in.bin); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 1 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	msg := f.errb.String()
+	if !strings.Contains(msg, "broken") || !strings.Contains(msg, missing) {
+		t.Errorf("message does not call the link broken or name %s:\n%s", missing, msg)
+	}
+	if strings.Contains(msg, "install --bin") {
+		t.Errorf("message suggests running the broken link:\n%s", msg)
+	}
+	if got, err := os.Readlink(f.in.bin); err != nil || got != missing {
+		t.Fatalf("%s -> %q, %v", f.in.bin, got, err)
+	}
+	for _, p := range []string{f.plistPath(), f.in.shimDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written: %v", p, err)
+		}
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+}
+
+// A plain install still replaces a link at the default path with a copy:
+// the refusal is for --bin only (#183).
+func TestPlainInstallReplacesALinkWithACopy(t *testing.T) {
+	f := newInstallFixture(t)
+	other := filepath.Join(t.TempDir(), "headroom") // a dev build
+	if err := os.WriteFile(other, []byte("#!binary dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, f.in.bin); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if fi, err := os.Lstat(f.in.bin); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("%s is not a copy: %v %v", f.in.bin, fi, err)
+	}
+	if b, err := os.ReadFile(f.in.bin); err != nil || !bytes.Equal(b, f.exeData) {
+		t.Errorf("installed binary: %q %v", b, err)
+	}
+	if b, err := os.ReadFile(other); err != nil || string(b) != "#!binary dev" {
+		t.Errorf("the dev build changed: %q %v", b, err)
 	}
 }

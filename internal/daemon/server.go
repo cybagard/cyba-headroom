@@ -20,6 +20,9 @@ import (
 // connTimeout bounds one client exchange so a stuck client cannot pin a goroutine.
 const connTimeout = 2 * time.Second
 
+// ErrLocked is Listen's error while another daemon holds the lock.
+var ErrLocked = errors.New("another daemon is already running")
+
 // Listen binds the daemon socket at path. An exclusive lock on path+".lock",
 // held until the listener closes, makes the daemon a singleton: a second
 // daemon fails here even if the live one's socket is gone or slow to answer.
@@ -37,7 +40,7 @@ func Listen(path string) (net.Listener, error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lock.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("daemon: another daemon is already running (%s is locked)", lockPath)
+			return nil, fmt.Errorf("daemon: %w (%s is locked)", ErrLocked, lockPath)
 		}
 		return nil, fmt.Errorf("daemon: locking %s: %w", lockPath, err)
 	}

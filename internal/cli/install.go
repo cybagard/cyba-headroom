@@ -91,6 +91,20 @@ func (in *installer) install(ctx context.Context) int {
 		fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); manage it with `brew services`, not headroom install\n", brew)
 		return 1
 	}
+	// Copying over a link replaces it: Homebrew's link to the formula's
+	// binary would become this older copy (#183).
+	// A plain install still replaces a link at the default path.
+	if fi, err := os.Lstat(in.bin); in.binGiven && err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		if _, err := os.Stat(in.bin); err != nil {
+			target, _ := os.Readlink(in.bin)
+			fmt.Fprintf(in.errw, "headroom: %s is a broken link to %s (%v); remove it or choose another --bin\n", in.bin, target, err)
+			return 1
+		}
+		if same, _ := sameFile(in.bin, in.exe); !same {
+			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install it, run: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
+			return 1
+		}
+	}
 	// Only the launchd daemon may hold the socket: a terminal daemon would
 	// make the agent's daemon fail to start and crash-loop.
 	if pid, err := in.ping(ctx); err == nil {
@@ -225,6 +239,14 @@ func (in *installer) waitUp(ctx context.Context) bool {
 // uninstall stops the agent and removes it and the binary install copied. Config,
 // samples and logs stay: weeks of samples are worth keeping.
 func (in *installer) uninstall(ctx context.Context) int {
+	// Homebrew's agent alone: removing its shims would leave its daemon
+	// running ungated (#186). With both, ours goes, as doctor advises.
+	if brew := brewPlist(in.home); brew != "" {
+		if _, err := os.Stat(in.plistPath()); errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); remove it with `brew services stop headroom` and `brew uninstall cybagard/tap/headroom`, not headroom uninstall\n", brew)
+			return 1
+		}
+	}
 	// The binary to remove is the one the installed agent runs, unless --bin
 	// names it; with neither, no binary is ours to delete.
 	remove := []string{in.plistPath()}
@@ -247,6 +269,7 @@ func (in *installer) uninstall(ctx context.Context) int {
 	if err := in.agent.Unload(ctx); err != nil {
 		return in.fail(err)
 	}
+	var shims, brewShims []string // the shim links removed, and Homebrew's kept
 	if in.shimDir != "" {
 		bin := owned
 		if bin == "" {
@@ -259,18 +282,45 @@ func (in *installer) uninstall(ctx context.Context) int {
 		if dir, err := config.Dir(in.getenv); err == nil {
 			own = in.shimDir == config.Defaults(dir).ShimDir
 		}
-		if err := unlinkShims(in.shimDir, bin, own); err != nil {
+		// With both agents, Homebrew's daemon may already hold the lock and
+		// have linked the shims to its own path, also while ours stopped
+		// (--wait): those links stay, or it would run ungated (#192).
+		both := brewPlist(in.home) != ""
+		var err error
+		if shims, brewShims, err = unlinkShims(in.shimDir, bin, own, both); err != nil {
 			fmt.Fprintf(in.errw, "headroom: removing the shims in %s: %v; remove them by hand\n", in.shimDir, err)
 		}
 	}
+	var gone []string // the paths in remove that were there
 	for _, p := range remove {
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		err := os.Remove(p)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return in.fail(err)
 		}
+		if err == nil {
+			gone = append(gone, p)
+		}
 	}
-	fmt.Fprintln(in.out, "headroom daemon removed from launchd; kept:")
+	fmt.Fprintln(in.out, "headroom daemon removed from launchd.")
+	if len(gone) > 0 || len(shims) > 0 {
+		fmt.Fprintln(in.out, "removed:")
+	}
+	for _, p := range gone {
+		what := "binary"
+		if p == in.plistPath() {
+			what = "agent"
+		}
+		fmt.Fprintf(in.out, "  %-8s %s\n", what, p)
+	}
+	if len(shims) > 0 {
+		fmt.Fprintf(in.out, "  shims    %s (%s)\n", in.shimDir, strings.Join(shims, ", "))
+	}
+	fmt.Fprintln(in.out, "kept:")
 	if kept != "" {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
+	}
+	if len(brewShims) > 0 {
+		fmt.Fprintf(in.out, "  shims    %s (%s), which lead to another headroom, such as Homebrew's\n", in.shimDir, strings.Join(brewShims, ", "))
 	}
 	if dir, err := config.Dir(in.getenv); err == nil {
 		fmt.Fprintf(in.out, "  config   %s\n  samples  %s\n", dir, filepath.Join(dir, "samples"))

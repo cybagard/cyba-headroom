@@ -34,7 +34,13 @@ shasum -a 256 -c SHA256SUMS &&
   ./headroom install
 ```
 
-`install` copies the binary to `~/.local/bin/headroom` and starts the daemon as a LaunchAgent. Put `~/.local/bin` on your PATH. To upgrade, run `install` again. `headroom uninstall` removes the binary, the LaunchAgent and the shims. It keeps the config, the samples and the logs.
+`install` copies the binary to `~/.local/bin/headroom` and starts the daemon as a LaunchAgent. Put `~/.local/bin` on your PATH. For zsh, the default shell on macOS, run this command and then open a new terminal:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+```
+
+To upgrade, run `install` again. `headroom uninstall` removes the binary, the LaunchAgent and the shims. It keeps the config, the samples and the logs.
 
 ## Usage
 

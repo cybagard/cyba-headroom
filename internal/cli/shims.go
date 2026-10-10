@@ -59,6 +59,19 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 		log.Warn("shims not linked: the daemon's start path is not absolute", "path", start)
 		return
 	}
+	// By file, so a link to the running binary (Homebrew's opt path) still
+	// links; anything else would get every shim call (#187).
+	self, err := os.Executable()
+	if err == nil {
+		var same bool
+		if same, err = sameFile(start, self); err == nil && !same {
+			err = errors.New("another file")
+		}
+	}
+	if err != nil {
+		log.Warn("shims not linked: the daemon's start path is not the running binary", "path", start, "err", err)
+		return
+	}
 	notes, err := linkShims(dir, start)
 	for _, n := range notes {
 		log.Warn(n)
@@ -72,19 +85,29 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 
 // unlinkShims removes the shim links in dir that lead to a headroom binary,
 // and, if removeDir (dir is headroom's own), dir itself once it is empty.
-func unlinkShims(dir, bin string, removeDir bool) error {
+// With onlyBin, it removes only the links to bin itself and keeps those to
+// any other headroom binary: another daemon's. removed and kept name the
+// links.
+func unlinkShims(dir, bin string, removeDir, onlyBin bool) (removed, kept []string, err error) {
 	for _, n := range shimList() {
 		p := filepath.Join(dir, n)
-		if target, err := os.Readlink(p); err == nil && ownLink(p, target, bin) {
-			if err := os.Remove(p); err != nil {
-				return err
-			}
+		target, err := os.Readlink(p)
+		switch {
+		case err != nil || !ownLink(p, target, bin):
+			continue
+		case onlyBin && target != bin:
+			kept = append(kept, n)
+			continue
 		}
+		if err := os.Remove(p); err != nil {
+			return removed, kept, err
+		}
+		removed = append(removed, n)
 	}
 	if entries, err := os.ReadDir(dir); removeDir && err == nil && len(entries) == 0 {
-		return os.Remove(dir)
+		return removed, kept, os.Remove(dir)
 	}
-	return nil
+	return removed, kept, nil
 }
 
 // ownLink reports whether the link at p, to target, is headroom's to

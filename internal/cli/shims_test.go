@@ -43,7 +43,7 @@ func TestLinkShims(t *testing.T) {
 		t.Fatalf("notes %q", notes)
 	}
 	// Uninstall removes only headroom's links.
-	if err := unlinkShims(dir, bin, true); err != nil {
+	if _, _, err := unlinkShims(dir, bin, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "docker")); !os.IsNotExist(err) {
@@ -58,13 +58,13 @@ func TestLinkShims(t *testing.T) {
 	_ = os.Remove(filepath.Join(dir, "podman"))
 	_ = os.Remove(filepath.Join(dir, "tart"))
 	_, _ = linkShims(dir, bin)
-	if err := unlinkShims(dir, bin, true); err != nil {
+	if _, _, err := unlinkShims(dir, bin, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("the empty shim dir stayed")
 	}
-	if err := unlinkShims(dir, bin, true); err != nil {
+	if _, _, err := unlinkShims(dir, bin, true, false); err != nil {
 		t.Fatalf("nothing to remove: %v", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestUnlinkKeepsAChosenDirAndSeesChainedLinks(t *testing.T) {
 	if !hasShims(dir) {
 		t.Fatal("a link to a link to headroom is not a shim")
 	}
-	if err := unlinkShims(dir, bin, false); err != nil {
+	if _, _, err := unlinkShims(dir, bin, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "docker")); !os.IsNotExist(err) {

@@ -155,13 +155,14 @@ type entry struct {
 	// stack was another lease's, or it still pulls: it ends quietly at its
 	// timeout and lapses as a real key's does (expire), so a hit after its
 	// timeout is gated, as its own worktree's reading shows (lapsedFor
-	// goes through key); a miss lapses too, holding nothing. A hit whose
-	// reading does not attribute it is judged as with no key: binding an
-	// unattributed container to a guess could hide another worktree's
-	// unchecked stack. An unchecked container of the guessed project in
-	// its own worktree binds it, as a real key's would: labels cannot tell
-	// a checked container from an unchecked one of one project in one
-	// worktree.
+	// goes through key): as for a real key, the lapsed lease vouches for
+	// one container per reading (#145). A miss lapses too, holding
+	// nothing. A hit whose reading does not attribute it is judged as with
+	// no key: binding an unattributed container to a guess could hide
+	// another worktree's unchecked stack. An unchecked container of the
+	// guessed project in its own worktree binds it, as a real key's would:
+	// labels cannot tell a checked container from an unchecked one of one
+	// project in one worktree.
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker

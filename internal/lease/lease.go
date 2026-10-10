@@ -112,7 +112,10 @@ type Book struct {
 	dockerUp   time.Time
 	// lapsed are leases that expired before their resource appeared (a
 	// slow image pull), kept for another timeout: a resource they name is
-	// their call's, so not ungated, though they no longer reserve.
+	// their call's, so not ungated, though they no longer reserve. A
+	// worktree's compose lease vouches for every service of its stack
+	// until a timeout after it lapsed; any other is spent on its first
+	// match, until Observe drops it (lapsedFor).
 	lapsed []*entry
 }
 
@@ -158,9 +161,9 @@ type entry struct {
 	// timeout and lapses as a real key's does (expire), so a hit after its
 	// timeout is gated, as its own worktree's reading shows (lapsedFor
 	// goes through key): as for a real key, the lapsed lease vouches for
-	// one container per reading (#145). A miss lapses too, holding
-	// nothing. A hit whose reading does not attribute it is judged as with
-	// no key: binding an unattributed container to a guess could hide
+	// every service of its stack, until a further timeout (#145). A miss
+	// lapses too, holding nothing. A hit whose reading does not attribute
+	// it is judged as with no key: binding an unattributed container to a guess could hide
 	// another worktree's unchecked stack. An unchecked container of the
 	// guessed project in its own worktree binds it, as a real key's would:
 	// labels cannot tell a checked container from an unchecked one of one
@@ -893,7 +896,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			// A VM run again is a new run.
 		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
 			b.judge(r, baseline, now) // it may have been there before
-		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r):
+		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r, now):
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
@@ -1560,13 +1563,30 @@ func (e *entry) hasKey() bool {
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
-// spends it.
-func (b *Book) lapsedFor(r resource) bool {
-	e := keyed(b.lapsed, r, true)
+// spends it unless it is a worktree's compose lease. That one spends
+// nothing on a service: it has no list of its services, so it vouches for
+// every one until a timeout after it lapsed, though no reading came
+// between to drop it (#145), and only for one its worktree could have
+// started: a guess's, its own worktree's (entry.guessed); a real key's,
+// its own worktree's or an unattributed one, which a reading that drops
+// attribution shows. Never another worktree's. It is spent on a compose
+// run's one-off, which it names. Any other lease is spent on its first
+// match, until Observe drops it: a key that names one container, and a
+// manual compose lease, which has no worktree to tell its call's stack
+// from another worktree's of the same project name. A vouch only gates r:
+// the lease reserves nothing again.
+func (b *Book) lapsedFor(r resource, now time.Time) bool {
+	stack := func(o *entry) bool { return o.Kind == "compose" && o.Worktree != "" }
+	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(o *entry) bool {
+		return stack(o) && (!now.Before(o.Expires.Add(b.timeout)) ||
+			r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree)
+	}), r, true)
 	if e == nil {
 		return false
 	}
-	b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })
+	if !stack(e) || r.oneoff {
+		b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })
+	}
 	return true
 }
 

@@ -24,12 +24,12 @@
 // as given, a name or an ID, when Docker did not resolve it
 // (entry.target). It has neither when its first target was resolved or
 // missing and Docker resolved none of the targets it starts (docker start
-// a b, a running, b unresolved). It does not start those that run, or
-// that a worktree's open lease has bound (not as entry.held) or lists in
-// its containerIDs (Book.covered). A compose project the shim guessed,
-// Compose's config having failed (#84), binds only containers its own
-// worktree's reading shows, and when it binds none, ends quietly at its
-// timeout and lapses (entry.guessed).
+// a b, a running, b unresolved). It leaves out of its key and cost those
+// that run, and those that a worktree's open lease has bound (not as
+// entry.held) or lists in its containerIDs (Book.covered). A compose
+// project the shim guessed, Compose's config having failed (#84), binds
+// only containers its own worktree's reading shows, and when it binds
+// none, ends quietly at its timeout and lapses (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -412,10 +412,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases must not count
-	// The containers this start starts: not those that run, nor those a
-	// worktree's open lease holds or waits for (docker stop && docker
-	// start): that lease still covers them, and its worktree is charged for
-	// them. A manual call's lease is charged nothing, so it covers nothing.
+	// The containers this start's lease is keyed by and costs: not those
+	// that run, nor those a worktree's open lease has bound (not as
+	// entry.held) or lists in its containerIDs (covered; docker stop &&
+	// docker start): that lease still covers them, and its worktree is
+	// charged for them. A manual call's lease is charged nothing, so it
+	// covers nothing.
 	// The leases that cover them wait for them again, but only once this
 	// start is allowed (renew): a denied one, or a BUDGET_WAIT polling it,
 	// must not keep them open.

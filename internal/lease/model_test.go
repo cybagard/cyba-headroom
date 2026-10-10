@@ -121,9 +121,7 @@ type model struct {
 // openBugs are the cases that expose a bug still open, by its issue. They
 // run only when HEADROOM_MODEL_OPEN is 1 (all) or lists the issue
 // (HEADROOM_MODEL_OPEN=87,89). Fixing the issue removes its entry.
-var openBugs = map[int]string{
-	109: "a project name used in w1 and w2, or guessed in one for the other's (tiedUnread): an event, or a reading without attribution, binds neither or the wrong one (related to #89)",
-}
+var openBugs = map[int]string{}
 
 // openIssues are the issues HEADROOM_MODEL_OPEN turns on.
 func openIssues() map[int]bool {
@@ -335,7 +333,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 		}
 	}
 	r := policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: cmd,
-		CostBytes: cost, Target: project, OnEngine: true, Idle: idle}
+		CostBytes: cost, Target: project, OnEngine: true, Idle: idle, ComposeDir: "/src/" + wt}
 	if guess >= 0 {
 		r.Command, r.Target, r.Guessed = "docker compose up -d", name, true
 	}
@@ -1089,35 +1087,40 @@ func TestTheLeaseModelOnAGuessTakenAtItsStart(t *testing.T) {
 
 // TestTheLeaseModelOnAGuessTiedAtItsStart plays #150's F1 (its probe Q1):
 // a guessed hit starts containers while an up of their project is open in
-// its worktree, and another worktree's open guess names that project. The
-// start event ties (lease.go tied), so the up takes nothing at it; and the
-// last reading showed them, so the next binds nothing either. w2's up of p2
-// starts c1 and c2; a minute on, w1's guessed up names p2; w2's idle up of
-// p2 holds c1 and c2; they stop; w2's guessed hit of p2 starts them again.
+// its worktree, and another worktree's open guess names that project. That
+// guess's dir is not the one Compose labels them with, so the start event
+// does not tie (lease.go keyed, #109): the up takes them at it. w2's up of
+// p2 starts c1 and c2; a minute on, w1's guessed up names p2; w2's idle up
+// of p2 holds c1 and c2; they stop; w2's guessed hit of p2 starts them
+// again.
 func TestTheLeaseModelOnAGuessTiedAtItsStart(t *testing.T) {
 	m := newModel(t)
 	m.runOK(
-		op{2, 179, 196}, // w2: compose up p2 starts c1 and c2
+		op{2, 177, 196}, // w2: compose up p2 starts c1 and c2
 		op{9, 668, 538}, // wait 1m: its lease ends
 		op{2, 756, 965}, // w1: a guessed up names p2 and comes up as m1
-		op{0, 275, 657}, // w2: an idle compose up p2 holds c1 and c2
-		op{3, 883, 428}, // compose stop p2
-		op{2, 171, 949}, // w2: a guessed hit of p2 starts c1 and c2
+		op{0, 273, 657}, // w2: an idle compose up p2 holds c1 and c2
 	)
-	unbound := func(when string) {
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	m.runOK(
+		op{3, 881, 428}, // compose stop p2
+		op{2, 169, 949}, // w2: a guessed hit of p2 starts c1 and c2
+	)
+	bound := func(when string) {
 		xs := m.of("p2", "w2")
 		if len(xs) != 2 {
 			t.Fatalf("%s, p2 in w2 has %d containers, want c1 and c2", when, len(xs))
 		}
 		for _, x := range xs {
-			if x.boundBy != "" || m.bound(x) {
-				t.Errorf("%s, %s boundBy = %q (bound %v), want none: its start event tied, as in the book", when, x.id, x.boundBy, m.bound(x))
+			if x.boundBy != up {
+				t.Errorf("%s, %s boundBy = %q, want w2's idle up's %s: w1's guess does not tie", when, x.id, x.boundBy, up)
 			}
 		}
 	}
-	unbound("at its start")
-	m.runOK(op{10, 0, 0}, op{10, 0, 0}, op{10, 0, 0}) // ticks: not new to the first, nothing binds them
-	unbound("after the readings")
+	bound("at its start")
+	m.runOK(op{10, 0, 0}, op{10, 0, 0}, op{10, 0, 0}) // ticks
+	bound("after the readings")
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))
 	}

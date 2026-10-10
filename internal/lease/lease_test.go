@@ -2841,3 +2841,110 @@ func TestRepeatUpsWithAServiceDownStayBounded(t *testing.T) {
 		}
 	}
 }
+
+// stackLabels are what Compose labels a container of project app in dir.
+func stackLabels(dir string) map[string]string {
+	return map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeWorkingDirLabel: dir}
+}
+
+// upIn is wt's up of project app, whose shim found Compose's dir dir.
+func upIn(wt, dir string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app",
+		OnEngine: true, ComposeDir: dir}
+}
+
+// w1 and w2 bring up one project name, and w2's stack is down before any
+// reading (#109): its start events bind w2's lease by the dir Compose
+// labels them with, so it never warns "never appeared".
+func TestUpsOfOneProjectInW1AndW2BindTheirOwnLeases(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/a"), snap(), cfg)
+	b.Check(upIn("w2", "/src/b"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	b.ContainerEvent("start", "b1", "b1", stackLabels("/src/b"))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "b1", "b1", stackLabels("/src/b"))
+	b.ContainerEvent("die", "b1", "b1", stackLabels("/src/b"))
+	for range 25 { // past the timeout
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, "w1"), c.t))
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("a lease whose stack started warned:\n%s", log)
+	}
+}
+
+// A reading that lost its attribution (a flicker) binds w2's container to
+// w2's lease, by its dir, not to w1's, the first in the book (#109).
+func TestAnUnattributedReadingBindsTheLeaseOfTheContainersDir(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/a"), snap(), cfg)
+	b.Check(upIn("w2", "/src/b"), snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "b1", Name: "b1", MemoryBytes: gib / 2, Labels: stackLabels("/src/b")}, ""), c.t))
+	for _, l := range b.List() {
+		if want := map[string]uint64{"w1": 2 * gib, "w2": 2*gib - gib/2}[l.Worktree]; l.Bytes != want {
+			t.Errorf("%s holds %d MiB, want %d", l.Worktree, l.Bytes>>20, want>>20)
+		}
+	}
+}
+
+// A docker run in w2 labelled by hand with w1's project name, no working
+// dir, its own lease over, missing from two readings and back (model seed
+// 9887, #109): it binds nothing of w1's up, whose reservation stands.
+func TestAHandLabelledContainerBindsNoComposeLease(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(policy.Request{Worktree: "w2", Kind: "container", Command: "docker run -l com.docker.compose.project=app img",
+		CostBytes: gib, Labelled: true}, snap(), cfg)
+	dressed := func() *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "x1", Name: "x1", MemoryBytes: gib,
+			Labels: map[string]string{protocol.ComposeProjectLabel: "app", protocol.LeaseLabel: d.LeaseID}}, "")
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(dressed(), c.t)) // it uses its lease's cost: the lease ends
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("the run's lease is open: %+v", l)
+	}
+	b.Check(upIn("w1", "/src/a"), snap(), cfg)
+	for range 2 { // missing: gone
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(dressed(), c.t))
+	if got := reserved(b); got != 2*gib {
+		t.Fatalf("reserved = %d MiB, want w1's up's 2048 MiB: %+v", got>>20, b.List())
+	}
+}
+
+// The dir only breaks a tie (#109): an up whose Compose file lies outside
+// its worktree, or whose shim sent a dir Compose did not label its stack
+// with, still binds its stack, the only match, at its start event and at
+// a reading.
+func TestAComposeLeaseBindsItsStackOutsideItsDir(t *testing.T) {
+	for _, tc := range []struct{ name, sent, labelled, wt string }{
+		{"a file outside the worktree", "/src/shared", "/src/shared", ""},
+		{"a dir the shim got wrong", "/src/a/compose.yaml;b", "/src/a", "w1"},
+	} {
+		for _, event := range []bool{true, false} {
+			b, c, log := book(t)
+			b.Observe(read(snap(), c.t))
+			b.Check(upIn("w1", tc.sent), snap(), cfg)
+			c.t = c.t.Add(time.Second)
+			if event {
+				b.ContainerEvent("start", "a1", "a1", stackLabels(tc.labelled))
+			}
+			for range 25 { // past the timeout
+				c.t = c.t.Add(5 * time.Second)
+				b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels(tc.labelled)}, tc.wt), c.t))
+			}
+			if strings.Contains(log.String(), "never appeared") || len(b.Ungated()) > 0 {
+				t.Errorf("%s (event %v): its stack bound nothing: ungated %+v\n%s", tc.name, event, b.Ungated(), log)
+			}
+		}
+	}
+}

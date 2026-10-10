@@ -144,8 +144,8 @@ type entry struct {
 	project string
 	// dir is the working dir Compose labels a compose lease's project
 	// with, as the shim found it (policy.Request.ComposeDir), or "":
-	// lapsed, it tells the call's stack from another of the same project
-	// name (lapsedFor, #158).
+	// open, it tells the call's stack from another of the same project
+	// name (keyed, #109); lapsed, it vouches for it (lapsedFor, #158).
 	dir string
 	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
 	macOS bool
@@ -181,7 +181,8 @@ type entry struct {
 	// sends it without Labelled (the shim labels every run and create it
 	// parses; a labelled lease is keyed by its label alone). target: a
 	// start's container as given, when Docker could not resolve it, or a
-	// tart run's VM. A compose lease's key is its project.
+	// tart run's VM. A compose lease's key is its project; open, its dir
+	// tells it from another of the project (keyed, #109).
 	labelled bool
 	// oneoff is set for a compose run's lease: it binds the one one-off
 	// container Compose labels as such (hasOneoff once it has), and the
@@ -827,7 +828,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		for _, id := range e.containerIDs {
 			// A container whose label names an open lease is that lease's:
 			// the label outranks an ID.
-			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, b.unmark(r), true) == e {
+			if r, ok := byID[id]; ok && !bound[r.key] && keyed(b.open, b.unmark(r), true, true) == e {
 				e.bind(r)
 				b.judge(r, gated, now)
 				b.boundBy(r, e)
@@ -1048,7 +1049,7 @@ func (b *Book) binder(r resource) *entry {
 		// Back after a crash and a reading: as for its start event.
 		es = slices.DeleteFunc(slices.Clone(es), func(e *entry) bool { return !b.bindsAfterCrash(r, e) })
 	}
-	e := keyed(es, r, b.based[source(r.kind)])
+	e := keyed(es, r, b.based[source(r.kind)], true)
 	if e != nil && e.oneoff && !r.oneoff && b.verdicts[r.key] != nil {
 		// A service back after a tick away (a crash loop) is no new
 		// dependency of a compose run: it keeps its verdict.
@@ -1156,7 +1157,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			d.last().ran = now
 		}
 		r = b.unmark(r)
-		e := keyed(b.open, r, b.based[source(r.kind)])
+		e := keyed(b.open, r, b.based[source(r.kind)], true)
 		// After a crash: Docker said so, or the verdict kept it across the
 		// readings since.
 		crashed := last.gone && !stopped || b.verdicts[r.key] != nil && b.verdicts[r.key].crashed
@@ -1477,7 +1478,8 @@ func rank(e *entry, r resource) int {
 }
 
 // tied reports whether another worktree's lease in es keys r as surely as
-// e does: only r's attribution can tell them apart.
+// e does, open, its dir too (keyed): only r's attribution can tell them
+// apart.
 func tied(es []*entry, r resource, e *entry) bool {
 	return slices.ContainsFunc(es, func(o *entry) bool {
 		// A manual call's lease reserves nothing: the worktree's wins, as
@@ -1487,7 +1489,8 @@ func tied(es []*entry, r resource, e *entry) bool {
 		if a.worktree == "" {
 			a.worktree = o.Worktree
 		}
-		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.key(a, true) && rank(o, r) == rank(e, r)
+		return o != e && o.Worktree != "" && o.Worktree != e.Worktree && o.binds(a, true, true) && rank(o, r) == rank(e, r) &&
+			o.inDir(r) == e.inDir(r)
 	})
 }
 
@@ -1495,14 +1498,20 @@ func tied(es []*entry, r resource, e *entry) bool {
 // container's label names its lease outright, before a start's container ID
 // or a compose project's name, before a name (docker start db || docker
 // run --name db: the run's label beats the start's name). Without a
-// baseline (based false), only a label or a container ID counts.
-func keyed(es []*entry, r resource, based bool) *entry {
+// baseline (based false), only a label or a container ID counts. Among
+// open leases (open), a compose lease whose dir is the one Compose labels
+// r with wins, before r's attribution: each of two agents may bring up one
+// project, and an event does not say whose r is (#109).
+func keyed(es []*entry, r resource, based, open bool) *entry {
 	// Among equal keys, the lease of the worktree r is attributed to: two
 	// worktrees may bring up one project.
 	// Then a key the shim named before a guess (entry.guessed).
 	better := func(e, best *entry) bool {
 		if rank(e, r) != rank(best, r) {
 			return rank(e, r) < rank(best, r)
+		}
+		if open && e.inDir(r) != best.inDir(r) {
+			return e.inDir(r)
 		}
 		if r.worktree != "" {
 			if (e.Worktree == r.worktree) != (best.Worktree == r.worktree) {
@@ -1516,12 +1525,23 @@ func keyed(es []*entry, r resource, based bool) *entry {
 	}
 	var best *entry
 	for _, e := range es {
-		if e.key(r, based) && (best == nil || better(e, best)) {
+		if e.binds(r, based, open) && (best == nil || better(e, best)) {
 			best = e
 		}
 	}
 	return best
 }
+
+// binds reports whether e, open or (open false) lapsed, keys r. Compose
+// labels every container of a project with its dir: one with none was
+// labelled by hand, and binds no open lease that knows its dir (#109).
+func (e *entry) binds(r resource, based, open bool) bool {
+	return e.key(r, based) && (!open || e.Kind != "compose" || e.dir == "" || r.dir != "")
+}
+
+// inDir reports whether e is a compose lease whose dir is the one Compose
+// labels r with.
+func (e *entry) inDir(r resource) bool { return e.Kind == "compose" && e.dir != "" && e.dir == r.dir }
 
 // key reports whether r is the resource e's call started.
 func (e *entry) key(r resource, based bool) bool {
@@ -1607,7 +1627,7 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 			return true
 		}
 		return r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree
-	}), r, true)
+	}), r, true, false)
 	if e == nil {
 		return false
 	}

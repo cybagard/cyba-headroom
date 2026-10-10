@@ -28,8 +28,8 @@
 // that a worktree's open lease has bound (not as entry.held) or lists in
 // its containerIDs (Book.covered). A compose project the shim guessed,
 // Compose's config having failed (#84), binds only containers its own
-// worktree's reading shows, and when it binds none, ends as one with no
-// key (entry.guessed).
+// worktree's reading shows, and when it binds none, ends quietly at its
+// timeout and lapses (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers
@@ -151,9 +151,18 @@ type entry struct {
 	// for two real keys. It holds no stack at its check (one running
 	// says nothing of a hit) and takes no lease over. One it bound shows it
 	// hit: a later up of the project in its worktree takes it over as any
-	// repeat up does (composeTakes). One that bound nothing missed, or its
-	// stack was another lease's: it ends quietly at its timeout, as one
-	// with no key.
+	// repeat up does (composeTakes). One that bound nothing missed, its
+	// stack was another lease's, or it still pulls: it ends quietly at its
+	// timeout and lapses as a real key's does (expire), so a hit after its
+	// timeout is gated, as its own worktree's reading shows (lapsedFor
+	// goes through key): as for a real key, the lapsed lease vouches for
+	// one container per reading (#145). A miss lapses too, holding
+	// nothing. A hit whose reading does not attribute it is judged as with
+	// no key: binding an unattributed container to a guess could hide
+	// another worktree's unchecked stack. An unchecked container of the
+	// guessed project in its own worktree binds it, as a real key's would:
+	// labels cannot tell a checked container from an unchecked one of one
+	// project in one worktree.
 	guessed bool
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
@@ -1182,11 +1191,10 @@ func (b *Book) expire(now time.Time) {
 			b.log.Debug("lease with no key ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
 			return true
 		case e.guessed:
-			// The guess missed, or its stack was another lease's
-			// (entry.guessed): it held its cost to the timeout, as with no
-			// key.
+			// The guess missed, its stack was another lease's, or it still
+			// pulls (entry.guessed): it held its cost to the timeout, and
+			// lapses quietly.
 			b.log.Debug("lease with a guessed key ended at its timeout", "lease", e.ID, "worktree", e.Worktree, "command", e.Command)
-			return true
 		default:
 			b.log.Warn("lease expired: its container or VM never appeared", "lease", e.ID, "worktree", e.Worktree,
 				"command", e.Command, "bytes", e.cost, "age", now.Sub(e.Created).Round(time.Second))

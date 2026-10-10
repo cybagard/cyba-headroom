@@ -1095,19 +1095,45 @@ func TestALapsedComposeLeaseVouchesForItsWholeStack(t *testing.T) {
 	}
 }
 
-// A manual compose up's lapsed lease vouches for every unattributed service.
+// A manual compose up's lapsed lease vouches for every service, whatever
+// its attribution, as its open lease binds them: a manual call may name
+// a worktree's compose file.
 func TestALapsedManualComposeLeaseVouchesForItsWholeStack(t *testing.T) {
-	b, c, _ := book(t)
-	b.Observe(snap())
-	up := appUp
-	up.Worktree = ""
-	b.Check(up, snap(), cfg)
-	c.t = t0.Add(2 * time.Minute)
-	b.Observe(snap())
-	c.t = t0.Add(3 * time.Minute)
-	b.Observe(withService(withService(snap(), "web", ""), "db", ""))
-	if u := b.Ungated(); len(u) != 0 {
-		t.Fatalf("ungated %+v", u)
+	for _, wt := range []string{"", "w1"} {
+		b, c, _ := book(t)
+		b.Observe(snap())
+		up := appUp
+		up.Worktree = ""
+		b.Check(up, snap(), cfg)
+		c.t = t0.Add(2 * time.Minute)
+		b.Observe(snap())
+		c.t = t0.Add(3 * time.Minute)
+		b.Observe(withService(withService(snap(), "web", wt), "db", wt))
+		if u := b.Ungated(); len(u) != 0 {
+			t.Errorf("services in %q: ungated %+v", wt, u)
+		}
+	}
+}
+
+// A lapsed compose lease vouches for nothing from a timeout after it
+// lapsed, though no reading came between to drop it (a sleep, #145).
+func TestALapsedComposeLeaseVouchesForNothingAfterAFurtherTimeout(t *testing.T) {
+	for _, after := range []time.Duration{4 * time.Minute, 10 * time.Minute} {
+		for _, key := range []struct {
+			name string
+			up   policy.Request
+		}{{"real key", appUp}, {"guess", guessed("w1", "app")}} {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			b.Check(key.up, snap(), cfg)
+			c.t = t0.Add(2 * time.Minute)
+			b.Observe(snap()) // past its timeout, nothing yet
+			c.t = t0.Add(after)
+			b.Observe(withService(withService(snap(), "web", "w1"), "db", "w1"))
+			if u := b.Ungated(); len(u) != 2 {
+				t.Errorf("at %v, %s: ungated %+v, want web and db", after, key.name, u)
+			}
+		}
 	}
 }
 

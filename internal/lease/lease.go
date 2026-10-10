@@ -114,7 +114,8 @@ type Book struct {
 	// slow image pull), kept for another timeout: a resource they name is
 	// their call's, so not ungated, though they no longer reserve. One
 	// that names one container is spent on it; a compose lease vouches
-	// for every service of its stack until it is dropped (lapsedFor).
+	// for every service of its stack until a timeout after it lapsed
+	// (lapsedFor), when Observe drops it.
 	lapsed []*entry
 }
 
@@ -895,7 +896,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			// A VM run again is a new run.
 		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
 			b.judge(r, baseline, now) // it may have been there before
-		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r):
+		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r, now):
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
@@ -1564,15 +1565,18 @@ func (e *entry) hasKey() bool {
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
 // spends it where its key names one container. A compose lease's service
 // spends nothing: it has no list of its services, so it vouches for every
-// one until Observe drops it a timeout after it lapsed (#145). Only one
-// its worktree could have started is eligible, before keyed picks the
-// best: a guess's, its own worktree's (entry.guessed); a real key's, its
-// own worktree's or an unattributed one, which a reading that drops
-// attribution shows; a manual one's, an unattributed one. Never another
-// worktree's. A vouch only gates r: the lease reserves nothing again.
-func (b *Book) lapsedFor(r resource) bool {
+// one until a timeout after it lapsed, though no reading came between
+// to drop it (#145). Only one its worktree could have started is
+// eligible, before keyed picks the best: a guess's, its own worktree's
+// (entry.guessed); a real key's, its own worktree's or an unattributed
+// one, which a reading that drops attribution shows. Never another
+// worktree's. A manual one's is any, as its open lease binds: a manual
+// call may name a worktree's compose file. A vouch only gates r: the
+// lease reserves nothing again.
+func (b *Book) lapsedFor(r resource, now time.Time) bool {
 	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(e *entry) bool {
-		return e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && r.worktree != e.Worktree
+		return !now.Before(e.Expires.Add(b.timeout)) ||
+			e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree != "" && r.worktree != e.Worktree
 	}), r, true)
 	if e == nil {
 		return false

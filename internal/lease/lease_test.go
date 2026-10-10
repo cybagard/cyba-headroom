@@ -1212,6 +1212,50 @@ func TestALapsedComposeLeaseVouchesForNothingAfterAFurtherTimeout(t *testing.T) 
 	}
 }
 
+// A worktree's lapsed compose lease past its deadline vouches for nothing,
+// even in the reading that crosses it and though a manual compose up of
+// the project lapsed after it: the manual lease, the only one left, is
+// spent on the first service and the second is warned (#159). The
+// deadline applies before keyed, so the worktree's lease cannot hide the
+// manual one as the surer key.
+func TestALapsedComposeLeasePastItsDeadlineLeavesAManualOneToVouchOnce(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	b.Check(appUp, snap(), cfg)
+	c.t = t0.Add(time.Minute)
+	up := appUp
+	up.Worktree = ""
+	b.Check(up, snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap()) // the worktree's lease lapses
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(snap()) // the manual one lapses
+	c.t = t0.Add(4 * time.Minute)
+	b.Observe(withService(withService(snap(), "web", "w1"), "db", "w1"))
+	if u := b.Ungated(); len(u) != 1 || u[0].Name != "db" {
+		t.Errorf("ungated %+v, want db", u)
+	}
+}
+
+// A manual compose up's lapsed lease with no dir vouches for nothing once
+// a reading a timeout after it lapsed dropped it (#159).
+func TestALapsedManualComposeLeaseVouchesForNothingOnceDropped(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(snap())
+	up := appUp
+	up.Worktree = ""
+	b.Check(up, snap(), cfg)
+	c.t = t0.Add(2 * time.Minute)
+	b.Observe(snap()) // lapses it
+	c.t = t0.Add(4 * time.Minute)
+	b.Observe(snap()) // drops it
+	c.t = t0.Add(5 * time.Minute)
+	b.Observe(withService(snap(), "web", "w1"))
+	if u := b.Ungated(); len(u) != 1 || u[0].Name != "web" {
+		t.Errorf("ungated %+v, want web", u)
+	}
+}
+
 // A compose run's lapsed lease names one one-off container: it vouches
 // for one.
 func TestALapsedComposeRunVouchesForOneOneoff(t *testing.T) {

@@ -243,7 +243,7 @@ func (in *installer) uninstall(ctx context.Context) int {
 	// running ungated (#186). With both, ours goes, as doctor advises.
 	if brew := brewPlist(in.home); brew != "" {
 		if _, err := os.Stat(in.plistPath()); errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); remove it with `brew services stop headroom` and `brew uninstall headroom`, not headroom uninstall\n", brew)
+			fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); remove it with `brew services stop headroom` and `brew uninstall cybagard/tap/headroom`, not headroom uninstall\n", brew)
 			return 1
 		}
 	}

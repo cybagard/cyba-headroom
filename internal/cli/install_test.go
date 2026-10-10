@@ -579,6 +579,11 @@ func TestUninstallRefusesWhenOnlyHomebrewRunsTheDaemon(t *testing.T) {
 			if code := f.in.uninstall(context.Background()); code != 1 || !strings.Contains(f.errb.String(), "brew services stop headroom") {
 				t.Fatalf("exit %d: %s", code, f.errb.String())
 			}
+			// homebrew/cask has a headroom too: the bare name makes brew
+			// warn "Treating headroom as a formula" (#192).
+			if msg := f.errb.String(); !strings.Contains(msg, "`brew uninstall cybagard/tap/headroom`") || strings.Contains(msg, "`brew uninstall headroom`") {
+				t.Errorf("refusal does not name the tap:\n%s", msg)
+			}
 			for _, n := range []string{"docker", "podman", "tart"} {
 				if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != link {
 					t.Errorf("%s -> %q, %v", n, got, err)

@@ -1970,6 +1970,13 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 		{"gone by readings, start, up", []func(*book){gone, start, up, back}, false},
 		{"gone by readings, run, start, up", []func(*book){gone, runP1, start, up, back}, false},
 		{"gone by readings, reading shows it, up", []func(*book){gone, back, up, back}, false},
+		// A second death before a reading is a second window: w1's up
+		// started c2 in the first (#136).
+		{"die, reading, w2's up, w1's up, start, die, start", []func(*book){die, missing, upW2, up, start, die, start, back}, true},
+		// An up checked while c2 ran, between a restart policy's restart
+		// and a second crash: Compose's own restart after the crash reads
+		// as the policy's, so c2 stays the start's.
+		{"die, start, up, die, start", []func(*book){die, missing, start, up, die, start, back}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &book{}

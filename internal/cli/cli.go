@@ -214,9 +214,6 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	if link {
-		linkOwnShims(e.Args[0], cfg.ShimDir, log)
-	}
 	// Collectors register here as they land (#49). Docker and Tart
 	// share one VM process listing per tick.
 	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
@@ -256,6 +253,11 @@ func runDaemon(e Env) int {
 	ln, err := daemon.Listen(cfg.Socket)
 	if err != nil {
 		return fail(err)
+	}
+	// After the lock: a daemon that cannot start must not relink the
+	// running daemon's shims.
+	if link {
+		linkOwnShims(e.Args[0], cfg.ShimDir, log)
 	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()

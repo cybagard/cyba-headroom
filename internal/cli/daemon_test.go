@@ -93,6 +93,37 @@ func TestDaemonLeavesWhatIsNotAShimWithANote(t *testing.T) {
 	}
 }
 
+// A daemon that cannot take the socket links nothing: the running daemon's
+// shims stay as they are (#185).
+func TestASecondDaemonLeavesTheShimsAlone(t *testing.T) {
+	dir := daemonDir(t)
+	env := func(k string) string { return map[string]string{"HEADROOM_CONFIG_DIR": dir}[k] }
+	first := filepath.Join(dir, "first", "headroom")
+	logPath := filepath.Join(dir, "first.log")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(Env{Args: []string{first, "daemon", "--link-shims", "--log", logPath},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: env, Context: ctx})
+	}()
+	waitFor(t, func() bool { b, _ := os.ReadFile(logPath); return strings.Contains(string(b), "daemon started") })
+
+	var errb syncBuffer
+	second := filepath.Join(dir, "second", "headroom")
+	if code := Run(Env{Args: []string{second, "daemon", "--link-shims"},
+		Stdout: &errb, Stderr: &errb, Getenv: env, Context: ctx}); code == 0 {
+		t.Errorf("second daemon exited 0: %s", errb.String())
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != first {
+			t.Errorf("%s -> %q, %v; want %s", n, target, err, first)
+		}
+	}
+	cancel()
+	<-done
+}
+
 func TestDaemonWithoutLinkShimsLinksNothing(t *testing.T) {
 	dir := daemonDir(t)
 	logPath := filepath.Join(dir, "daemon.log")

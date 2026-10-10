@@ -105,7 +105,7 @@ func daemonFinding(home, socket string, err error) finding {
 	manager := "no LaunchAgent (started by hand)"
 	switch {
 	case ours && brew:
-		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`)"
+		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`, then `brew services restart headroom`)"
 	case brew:
 		manager = "under Homebrew's LaunchAgent (brew services)"
 	case ours:

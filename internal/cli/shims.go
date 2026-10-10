@@ -59,6 +59,19 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 		log.Warn("shims not linked: the daemon's start path is not absolute", "path", start)
 		return
 	}
+	// By file, so a link to the running binary (Homebrew's opt path) still
+	// links; anything else would get every shim call (#187).
+	self, err := os.Executable()
+	if err == nil {
+		var same bool
+		if same, err = sameFile(start, self); err == nil && !same {
+			err = errors.New("another file")
+		}
+	}
+	if err != nil {
+		log.Warn("shims not linked: the daemon's start path is not the running binary", "path", start, "err", err)
+		return
+	}
 	notes, err := linkShims(dir, start)
 	for _, n := range notes {
 		log.Warn(n)

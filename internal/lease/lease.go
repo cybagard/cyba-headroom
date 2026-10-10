@@ -98,10 +98,11 @@ type Book struct {
 	missed      map[string]int
 	missedSince map[string]time.Time
 	// verdicts say, for each resource seen within the lease timeout (a
-	// crashed container's within crashKept, if longer), how it started
-	// (#33). A container keeps its verdict when it comes back after
-	// a tick or two away: its stats failed, a restart policy restarted it,
-	// or Docker itself restarted.
+	// crashed container's within crashKept, if longer, of the later of
+	// the last reading that listed it and its last start or die event),
+	// how it started (#33). A container keeps its verdict when it comes
+	// back after a tick or two away: its stats failed, a restart policy
+	// restarted it, or Docker itself restarted.
 	verdicts map[string]*verdict
 	// dockerDown is set while a fresh reading shows the Docker engine not
 	// running; dockerUp is when it was next seen running. Containers that
@@ -219,9 +220,13 @@ type verdict struct {
 	// after its last event shows it again: one begun before the die may
 	// list it still. Until then its restart binds as bindsAfterCrash says,
 	// and the verdict is kept for crashKept if that outlasts the lease
-	// timeout: a restart policy's restart may come later than the timeout.
+	// timeout, counted from the later of last and event: a restart
+	// policy's restart may come later than the timeout.
 	crashed bool
 	last    time.Time // last in a reading
+	// A binding start rebuilds the verdict with event zero (Book.judge):
+	// harmless, as only a crashed verdict reads it, and the die that
+	// crashes it sets it.
 	event   time.Time // its last start or die event
 	present bool      // in the latest reading (or a failed read kept it)
 }

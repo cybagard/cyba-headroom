@@ -1648,6 +1648,52 @@ func TestACrashedContainersVerdictIsKeptForCrashKept(t *testing.T) {
 	}
 }
 
+// A crashed container's crashKept (2 min) counts from its die when that
+// comes after the last reading that listed it, not from the reading (#134,
+// #153).
+func TestACrashedContainersVerdictCountsFromItsDie(t *testing.T) {
+	b, c, _ := shortBook(t)
+	b.Observe(read(snap(), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	listed := c.t
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	die := c.t
+	b.ContainerEvent("die", "a1", "a1", map[string]string{protocol.ComposeProjectLabel: "app"})
+	c.t = listed.Add(2*time.Minute + time.Second)
+	b.Observe(read(snap(), c.t))
+	if !lease.HasVerdict(b, "container:a1") {
+		t.Fatal("verdict gone 2 min 1 s after the listing, 4 s before 2 min after the die")
+	}
+	c.t = die.Add(2 * time.Minute)
+	b.Observe(read(snap(), c.t))
+	if lease.HasVerdict(b, "container:a1") {
+		t.Fatal("verdict kept 2 min after the die")
+	}
+}
+
+// A stopped container's verdict lasts the lease timeout from the last
+// reading that listed it: its start and die events since do not count
+// (#134, #153).
+func TestAStoppedContainersVerdictIgnoresItsEvents(t *testing.T) {
+	b, c, _ := shortBook(t)
+	b.Observe(read(snap(), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	listed := c.t
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	c.t = c.t.Add(3 * time.Second)
+	b.ContainerEvent("start", "a1", "a1", lab)
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("stop", "a1", "a1", lab)
+	b.ContainerEvent("die", "a1", "a1", lab)
+	c.t = listed.Add(30 * time.Second)
+	b.Observe(read(snap(), c.t))
+	if lease.HasVerdict(b, "container:a1") {
+		t.Fatal("verdict kept the 30 s lease timeout after the listing")
+	}
+}
+
 // With a lease timeout longer than crashKept, a crashed container's verdict
 // lasts the lease timeout, as a stopped one's does (#134).
 func TestACrashedContainersVerdictIsKeptForALongerLeaseTimeout(t *testing.T) {

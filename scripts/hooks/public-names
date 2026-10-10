@@ -1,0 +1,4 @@
+# Names of public repos that the pre-commit hook lets through, one per line.
+# Names from .git/info/scrub-names still block. Run `make hooks` after
+# changing this file: the hook reads only the copy it makes.
+homebrew-tap

@@ -125,4 +125,16 @@ check "token inside a longer identifier"   allow 'stage "base64AIzaxxxxxxxxxxxxx
 check "removing a secret is allowed"       allow 'stage "$aws" && git commit -qm init --no-verify && stage "rotated"'
 check "look-alikes are allowed"            allow 'stage "AKIA task-ant sk-1 https://example.com/@user tcp://10.0.0.5:2375 -----BEGIN PUBLIC KEY-----"'
 check "unreadable Orca output warns"       warn 'export FAKE_ORCA_BROKEN=1 && stage "fine"'
+
+# Public names: `make hooks` copies scripts/hooks/public-names next to the
+# hook, and the hook reads only that copy.
+check "copied public name is allowed"      allow 'printf "# public\norca-only-repo\n" >.git/hooks/public-names && stage "github.com/o/orca-only-repo"'
+check "unlisted name still blocks"         block 'printf "other-repo\n" >.git/hooks/public-names && stage "orca-only-repo"'
+check "public repo's worktree name blocks" block 'printf "orca-only-repo\n" >.git/hooks/public-names && stage "dir wt-zebra"'
+check "scrub-names wins over the list"     block 'printf "secret-project\norca-only-repo\n" | tee .git/hooks/public-names >>.git/info/scrub-names && stage "orca-only-repo"'
+check "list in the tree but not copied"    block 'mkdir -p scripts/hooks && printf "orca-only-repo\n" >scripts/hooks/public-names && stage "orca-only-repo"'
+
+# make hooks installs the hook and copies the list, in a scratch repo.
+root=$(cd "$(dirname "$0")/../.." && pwd)
+check "make hooks copies the public names" allow 'mkdir -p scripts/hooks && cp "'"$root"'"/scripts/hooks/pre-commit scripts/hooks/ && printf "orca-only-repo\n" >scripts/hooks/public-names && make -s -f "'"$root"'"/Makefile NATIVE=1 hooks >/dev/null && cmp scripts/hooks/public-names .git/hooks/public-names && stage "orca-only-repo" && PATH="$PWD/bin:$PATH" HOME=/Users/tester USER=tester .git/hooks/pre-commit'
 exit $fail

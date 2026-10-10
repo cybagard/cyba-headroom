@@ -1652,3 +1652,89 @@ func TestAStartOfSeveralCountsARestartByPolicy(t *testing.T) {
 		t.Fatalf("reserved = %d MiB, want %d MiB: the cost less c1's and c2's use", got>>20, want>>20)
 	}
 }
+
+// Who takes c2, a container of docker start c1 c2 that died, when it runs
+// again: only a lease checked after it died and before it ran again, that
+// binds it. The start keeps its own restart and a restart policy's, and a
+// lease checked after the restart never takes it, however the death and
+// the restart were seen: by events or by readings (#111).
+func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *testing.T) {
+	type book struct {
+		b    *lease.Book
+		c    *clock
+		log  *bytes.Buffer
+		p1   func(mem1, mem2 uint64) *protocol.Snapshot
+		up   policy.Request
+		upID string
+	}
+	lab := map[string]string{protocol.ComposeProjectLabel: "p1"}
+	tick := func(k *book) { k.c.t = k.c.t.Add(time.Second) }
+	die := func(k *book) { tick(k); k.b.ContainerEvent("die", "c2", "c2", lab) } // a crash
+	missing := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, 0)) }
+	gone := func(k *book) { missing(k); missing(k) } // with no events
+	up := func(k *book) { tick(k); k.upID = k.b.Check(k.up, k.p1(gib/8, 0), cfg).LeaseID }
+	runP1 := func(k *book) { tick(k); k.b.Check(run("w1", "p1"), k.p1(gib/8, 0), cfg) }
+	upW2 := func(k *book) {
+		tick(k)
+		w2 := k.up
+		w2.Worktree = "w2"
+		k.b.Check(w2, k.p1(gib/8, 0), cfg)
+	}
+	start := func(k *book) { tick(k); k.b.ContainerEvent("start", "c2", "c2", lab) }
+	back := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, gib)) }
+	for _, tc := range []struct {
+		name  string
+		steps []func(*book)
+		takes bool // the up's lease takes c2
+	}{
+		{"die, reading, up, start", []func(*book){die, missing, up, start, back}, true},
+		{"die, up, start", []func(*book){die, up, start, back}, true},
+		{"gone by readings, up, start", []func(*book){gone, up, start, back}, true},
+		{"missing, up, gone, reading shows it", []func(*book){missing, up, missing, back}, true},
+		{"die, reading, w2's up, w1's up, start", []func(*book){die, missing, upW2, up, start, back}, true},
+		{"die, run, start, die, up, start: a crash loop", []func(*book){die, missing, runP1, start, die, up, start, back}, true},
+		{"up, die, start: a restart policy's", []func(*book){up, die, start, back}, false},
+		{"die, start, up", []func(*book){die, missing, start, up, back}, false},
+		{"die, run, start, up", []func(*book){die, missing, runP1, start, up, back}, false},
+		{"die, w2's up, start, w1's up", []func(*book){die, missing, upW2, start, up, back}, false},
+		{"gone by readings, start, up", []func(*book){gone, start, up, back}, false},
+		{"gone by readings, run, start, up", []func(*book){gone, runP1, start, up, back}, false},
+		{"gone by readings, reading shows it, up", []func(*book){gone, back, up, back}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &book{}
+			k.b, k.c, k.log, k.p1, k.up = p1Started(t)
+			ls := k.b.List()
+			i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return strings.HasPrefix(l.Command, "docker start") })
+			if i < 0 {
+				t.Fatalf("leases = %+v, want the start's", ls)
+			}
+			startID, cost := ls[i].ID, ls[i].Bytes+gib/4
+			for _, s := range tc.steps {
+				s(k)
+			}
+			ls = k.b.List()
+			if took := !slices.ContainsFunc(ls, func(l protocol.Lease) bool { return l.ID == k.upID }); took != tc.takes {
+				t.Fatalf("up's lease took c2 = %v, want %v; leases = %+v\n%s", took, tc.takes, ls, k.log)
+			}
+			// The start holds its cost less what it still has: c2's use too
+			// while c2 is its (S-D: it keeps c2's share once let go).
+			want := cost - gib/8 - gib
+			if tc.takes {
+				want = cost - gib/8
+			}
+			if i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return l.ID == startID }); i < 0 || ls[i].Bytes != want {
+				t.Fatalf("leases = %+v, want %s open holding %d MiB", ls, startID, want>>20)
+			}
+			if !tc.takes {
+				return
+			}
+			for range 30 {
+				back(k)
+			}
+			if strings.Contains(k.log.String(), "never appeared\" lease="+k.upID) {
+				t.Fatalf("log: %s", k.log)
+			}
+		})
+	}
+}

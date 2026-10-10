@@ -112,10 +112,10 @@ type Book struct {
 	dockerUp   time.Time
 	// lapsed are leases that expired before their resource appeared (a
 	// slow image pull), kept for another timeout: a resource they name is
-	// their call's, so not ungated, though they no longer reserve. One
-	// that names one container is spent on it, until Observe drops it; a
-	// compose lease vouches for every service of its stack until a timeout
-	// after it lapsed (lapsedFor).
+	// their call's, so not ungated, though they no longer reserve. A
+	// worktree's compose lease vouches for every service of its stack
+	// until a timeout after it lapsed; any other is spent on its first
+	// match, until Observe drops it (lapsedFor).
 	lapsed []*entry
 }
 
@@ -169,12 +169,6 @@ type entry struct {
 	// labels cannot tell a checked container from an unchecked one of one
 	// project in one worktree.
 	guessed bool
-	// pinned is set for a manual compose lease, once lapsed, at the first
-	// container a reading attributes to a worktree that it vouches for:
-	// from then it vouches for attributed ones only in that container's
-	// working directory, dir (lapsedFor).
-	pinned bool
-	dir    string
 	// The lease's key (#33). labelled: its container carries the lease's ID
 	// (protocol.LeaseLabel). containerIDs: a start's containers, as Docker
 	// resolved them. name: a run's or create's --name, for a client that
@@ -1569,35 +1563,28 @@ func (e *entry) hasKey() bool {
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
-// spends it where its key names one container. A compose lease's service
-// spends nothing: it has no list of its services, so it vouches for every
-// one until a timeout after it lapsed, though no reading came between
-// to drop it (#145). A key that names one container keeps no such
-// deadline: it is spent on its match, until Observe drops it. Only one
-// its worktree could have started is eligible, before keyed picks the
-// best: a guess's, its own worktree's (entry.guessed); a real key's, its
-// own worktree's or an unattributed one, which a reading that drops
-// attribution shows. Never another worktree's. A manual one's is any
-// unattributed one, and an attributed one in the working directory of
-// the first attributed one it vouched for (entry.pinned): a manual call
-// may name a worktree's compose file, but one only. A vouch
-// only gates r: the lease reserves nothing again.
+// spends it unless it is a worktree's compose lease. That one spends
+// nothing on a service: it has no list of its services, so it vouches for
+// every one until a timeout after it lapsed, though no reading came
+// between to drop it (#145), and only for one its worktree could have
+// started: a guess's, its own worktree's (entry.guessed); a real key's,
+// its own worktree's or an unattributed one, which a reading that drops
+// attribution shows. Never another worktree's. It is spent on a compose
+// run's one-off, which it names. Any other lease is spent on its first
+// match, until Observe drops it: a key that names one container, and a
+// manual compose lease, which has no worktree to tell its call's stack
+// from another worktree's of the same project name. A vouch only gates r:
+// the lease reserves nothing again.
 func (b *Book) lapsedFor(r resource, now time.Time) bool {
-	manual := func(e *entry) bool {
-		return e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree == ""
-	}
-	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(e *entry) bool {
-		return e.Kind == "compose" && !now.Before(e.Expires.Add(b.timeout)) ||
-			e.Kind == "compose" && r.kind == "compose" && r.worktree != "" && e.Worktree != "" && r.worktree != e.Worktree ||
-			manual(e) && e.pinned && r.dir != e.dir
+	stack := func(o *entry) bool { return o.Kind == "compose" && o.Worktree != "" }
+	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(o *entry) bool {
+		return stack(o) && (!now.Before(o.Expires.Add(b.timeout)) ||
+			r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree)
 	}), r, true)
 	if e == nil {
 		return false
 	}
-	if manual(e) && !e.pinned {
-		e.pinned, e.dir = true, r.dir
-	}
-	if e.Kind != "compose" || r.oneoff {
+	if !stack(e) || r.oneoff {
 		b.lapsed = slices.DeleteFunc(b.lapsed, func(o *entry) bool { return o == e })
 	}
 	return true

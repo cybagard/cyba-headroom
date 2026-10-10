@@ -1095,32 +1095,35 @@ func TestALapsedComposeLeaseVouchesForItsWholeStack(t *testing.T) {
 	}
 }
 
-// A manual compose up's lapsed lease vouches for every service, whatever
-// its attribution, as its open lease binds them: a manual call may name
-// a worktree's compose file.
-func TestALapsedManualComposeLeaseVouchesForItsWholeStack(t *testing.T) {
-	for _, wt := range []string{"", "w1"} {
-		b, c, _ := book(t)
-		b.Observe(snap())
-		up := appUp
-		up.Worktree = ""
-		b.Check(up, snap(), cfg)
-		c.t = t0.Add(2 * time.Minute)
-		b.Observe(snap())
-		c.t = t0.Add(3 * time.Minute)
-		b.Observe(withService(withService(snap(), "web", wt), "db", wt))
-		if u := b.Ungated(); len(u) != 0 {
-			t.Errorf("services in %q: ungated %+v", wt, u)
+// A manual compose up's lapsed lease is spent on its first service,
+// whatever its attribution, as on main: it has no worktree to tell its
+// call's stack from another worktree's of the same project name, so a
+// slow-pulled stack has one service gated and the rest warned. Spent, it
+// keeps no deadline: it vouches until Observe drops it, though a sleep
+// kept a reading from coming between (#145).
+func TestALapsedManualComposeLeaseIsSpentOnItsFirstService(t *testing.T) {
+	for _, at := range []time.Duration{3 * time.Minute, 30 * time.Minute} {
+		for _, wt := range []string{"", "w1", "w2"} {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			up := appUp
+			up.Worktree = ""
+			b.Check(up, snap(), cfg)
+			c.t = t0.Add(2 * time.Minute)
+			b.Observe(snap())
+			c.t = t0.Add(at)
+			b.Observe(withService(withService(snap(), "web", wt), "db", wt))
+			if u := b.Ungated(); len(u) != 1 || u[0].Name != "db" {
+				t.Errorf("services in %q at %v: ungated %+v, want db", wt, at, u)
+			}
 		}
 	}
 }
 
-// Once a manual compose up's lapsed lease vouched for a worktree's
-// service, it vouches for attributed ones only in that service's working
-// directory: another worktree's unchecked stack of the same project name
-// is warned, in the same reading or a later one, as on main after its one
-// vouch (#145).
-func TestALapsedManualComposeLeaseKeepsToItsFirstDirectory(t *testing.T) {
+// Once a manual compose up's lapsed lease vouched for w1's service, it
+// vouches for nothing more: another worktree's unchecked stack of the
+// same project name is warned, in the same reading or a later one (#145).
+func TestALapsedManualComposeLeaseVouchesForNoMoreOnceSpent(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		readings [][]string // each reading's w2 services, after w1's web

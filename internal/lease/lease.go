@@ -1041,8 +1041,12 @@ type seen struct {
 	// kill event), not a restart policy's restart or a crash.
 	stopped bool
 	// bound: its start event bound it to a lease, in this life (a start
-	// resets it; a stop or die keeps it).
+	// resets it; a stop, kill or its die keeps it).
 	bound bool
+	// died: a die since its last start. A second die means a start the
+	// events lost, which began a life no event bound: that die drops
+	// bound (#131).
+	died bool
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
@@ -1070,7 +1074,8 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	now := b.now()
 	switch action {
 	case "stop":
-		b.seen[r.key] = seen{at: now, gone: true, stopped: true, bound: b.seen[r.key].bound}
+		last := b.seen[r.key]
+		b.seen[r.key] = seen{at: now, gone: true, stopped: true, bound: last.bound, died: last.died}
 	case "kill":
 		if sig := labels["signal"]; sig == "9" || sig == "15" {
 			// SIGKILL or SIGTERM: it stops (its die says it is gone). Any
@@ -1132,7 +1137,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.seen[r.key] = seen{at: now, bound: true}
 	case "die":
 		last := b.seen[r.key]
-		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound}
+		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound && !last.died, died: true}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
 		}

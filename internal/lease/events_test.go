@@ -275,6 +275,94 @@ func TestADieNewerThanTheReadingBindsNoNewRunNeverRead(t *testing.T) {
 	}
 }
 
+// A SIGTERM kill between the start and the die (docker stop) keeps the
+// mark the start event set: the dead one-off still binds no new run.
+func TestAKillBeforeTheDieBindsNoNewRunNeverRead(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(5 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg) // the next compose run
+	c.t = t0.Add(5500 * time.Millisecond)
+	b.ContainerEvent("kill", "r1", "r1", map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True", "signal": "15"})
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	c.t = t0.Add(16 * time.Second)
+	b.Observe(read(oneoff("r2", "p", "w1")(snap()), t0.Add(15*time.Second)))
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("the run's own one-off was warned ungated: %s", log)
+	}
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want the next run's, bound to r2", ls)
+	}
+}
+
+// A start resets the mark: a one-off its start event bound in one life,
+// started again as a tie (w1 and w2 each run p) and dead after a reading
+// began that lists it, is the reading's to bind, as when no event bound it.
+func TestATiedRestartOfAnEventBoundOneoffThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(3 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(5 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(6 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(4*time.Second))) // began before r1's die
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's run warned never appeared: %s", log)
+	}
+}
+
+// A second die with no start between says the events lost a start (a
+// reconnect): the life it ends is one no event bound, so the first life's
+// mark does not keep docker start x from binding x1 from the reading.
+func TestADieAfterALostStartBindsFromTheReading(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(named("w1", "x", "alpine"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "x1", "x", nil)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("die", "x1", "x", nil)
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	c.t = t0.Add(3 * time.Second)
+	b.Check(startOf("w1", "x"), snap(), cfg)
+	// x1's second start is lost.
+	c.t = t0.Add(5 * time.Second)
+	b.ContainerEvent("die", "x1", "x", nil)
+	c.t = t0.Add(6 * time.Second)
+	b.Observe(read(withNamed(snap(), "x1", "x", "alpine", "w1"), t0.Add(4*time.Second))) // began before x1's die
+	if ls := b.List(); len(ls) != 0 {
+		t.Errorf("leases = %+v, want docker start x bound to x1 and ended", ls)
+	}
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") {
+		t.Errorf("w1's docker start warned never appeared: %s", log)
+	}
+}
+
 // w1 and w2 each run a one-off of project p, so its start event is a
 // tie and the reading binds it. A one-off the reading lists that exits
 // (--rm) after the reading began ends w1's lease at once, not at its

@@ -1600,7 +1600,11 @@ func (e *entry) hasKey() bool {
 // a worktree's, or one with a dir. That one spends nothing on a service:
 // it has no list of its services, so it vouches for every one until a
 // timeout after it lapsed, though no reading came between to drop it
-// (#145), and only for one its call could have started. With a dir, one
+// (#145), and only for one its call could have started. That deadline
+// applies before keyed, so past it the lease vouches for nothing even in
+// the reading that crosses it, where it vouched once before #145: that
+// bounds a vouch after a sleep, and leaves a manual lease that lapsed
+// later the only key (#159). With a dir, one
 // Compose labelled with that dir, whatever the attribution: the dir tells
 // another stack of the same project name, and a compose file in another
 // worktree is the call's (#158). A worktree's also, dir or not, one its

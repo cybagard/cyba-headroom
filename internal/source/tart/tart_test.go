@@ -239,6 +239,29 @@ func TestOptionValueNamedLikeAnotherVMIsNotTheVM(t *testing.T) {
 	}
 }
 
+// Two tart runs of one VM (a refused duplicate, say) are both listed, in no
+// stable order (#205).
+func TestEveryTartRunOfAVMIsListed(t *testing.T) {
+	procs := fakeProcs{
+		procs: []vmproc.Process{
+			{PID: 900, PPID: 500, Comm: "tart", Args: []string{tartBin, "run", "a"}},
+			{PID: 901, PPID: 501, Comm: "tart", Args: []string{tartBin, "run", "a"}},
+			{PID: 902, PPID: 502, Comm: "tart", Args: []string{tartBin, "run", "b"}},
+		},
+	}
+	got := collect(t, tart.New(twoRunning(), procs, fakeVMs{}, home))
+	byName := map[string][]int{}
+	for _, vm := range got.VMs {
+		if !slices.Contains(vm.RunPIDs, vm.RunPID) {
+			t.Fatalf("%s: run pid %d not among %v", vm.Name, vm.RunPID, vm.RunPIDs)
+		}
+		byName[vm.Name] = slices.Sorted(slices.Values(vm.RunPIDs))
+	}
+	if !slices.Equal(byName["a"], []int{900, 901}) || !slices.Equal(byName["b"], []int{902}) {
+		t.Fatalf("run pids = %v, want a=[900 901] and b=[902]", byName)
+	}
+}
+
 func TestOneVMFailingTartGetKeepsTheOthers(t *testing.T) {
 	cli := twoRunning()
 	delete(cli, "get b --format json") // b's config cannot be read

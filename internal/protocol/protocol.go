@@ -462,6 +462,10 @@ type TartVM struct {
 	// How the VM was launched, for attribution (R3). tart run changes its own
 	// cwd to the VM bundle, so the launching shell is its parent.
 	RunPID int `json:"run_pid,omitempty"`
+	// RunPIDs are the PIDs of every live tart run of this VM, RunPID among
+	// them: a refused or duplicate run may list beside the one that runs it,
+	// in no stable order (#205).
+	RunPIDs []int `json:"run_pids,omitempty"`
 	// LaunchCwd is the cwd of tart run's parent; empty if it has exited.
 	LaunchCwd string `json:"launch_cwd,omitempty"`
 	// SharedDirs are the host paths of --dir shares.

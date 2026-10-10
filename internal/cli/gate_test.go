@@ -156,6 +156,96 @@ func TestDeriveGivesALeasedVMItsWorktree(t *testing.T) {
 	}
 }
 
+// A leased VM run again with no empty reading between, under another known
+// tart run process, is a new run, as after a reading without it: unchecked,
+// it is manual and ungated; a checked run's lease binds it. A run PID of 0
+// is unknown (a failed launch read): it changes nothing (#205).
+func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
+	p, q := os.Getpid(), os.Getppid()
+	type reading struct {
+		pid  int   // mac1's RunPID
+		pids []int // its RunPIDs: none in an old or fake reading
+	}
+	// Every review finding's shape is a row: a run told by one PID picked
+	// from an unordered set (R1-B1, R1-B2, R2-B2, R3-B1).
+	for _, tc := range []struct {
+		name     string
+		first    reading   // mac1's in the reading that binds it: {p} if zero
+		recheck  bool      // a checked tart run of mac1 under q, before the readings
+		readings []reading // mac1's in the readings after it was bound
+		want     string
+		ungated  bool // mac1 is listed as ungated
+	}{
+		{"another PID", reading{}, false, []reading{{q, nil}}, "mac1 (manual)", true},
+		{"another PID, checked", reading{}, true, []reading{{q, nil}}, `mac1 (worktree "A"`, false},            // R1-B2
+		{"PID 0, then the same", reading{}, false, []reading{{0, nil}, {p, nil}}, `mac1 (worktree "A"`, false}, // R1-B1
+		{"same PID", reading{}, false, []reading{{p, nil}}, `mac1 (worktree "A"`, false},
+		// Two tart runs of mac1, listed in either order: the first runs on (R2-B2).
+		{"two runs, in either order", reading{}, false, []reading{{p, []int{p, q}}, {q, []int{p, q}}, {p, []int{p, q}}}, `mac1 (worktree "A"`, false},
+		{"two runs, then the first alone", reading{}, false, []reading{{q, []int{p, q}}, {p, []int{p}}}, `mac1 (worktree "A"`, false},
+		// First seen with a duplicate run listed last, which then exits (R3-B1).
+		{"two runs at first, then the first alone", reading{q, []int{p, q}}, false, []reading{{p, []int{p}}}, `mac1 (worktree "A"`, false},
+		{"another run alone", reading{}, false, []reading{{q, []int{q}}}, "mac1 (manual)", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			book := lease.New(time.Minute, time.Now, discardLog())
+			cfg := config.Defaults("/x")
+			cfg.Budget.MaxMacOSVMs = 2
+			tick := derive(book, cfg.Budget.Params())
+			check := gateCheckOn(book, cfg.PolicyConfig(), nil, "")
+			const w = "repo::/Users/dev/w/project-a"
+			snap := func(vms ...protocol.TartVM) *protocol.Snapshot {
+				s := &protocol.Snapshot{
+					Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+					Orca: &protocol.Orca{Running: true, Worktrees: []protocol.Worktree{{ID: w, Path: "/Users/dev/w/project-a", Name: "A", Agents: []protocol.Agent{{State: "working"}}}}},
+					Tart: &protocol.Tart{Installed: true, MacOSRunning: len(vms), VMs: vms},
+				}
+				tick(s)
+				return s
+			}
+			mac1 := func(pid int, pids ...int) protocol.TartVM {
+				return protocol.TartVM{Name: "mac1", OS: "darwin", MemoryBytes: 4 << 30, RunPID: pid, RunPIDs: pids}
+			}
+			run := func(s *protocol.Snapshot, pid int) {
+				t.Helper()
+				if d := check(&protocol.CheckRequest{Worktree: w, Kind: "tart", Command: "tart run mac1", MacOS: true, CostBytes: 4 << 30, PID: pid, Target: "mac1"}, s); !d.Allow {
+					t.Fatalf("tart run mac1: %+v", d)
+				}
+			}
+
+			s := snap()
+			run(s, p)
+			first := tc.first
+			if first.pid == 0 {
+				first = reading{p, nil}
+			}
+			s = snap(mac1(first.pid, first.pids...)) // it uses its cost: the lease ends
+			if l := book.List(); len(l) != 0 {
+				t.Fatalf("leases = %+v", l)
+			}
+			if tc.recheck {
+				run(s, q)
+			}
+			for _, r := range tc.readings {
+				snap(mac1(r.pid, r.pids...))
+			}
+			last := tc.readings[len(tc.readings)-1]
+			s = snap(mac1(last.pid, last.pids...), protocol.TartVM{Name: "mac2", OS: "darwin", MemoryBytes: 4 << 30})
+			d := check(&protocol.CheckRequest{Worktree: "w2", Kind: "tart", Command: "tart run mac3", MacOS: true}, s)
+			if d.Allow || len(d.Reasons) == 0 || d.Reasons[0].Code != policy.VMSlots {
+				t.Fatalf("third macOS VM: %+v", d)
+			}
+			if !strings.Contains(d.Message, tc.want) {
+				t.Fatalf("want %s: %s", tc.want, d.Message)
+			}
+			ungated := slices.ContainsFunc(s.Ungated, func(u protocol.Ungated) bool { return u.Name == "mac1" })
+			if ungated != tc.ungated {
+				t.Fatalf("mac1 ungated = %v, want %v: %+v", ungated, tc.ungated, s.Ungated)
+			}
+		})
+	}
+}
+
 // Through the daemon's wiring: a snapshot the collector stopped refreshing
 // is not decided on (#30).
 func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {

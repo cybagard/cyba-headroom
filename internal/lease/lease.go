@@ -223,6 +223,10 @@ type verdict struct {
 	// event says nothing of whose a container is (#89).
 	owner string
 	lease string // the worktree of the lease it last bound
+	// runPIDs are the tart runs a VM was judged or last seen with, none
+	// while unknown: a known set that shares none of them is another run
+	// (#205).
+	runPIDs []int
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
 	// list it still. Until then its restart binds as bindsAfterCrash says,
@@ -683,9 +687,19 @@ type resource struct {
 	worktree string // "" when unattributed
 	os       string // a VM's OS
 	runPID   int    // a VM's tart run process
+	runPIDs  []int  // every tart run of the VM: none in an old or fake reading
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
 	bytes uint64
+}
+
+// runs is VM r's tart runs, in no stable order: runPID alone in a reading
+// that lists none, and none while unknown (#205).
+func (r resource) runs() []int {
+	if len(r.runPIDs) > 0 || r.runPID == 0 {
+		return r.runPIDs
+	}
+	return []int{r.runPID}
 }
 
 // resources lists s's containers and VMs. Their worktree is the evidence's
@@ -718,7 +732,7 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID})
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
 		}
 	}
 	return out
@@ -793,6 +807,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	present := map[string]uint64{}
 	for _, r := range res {
 		present[r.key] = r.bytes
+		// A VM whose tart runs share none with those it was last seen
+		// with is run again, with no reading between: new, as after a
+		// reading without it (#205). Runs unknown on either side: no
+		// change.
+		v, runs := b.verdicts[r.key], r.runs()
+		if r.kind == "vm" && v != nil && len(v.runPIDs) > 0 && len(runs) > 0 &&
+			!slices.ContainsFunc(runs, func(pid int) bool { return slices.Contains(v.runPIDs, pid) }) {
+			delete(b.prev, r.key)
+		}
 	}
 	// A start of several's container that died, back in a reading begun
 	// after: a lease checked while it was dead that it binds takes it, else
@@ -932,6 +955,10 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present = now, true
+		// No run known (a failed launch read): keep the last.
+		if runs := r.runs(); len(runs) > 0 {
+			v.runPIDs = runs
+		}
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
@@ -1682,7 +1709,7 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 // judge records how r started.
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, service: r.service, oneoff: r.oneoff, last: now, present: true,
-		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
+		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}, runPIDs: r.runs()}
 	if old := b.verdicts[r.key]; old != nil && r.kind != "vm" {
 		// An event's r is unattributed. A VM run again is a new run.
 		v.owner, v.lease = old.owner, old.lease

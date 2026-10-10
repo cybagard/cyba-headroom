@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -1739,14 +1740,12 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 	}
 }
 
-// app's services db and web, at use each, in w1: a reading of them at c's
-// time.
+// app's services, one container each at its use, in w1: a reading of them
+// at c's time.
 func appStack(c *clock, use map[string]uint64) *protocol.Snapshot {
 	s := snap()
-	for _, sv := range []string{"db", "web"} {
-		if u, ok := use[sv]; ok {
-			addContainer(s, protocol.Container{ID: sv, Name: "app-" + sv + "-1", MemoryBytes: u, Labels: appLabels(sv)}, "w1")
-		}
+	for _, sv := range slices.Sorted(maps.Keys(use)) {
+		addContainer(s, protocol.Container{ID: sv, Name: "app-" + sv + "-1", MemoryBytes: use[sv], Labels: appLabels(sv)}, "w1")
 	}
 	s.CollectedAt = c.t
 	return read(s, c.t)
@@ -1835,5 +1834,83 @@ func TestAnIdleUpTakingOverWarmingServicesAddsNothing(t *testing.T) {
 	}
 	if r := reserved(b); r != before {
 		t.Fatalf("reserved %d MiB after the idle up, want the %d before", r>>20, before>>20)
+	}
+}
+
+// abcStarted: one compose up starts app's services a, b and c, and a
+// reading shows them at use; then c dies.
+func abcStarted(t *testing.T, use map[string]uint64) (*lease.Book, *clock) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, nil))
+	c.t = c.t.Add(time.Second)
+	if d := b.Check(appUp, appStack(c, nil), cfg); !d.Allow {
+		t.Fatalf("up: %+v", d)
+	}
+	for _, sv := range []string{"a", "b", "c"} {
+		b.ContainerEvent("start", sv, "app-"+sv+"-1", appLabels(sv))
+	}
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, use))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "c", "app-c-1", appLabels("c"))
+	c.t = c.t.Add(time.Second)
+	return b, c
+}
+
+// A takeover keeps for each service of the taken lease that runs an equal
+// share of that lease's cost, less what it uses: one up starts a, b and c,
+// c dies, and compose up again starts c.
+func TestATakeoverSplitsTheTakenLeaseEquallyAmongItsServices(t *testing.T) {
+	b, c := abcStarted(t, map[string]uint64{"a": gib / 8, "b": gib / 8, "c": gib / 8})
+	if d := b.Check(appUp, appStack(c, map[string]uint64{"a": gib / 8, "b": gib / 8}), cfg); !d.Allow {
+		t.Fatalf("up again: %+v", d)
+	}
+	b.ContainerEvent("start", "c", "app-c-1", appLabels("c"))
+	c.t = c.t.Add(3 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"a": gib / 8, "b": gib / 8, "c": gib / 8}))
+	// a and b a third of 1 GiB each, c the estimate, each less 128 MiB.
+	if r, want := reserved(b), 2*(gib/3-gib/8)+gib-gib/8; r != want {
+		t.Fatalf("reserved %d MiB, want %d: %+v", r>>20, want>>20, b.List())
+	}
+}
+
+// A takeover carries no more than the taken lease still reserved, however
+// its share falls: a uses 768 MiB of the first up's 1 GiB, b and c none.
+func TestATakeoverCarriesAtMostWhatTheTakenLeaseReserved(t *testing.T) {
+	b, c := abcStarted(t, map[string]uint64{"a": 3 * gib / 4, "b": 0, "c": 0})
+	d := b.Check(appUp, appStack(c, map[string]uint64{"a": 3 * gib / 4, "b": 0}), cfg)
+	// The estimate and the old lease's 256 MiB left, not b's whole share
+	// (341 MiB).
+	if want := gib + gib/4; !d.Allow || d.CostBytes != want {
+		t.Fatalf("up again: %+v, want allowed at %d MiB", d, want>>20)
+	}
+}
+
+// web started by an up while db, there before, is held; db stops and
+// stays down, and compose up repeats: each takeover counts db, which the
+// last one started and never came, among the taken lease's services, so
+// what is reserved stays flat.
+func TestRepeatUpsWithAServiceDownStayBounded(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, map[string]uint64{"db": gib}))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"db": gib}), cfg)
+	b.ContainerEvent("start", "web", "app-web-1", appLabels("web"))
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib, "web": gib / 8}))
+	b.ContainerEvent("stop", "db", "app-db-1", appLabels("db"))
+	b.ContainerEvent("die", "db", "app-db-1", appLabels("db"))
+	for i := range 10 {
+		c.t = c.t.Add(5 * time.Second)
+		s := appStack(c, map[string]uint64{"web": gib / 8})
+		b.Observe(s)
+		c.t = c.t.Add(time.Second)
+		if d := b.Check(appUp, s, cfg); !d.Allow {
+			t.Fatalf("up %d denied: %+v", i, d)
+		}
+		// db's estimate, and web's share less its use.
+		if r, want := reserved(b), gib+gib-gib/8; r != want {
+			t.Fatalf("up %d: reserved %d MiB, want %d: %+v", i, r>>20, want>>20, b.List())
+		}
 	}
 }

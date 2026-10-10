@@ -34,3 +34,31 @@ What the design takes from it:
 - P3 ran 3 containers between two `SystemTime` reads, then fetched `since`..`until` with `until` set to: the second reading, the last event's `timeNano`, that − 1 ns, and the VM's time + 2 s.
 - P4 sent `since` = now and `until` = now − 1 s.
 - P6 followed a live stream while 50 threads each ran `docker run -d alpine:3 sleep 60`, then `docker kill` and `docker rm -f` on it, and recorded the arrival order of `timeNano`. An inversion is an event stamped before one that arrived earlier; its size is how much earlier. It was run twice.
+
+## Smoke test of the replay
+
+The branch build ran as a second daemon, with `HEADROOM_CONFIG_DIR` set to a short `/tmp` dir and `[docker] socket` set to a small Unix-socket proxy to Docker's socket. A shim dir with `docker → bin/headroom` came first on PATH. A one-service compose project (`alpine:3`, `sleep 600`) was brought up with the proxy running. The proxy was then killed, the project stopped and brought up again through the shim, and the proxy restarted:
+
+```text
+22:00:52.188 up (proxy alive)
+22:00:55.596 kill proxy
+22:00:56.616 stop
+22:00:59.761 up
+22:01:00.017 up done
+22:01:01.041 proxy restarted
+```
+
+The daemon's log (container ID shortened):
+
+```text
+22:00:56.601 INFO "docker events replayed as before" reason="… connect: connection refused"
+22:00:58.602 INFO "docker events replayed as before" reason="… connect: connection refused"
+22:01:02.622 INFO "docker events replay" offset=2.235385ms since=22:00:51.567 until=22:01:02.611
+22:01:02.624 INFO "docker event replayed" action=kill  id=670c46fe07ab at=22:00:57.603
+22:01:02.624 INFO "docker event replayed" action=kill  id=670c46fe07ab at=22:00:59.679
+22:01:02.624 INFO "docker event replayed" action=stop  id=670c46fe07ab at=22:00:59.742
+22:01:02.624 INFO "docker event replayed" action=die   id=670c46fe07ab at=22:00:59.744
+22:01:02.624 INFO "docker event replayed" action=start id=670c46fe07ab at=22:00:59.999
+```
+
+Each replayed event is dated inside the gap, in the order the stop and the up ran, and not at the reconnect (22:01:02.6), as #146 dated it. While Docker could not be reached, each reconnect fell back as before and said why.

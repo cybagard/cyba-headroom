@@ -62,7 +62,7 @@ except Exception:
 top = os.path.realpath(os.environ["TOP"])
 own = {n for n in os.environ["OWN"].split("\n") if n}
 own |= {r.get("repo") for r in rows if os.path.realpath(r.get("path") or "/") == top}
-generic = {"main", "master", "trunk", "develop", "dev", "head"}
+generic = {"main", "master", "trunk", "develop", "dev", "head", "worktrees", "worktree", "workspaces", "workspace"}
 # A public repo name is never a term; its folders and branches still are.
 public = {n.lower() for n in os.environ["PUBLIC"].split("\n") if n}
 

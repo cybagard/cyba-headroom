@@ -162,17 +162,22 @@ func runConfig(e Env) int {
 	return 0
 }
 
+// waitEvery is how often a daemon started with --wait tries the lock.
+const waitEvery = 250 * time.Millisecond
+
 // runDaemon runs the collector daemon until SIGINT or SIGTERM.
 func runDaemon(e Env) int {
-	logPath, link := "", false
+	logPath, link, wait := "", false, false
 	for a := e.Args[2:]; len(a) > 0; a = a[1:] {
 		switch {
 		case a[0] == "--link-shims":
 			link = true
+		case a[0] == "--wait":
+			wait = true
 		case a[0] == "--log" && len(a) > 1:
 			logPath, a = a[1], a[1:]
 		default:
-			fmt.Fprintf(e.Stderr, "headroom: daemon: usage: headroom daemon [--log FILE] [--link-shims]\n")
+			fmt.Fprintf(e.Stderr, "headroom: daemon: usage: headroom daemon [--log FILE] [--link-shims] [--wait]\n")
 			return 2
 		}
 	}
@@ -250,7 +255,21 @@ func runDaemon(e Env) int {
 		return fail(err)
 	}
 	book := wireGate(d, cfg, log, dockerSrc)
+	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	ln, err := daemon.Listen(cfg.Socket)
+	// --wait: under brew services beside a plain install, wait for the
+	// other daemon to stop rather than fail and be restarted (#192).
+	for logged := false; wait && errors.Is(err, daemon.ErrLocked); ln, err = daemon.Listen(cfg.Socket) {
+		if !logged {
+			log.Info("another daemon is running; waiting for it to stop", "socket", cfg.Socket)
+			logged = true
+		}
+		sleepCtx(ctx, waitEvery)
+		if ctx.Err() != nil {
+			return 0
+		}
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -259,8 +278,6 @@ func runDaemon(e Env) int {
 	if link {
 		linkOwnShims(e.Args[0], cfg.ShimDir, log)
 	}
-	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration, "samples", cfg.Samples.Enabled)
 
 	var wg sync.WaitGroup
@@ -436,10 +453,11 @@ func usage(w io.Writer) {
   headroom --watch [--all]
                       observe view, redrawn in place; Ctrl-C to quit
   headroom config     print the effective config and its path
-  headroom daemon [--log FILE] [--link-shims]
+  headroom daemon [--log FILE] [--link-shims] [--wait]
                       run the collector daemon; --log writes its log to FILE,
                       rotated at 5 MB; --link-shims links the shims to the
-                      path the daemon was started from (for brew services)
+                      path the daemon was started from (for brew services);
+                      --wait waits for another daemon to stop, then starts
   headroom check [--worktree ID] [--cost 2G] [--kind container|compose|tart] -- cmd...
                       ask the policy whether cmd may start; exit 0 allow, 75 deny
   headroom status [--json]

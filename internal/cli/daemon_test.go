@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // daemonDir is a short config dir whose daemon reads no Docker and keeps no
@@ -183,6 +184,101 @@ func TestASecondDaemonLeavesTheShimsAlone(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// With --wait, a second daemon waits for the first to stop, logging once,
+// then starts and links the shims, as brew services beside a plain install
+// needs (#192).
+func TestASecondDaemonWithWaitStartsWhenTheFirstStops(t *testing.T) {
+	dir := daemonDir(t)
+	env := func(k string) string { return map[string]string{"HEADROOM_CONFIG_DIR": dir}[k] }
+	first := selfLink(t, filepath.Join(dir, "first", "headroom"))
+	firstLog := filepath.Join(dir, "first.log")
+	ctx1, stop1 := context.WithCancel(context.Background())
+	t.Cleanup(stop1)
+	done1 := make(chan int, 1)
+	go func() {
+		done1 <- Run(Env{Args: []string{first, "daemon", "--link-shims", "--log", firstLog},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: env, Context: ctx1})
+	}()
+	waitFor(t, func() bool { b, _ := os.ReadFile(firstLog); return strings.Contains(string(b), "daemon started") })
+
+	second := selfLink(t, filepath.Join(dir, "second", "headroom"))
+	secondLog := filepath.Join(dir, "second.log")
+	ctx2, stop2 := context.WithCancel(context.Background())
+	t.Cleanup(stop2)
+	done2 := make(chan int, 1)
+	var errb syncBuffer
+	go func() {
+		done2 <- Run(Env{Args: []string{second, "daemon", "--wait", "--link-shims", "--log", secondLog},
+			Stdout: &errb, Stderr: &errb, Getenv: env, Context: ctx2})
+	}()
+	read := func() string { b, _ := os.ReadFile(secondLog); return string(b) }
+	waitFor(t, func() bool { return strings.Contains(read(), "waiting for it to stop") })
+	time.Sleep(time.Second) // a few more tries, still waiting
+	select {
+	case code := <-done2:
+		t.Fatalf("second daemon exited %d while the first runs: %s", code, errb.String())
+	default:
+	}
+	if strings.Contains(read(), "daemon started") {
+		t.Fatalf("second daemon started beside the first:\n%s", read())
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != first {
+			t.Errorf("while waiting: %s -> %q, %v; want %s", n, target, err, first)
+		}
+	}
+
+	stop1()
+	<-done1
+	waitFor(t, func() bool { return strings.Contains(read(), "daemon started") })
+	if n := strings.Count(read(), "waiting for it to stop"); n != 1 {
+		t.Errorf("logged the wait %d times:\n%s", n, read())
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != second {
+			t.Errorf("after the first stopped: %s -> %q, %v; want %s", n, target, err, second)
+		}
+	}
+	stop2()
+	if code := <-done2; code != 0 {
+		t.Fatalf("second daemon exit %d: %s", code, errb.String())
+	}
+}
+
+// A daemon still waiting stops when told to.
+func TestADaemonWaitingStopsOnSignal(t *testing.T) {
+	dir := daemonDir(t)
+	env := func(k string) string { return map[string]string{"HEADROOM_CONFIG_DIR": dir}[k] }
+	firstLog := filepath.Join(dir, "first.log")
+	ctx1, stop1 := context.WithCancel(context.Background())
+	t.Cleanup(stop1)
+	done1 := make(chan int, 1)
+	go func() {
+		done1 <- Run(Env{Args: []string{filepath.Join(dir, "headroom"), "daemon", "--log", firstLog},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: env, Context: ctx1})
+	}()
+	t.Cleanup(func() { stop1(); <-done1 })
+	waitFor(t, func() bool { b, _ := os.ReadFile(firstLog); return strings.Contains(string(b), "daemon started") })
+
+	secondLog := filepath.Join(dir, "second.log")
+	ctx2, stop2 := context.WithCancel(context.Background())
+	done2 := make(chan int, 1)
+	go func() {
+		done2 <- Run(Env{Args: []string{filepath.Join(dir, "headroom"), "daemon", "--wait", "--log", secondLog},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: env, Context: ctx2})
+	}()
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(secondLog)
+		return strings.Contains(string(b), "waiting for it to stop")
+	})
+	stop2()
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting daemon did not stop")
+	}
 }
 
 func TestDaemonWithoutLinkShimsLinksNothing(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -476,18 +477,109 @@ func TestFollowEventsReplaysASecondBeforeTheNewest(t *testing.T) {
 	}
 }
 
-// followEvents remembers only as many delivered events as Docker keeps to
-// replay: the oldest beyond them is delivered again (#146).
-func TestFollowEventsRemembersTheLast256(t *testing.T) {
-	var first fakeStream
-	for i := range int64(257) {
-		first.events = append(first.events, fakeEvent{"start", "A", fmt.Sprint(i), 5*sec + i})
-	}
-	got, _, _ := follow(first,
-		fakeStream{events: []fakeEvent{{"start", "A", "0", 5 * sec}, {"start", "A", "256", 5*sec + 256}}},
+// followEvents remembers what it delivered as far back as a reconnect
+// replays, a second before the newest, and forgets what is older (#146).
+func TestFollowEventsRemembersASecondBeforeTheNewest(t *testing.T) {
+	got, _, _ := follow(
+		fakeStream{events: []fakeEvent{{"start", "A", "out", 5 * sec}, {"start", "B", "in", 5*sec + 1}, {"start", "C", "newest", 6*sec + 1}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "out", 5 * sec}, {"start", "B", "in", 5*sec + 1}}},
 		fakeStream{})
-	if len(got) != 258 || got[257] != "start A 0" {
-		t.Fatalf("delivered %d, the last %q: want the oldest of 257 again, and only it", len(got), got[len(got)-1])
+	want := []string{"start A out", "start B in", "start C newest", "start A out"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q: the one just inside the second dropped, the one just outside forgotten", got, want)
+	}
+}
+
+// densely is Docker's ring around a reconnect that delivers a gap late:
+// 196 kills already in it when the daemon connected (T+200 to 395 ms),
+// then x1's start and die and 58 kills live (T+1000 to 1059 ms), then 10
+// more. The second stream replays the gap, and the third the ring's last
+// 256 logged. More than 256 events were delivered within the second
+// before the newest (#146, review round 3's F3-1).
+func densely(first ...fakeEvent) []fakeStream {
+	const T, ms = 100 * sec, sec / 1000
+	var gap, live, more []fakeEvent
+	for i := range int64(196) {
+		gap = append(gap, fakeEvent{"kill", fmt.Sprint("G", i), "", T + (200+i)*ms})
+	}
+	live = append(live, first...)
+	for i := int64(len(first)); i < 60; i++ {
+		live = append(live, fakeEvent{"kill", fmt.Sprint("A", i), "", T + (1000+i)*ms})
+	}
+	for i := range int64(10) {
+		more = append(more, fakeEvent{"kill", fmt.Sprint("B", i), "", T + (1100+i)*ms})
+	}
+	return []fakeStream{{events: live}, {events: slices.Concat(gap, live, more)}, {events: slices.Concat(gap[10:], live, more)}, {}}
+}
+
+// A gap delivered late, with more than 256 events in the second before
+// the newest: no event is delivered twice (#146, review round 3's F3-1).
+func TestFollowEventsDeliversNoEventTwiceAfterADenseReplay(t *testing.T) {
+	got, _, _ := follow(densely()...)
+	n := map[string]int{}
+	for _, g := range got {
+		n[g]++
+	}
+	for g, c := range n {
+		if c > 1 {
+			t.Errorf("%q delivered %d times", g, c)
+		}
+	}
+	if len(n) != 266 {
+		t.Errorf("delivered %d events, want 266", len(n))
+	}
+}
+
+// docker run --name x ran x1 and it exited; docker start x is checked
+// while the stream is down, and the reconnect replays a dense second:
+// x1's old start and die do not reach the book again, so the start's
+// lease holds x1 when it runs (#146, review round 3's D1).
+func TestFollowEventsADenseReplayKeepsAPendingStart(t *testing.T) {
+	var log strings.Builder
+	t0 := time.Unix(1000, 0)
+	now := t0
+	book := lease.New(2*time.Minute, func() time.Time { return now }, slog.New(slog.NewTextHandler(&log, nil)))
+	snap := func(began time.Time, running bool) *protocol.Snapshot {
+		headroom := int64(8 << 30)
+		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+			Budget:      &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
+			Docker:      &protocol.Docker{Running: true},
+			Tart:        &protocol.Tart{Installed: true},
+			Sources:     map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}},
+			CollectedAt: now}
+		if running {
+			s.Docker.Containers = []protocol.Container{{ID: "x1", Name: "x", Image: "alpine", MemoryBytes: 1 << 29}}
+		}
+		return s
+	}
+	cfg := policy.Config{PressureGuard: "critical", DefaultContainerBytes: 1 << 30, DefaultTartBytes: 4 << 30}
+	book.Observe(snap(t0, false))
+	book.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker run alpine", CostBytes: 1 << 30, Target: "alpine", Name: "x"}, snap(t0, false), cfg)
+	streams := densely(fakeEvent{"start", "x1", "x", 100*sec + sec}, fakeEvent{"die", "x1", "x", 100*sec + sec + 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	waited := 0
+	followEvents(ctx, &fakeEvents{streams: streams, cancel: cancel}, func(action, id, name string, _ map[string]string) {
+		if id == "x1" {
+			now = now.Add(time.Second)
+			book.ContainerEvent(action, id, name, nil)
+		}
+	}, func(context.Context, time.Duration) {
+		now = now.Add(time.Second)
+		if waited++; waited == 1 {
+			book.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", CostBytes: 1 << 30, Target: "x"}, snap(t0, false), cfg)
+		}
+	})
+	now = now.Add(time.Second)
+	book.ContainerEvent("start", "x1", "x", nil) // docker start x
+	now = now.Add(2 * time.Second)
+	book.Observe(snap(now.Add(-time.Second), true))
+	if ls := book.List(); len(ls) != 1 {
+		t.Errorf("leases = %+v, want docker start x holding x1", ls)
+	}
+	now = now.Add(3 * time.Minute)
+	book.Observe(snap(now.Add(-time.Second), true))
+	if strings.Contains(log.String(), "ungated") || strings.Contains(log.String(), "never appeared") {
+		t.Errorf("warned: %s", log.String())
 	}
 }
 

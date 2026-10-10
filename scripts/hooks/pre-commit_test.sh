@@ -33,7 +33,8 @@ cat <<JSON
 {"ok": true, "result": {"worktrees": [
  {"repo": "$(basename "$PWD")", "path": "$PWD", "branch": "refs/heads/main", "displayName": "main"},
  {"repo": "orca-only-repo", "path": "/Users/x/ws/orca-only-repo/wt-zebra", "branch": "refs/heads/team/fix-billing", "displayName": "Billing Fix"},
- {"repo": "api", "path": "/Users/x/ws/api/main", "branch": "refs/heads/main", "displayName": "main"}]}}
+ {"repo": "api", "path": "/Users/x/ws/api/main", "branch": "refs/heads/main", "displayName": "main"},
+ {"repo": "nested-repo", "path": "/Users/x/nested-repo/worktrees/wt-1", "branch": "refs/heads/main", "displayName": "main"}]}}
 JSON
 ORCA
 	chmod +x bin/orca
@@ -89,6 +90,8 @@ check "other repo's branch is blocked"     block 'stage "merged team/fix-billing
 check "other repo's display name blocked"  block 'stage "see Billing Fix"'
 check "short repo names cause no false hits" allow 'stage "rapid client golang"'
 check "generic worktree names are ignored" allow 'stage "checkout main"'
+check "generic folder names are ignored" allow 'stage "Attribution.Worktrees"'
+check "repo under a generic folder blocked" block 'stage "see nested-repo"'
 check "own repo name is allowed"           allow 'stage "this repo is @REPO@"'
 check "own repo via origin when Orca lacks this path" allow 'git remote add origin https://github.com/o/orca-only-repo.git && stage "orca-only-repo is us"'
 check "home path is blocked"               block 'stage "/Users/tester/projects"'

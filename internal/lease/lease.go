@@ -13,14 +13,17 @@
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
 // cost, when they are gone, or at its timeout; one that never saw its
-// resource is logged as expired. A lease with no key (entry.hasKey), its
-// call having named nothing a new resource could match, never binds: a
-// worktree's holds its cost to its timeout. A headroom check sends no key,
-// nor does the shim for a call whose resource it cannot name: for example
-// a compose call with no project (podman compose without -p, or a file on
-// stdin the shim cannot name), a start whose target follows an option the
-// shim does not know, or a start whose containers Docker resolved all run
-// or are an open lease's (docker start a b, a running). A compose project
+// resource is logged as expired. A lease with no key (entry.hasKey) never
+// binds, the book keeping nothing a new resource could match: a worktree's
+// holds its cost to its timeout. A headroom check sends no key, nor does
+// the shim for a call whose resource it cannot name: for example a compose
+// call with no project (podman compose without -p, or a file on stdin the
+// shim cannot name), or a start whose target follows an option the shim
+// does not know. A start is keyed by the IDs of the containers Docker
+// resolved that it starts, and by its first target's name when Docker did
+// not resolve it; one whose first target runs, is an open lease's or is
+// missing, and whose other targets Docker did not resolve, has neither
+// (docker start a b, a running, b unresolved). A compose project
 // the shim guessed, Compose's config having failed (#84), binds only
 // containers its own worktree's reading shows, and when it binds none,
 // ends as one with no key (entry.guessed).

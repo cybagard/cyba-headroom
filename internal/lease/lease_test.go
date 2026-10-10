@@ -1738,3 +1738,102 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 		})
 	}
 }
+
+// app's services db and web, at use each, in w1: a reading of them at c's
+// time.
+func appStack(c *clock, use map[string]uint64) *protocol.Snapshot {
+	s := snap()
+	for _, sv := range []string{"db", "web"} {
+		if u, ok := use[sv]; ok {
+			addContainer(s, protocol.Container{ID: sv, Name: "app-" + sv + "-1", MemoryBytes: u, Labels: appLabels(sv)}, "w1")
+		}
+	}
+	s.CollectedAt = c.t
+	return read(s, c.t)
+}
+
+func appLabels(sv string) map[string]string {
+	return map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeServiceLabel: sv, protocol.ComposeWorkingDirLabel: "/src/w1"}
+}
+
+var appUp = policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}
+
+// #112: web runs; compose up starts db, holding web; web crashes; compose
+// up again starts web, taking the first up's lease over. Both warm: the
+// takeover holds what db still needs as well as web's estimate.
+func TestATakeoverKeepsWhatTheServicesItDoesNotStartNeed(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, map[string]uint64{"web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg)
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 4, "web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "web", "app-web-1", appLabels("web"))
+	c.t = c.t.Add(time.Second)
+	if d := b.Check(appUp, appStack(c, map[string]uint64{"db": gib / 4}), cfg); !d.Allow {
+		t.Fatalf("up again: %+v", d)
+	}
+	b.ContainerEvent("start", "web", "app-web-1", appLabels("web"))
+	c.t = c.t.Add(3 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 2, "web": gib / 2}))
+	// Each service's 1 GiB less the half it uses.
+	if r := reserved(b); r != gib {
+		t.Fatalf("reserved %d MiB, want 1024 for db and web: %+v", r>>20, b.List())
+	}
+}
+
+// web runs; compose up starts db, holding web; db crashes; compose up
+// again starts db. db is reserved once: the takeover's estimate, less
+// what db uses now, not also what it used before it crashed.
+func TestATakeoverReservesAServiceItStartsAgainOnce(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, map[string]uint64{"web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg)
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 4, "web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(time.Second)
+	if d := b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg); !d.Allow {
+		t.Fatalf("up again: %+v", d)
+	}
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(3 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 2, "web": gib}))
+	if r := reserved(b); r != gib/2 {
+		t.Fatalf("reserved %d MiB, want 512 for db: %+v", r>>20, b.List())
+	}
+}
+
+// As #112's case, then compose up -d once more, Compose's dry run saying it
+// starts nothing: it adds nothing to what is reserved.
+func TestAnIdleUpTakingOverWarmingServicesAddsNothing(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(appStack(c, map[string]uint64{"web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"web": gib}), cfg)
+	b.ContainerEvent("start", "db", "app-db-1", appLabels("db"))
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(appStack(c, map[string]uint64{"db": gib / 4, "web": gib}))
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("die", "web", "app-web-1", appLabels("web"))
+	c.t = c.t.Add(time.Second)
+	b.Check(appUp, appStack(c, map[string]uint64{"db": gib / 4}), cfg)
+	b.ContainerEvent("start", "web", "app-web-1", appLabels("web"))
+	c.t = c.t.Add(3 * time.Second)
+	s := appStack(c, map[string]uint64{"db": gib / 2, "web": gib / 2})
+	b.Observe(s)
+	before := reserved(b)
+	idle := appUp
+	idle.Idle = true
+	if d := b.Check(idle, s, cfg); !d.Allow || d.CostBytes != 1 {
+		t.Fatalf("idle up: %+v, want allowed at a byte", d)
+	}
+	if r := reserved(b); r != before {
+		t.Fatalf("reserved %d MiB after the idle up, want the %d before", r>>20, before>>20)
+	}
+}

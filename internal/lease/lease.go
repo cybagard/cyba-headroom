@@ -158,6 +158,9 @@ type entry struct {
 	// waited for (Compose saw that running too), so binding nothing (other
 	// leases hold the stack) is no failure.
 	idle bool
+	// starting are the services of its stack that were down at its check,
+	// which its call starts (Book.downServices).
+	starting map[string]bool
 	// took are the leases this one took over at its check: a release
 	// (its call did not start) gives them back.
 	took, tookLapsed []*entry
@@ -178,6 +181,8 @@ type verdict struct {
 	u       protocol.Ungated // for ungated: what the snapshot lists
 	project string           // a compose container's project, and its directory
 	dir     string
+	service string // a compose container's service
+	oneoff  bool   // a compose run's one-off container
 	// owner is the worktree the last reading that attributed it named: an
 	// event says nothing of whose a container is (#89).
 	owner string
@@ -218,6 +223,102 @@ const stale = 2 * time.Second
 // nothing over, and is taken over once it hit (entry.guessed).
 func composeTakes(r policy.Request, o *entry) bool {
 	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && (!o.guessed || len(o.bound) > 0) && o.project == r.Target && o.Worktree == r.Worktree
+}
+
+// downServices are the services of compose project r.Target in
+// r.Worktree, one-offs aside, whose containers the book last saw stop, die
+// or go, and that none of its containers runs: an up starts them again
+// (#112).
+func (b *Book) downServices(r policy.Request) map[string]bool {
+	up, down := map[string]bool{}, map[string]bool{}
+	for k, v := range b.verdicts {
+		if v.project != r.Target || v.oneoff || cmp.Or(v.owner, v.lease) != r.Worktree {
+			continue
+		}
+		if svc := cmp.Or(v.service, k); b.runs(k, v) {
+			up[svc] = true
+		} else {
+			down[svc] = true
+		}
+	}
+	for svc := range up {
+		delete(down, svc)
+	}
+	return down
+}
+
+// runs reports whether k, a container with verdict v, runs as far as the
+// book knows: Docker's last event says so, else the latest reading shows
+// it, or it is only missing (Book.gone).
+func (b *Book) runs(k string, v *verdict) bool {
+	if sn, ok := b.seen[k]; ok {
+		return !sn.gone
+	}
+	return v.present || b.missed[k] > 0 && !b.gone(k)
+}
+
+// deadUse is what o's containers that died since the reading use showed
+// them used then: o.used still counts it.
+func (b *Book) deadUse(o *entry, use map[string]uint64) uint64 {
+	var n uint64
+	for k := range o.bound {
+		if v := b.verdicts[k]; !o.held[k] && v != nil && !b.runs(k, v) {
+			n += use[k]
+		}
+	}
+	return n
+}
+
+// takeover is what a compose up's lease carries over from a lease it takes
+// while services of its stack are down (Book.carry).
+type takeover struct{ carry, used uint64 }
+
+// carry is what o, a lease a compose up takes over while services of its
+// stack are down, still reserves for its services that run, and what their
+// containers use (use, by key), as the takeover in Check says. Its cost is
+// split equally among its services: those of its containers, held ones
+// and long gone ones aside, and those its own call started that none of
+// them is (entry.starting). ok is false when nothing is down or none of o's
+// services runs.
+func (b *Book) carry(o *entry, down map[string]bool, use map[string]uint64) (t takeover, ok bool) {
+	if len(down) == 0 {
+		return t, false
+	}
+	services, running := map[string]bool{}, map[string][]string{}
+	for k := range o.bound {
+		if o.held[k] {
+			continue
+		}
+		v := b.verdicts[k]
+		if v == nil && b.gone(k) {
+			continue // long gone: its service is unknown, and runs in another
+		}
+		svc := k
+		if v != nil {
+			svc = cmp.Or(v.service, k)
+		}
+		services[svc] = true
+		if v == nil || b.runs(k, v) {
+			running[svc] = append(running[svc], k)
+		}
+	}
+	for svc := range o.starting {
+		services[svc] = true // its call started it, and it has not come
+	}
+	if len(running) == 0 {
+		return t, false
+	}
+	share := o.cost / uint64(len(services))
+	for _, ks := range running {
+		var used uint64
+		for _, k := range ks {
+			used += use[k]
+		}
+		t.carry += share - min(used, share)
+		t.used += used
+	}
+	t.carry = min(t.carry, o.cost-min(t.used, o.cost))
+	return t, true
 }
 
 // startTakes reports whether a start of starts takes o over: the lease of
@@ -317,12 +418,28 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// the takeovers below): the check weighs that in its cost, not twice.
 	// An idle up adds nothing: what it takes over stays counted as it is.
 	est := cmp.Or(r.CostBytes, c.DefaultContainerBytes) // one container's, or the stack's
-	var reservedTaken, surplus uint64
+	var down map[string]bool
+	use := map[string]uint64{}
+	if r.Kind == "compose" && r.Op != "run" && !idle {
+		down = b.downServices(r)
+		if s != nil {
+			for _, x := range resources(s) {
+				use[x.key] = x.bytes
+			}
+		}
+	}
+	var reservedTaken, carried, surplus uint64
 	composeTook := false
+	carries := map[*entry]takeover{}
 	for _, e := range b.open {
 		switch {
 		case !idle && composeTakes(r, e):
-			reservedTaken, composeTook = reservedTaken+e.reserved(), true
+			if t, ok := b.carry(e, down, use); ok {
+				carries[e], carried = t, carried+t.carry
+			} else {
+				reservedTaken += e.reserved()
+			}
+			composeTook = true
 			continue
 		case startTakes(r, starts, e):
 			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // that container's cost: the larger
@@ -348,7 +465,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// seconds old, so the pressure guard still holds.
 		r.CostBytes = 1
 	case composeTook:
-		r.CostBytes = max(est, reservedTaken)
+		r.CostBytes = max(est, reservedTaken) + carried
 	case n > 1 || surplus > 0:
 		// docker start a b c: each costs what one would, or what the run
 		// or create that made it reserved, if more.
@@ -400,7 +517,13 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				return false
 			}
 			e.took = append(e.took, o)
-			reserved, used = reserved+o.reserved(), used+o.used
+			if t, ok := carries[o]; ok {
+				used += t.used // weighed in the check's cost
+			} else {
+				// Not the last use of one that died since: this call
+				// starts it again.
+				reserved, used = reserved+o.reserved(), used+o.used-min(b.deadUse(o, use), o.used)
+			}
 			for k := range o.bound {
 				e.bound[k], e.held[k] = true, o.held[k]
 			}
@@ -408,12 +531,25 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
+		if len(down) > 0 {
+			e.starting = down
+		}
 		if len(e.took) > 0 {
-			// The same stack again: it holds the larger of this call's
-			// estimate and what the old leases still reserved (as
-			// decided), bounded however often it repeats, with a fresh
-			// timeout: this call was admitted, and its containers may be
-			// a pull away; on top of what their containers use.
+			// The same stack again, with a fresh timeout: this call was
+			// admitted, and its containers may be a pull away. With none
+			// of its services down, the call recreates the stack or
+			// starts what the old leases still wait for: it holds the
+			// larger of its estimate and what they still reserved,
+			// bounded however often it repeats. With some down (#112),
+			// it starts those, by its estimate, and holds beside it what
+			// each old lease still reserves for its services that run:
+			// each one's equal share of that lease's cost (one number
+			// says no more), less what its containers use (Book.carry).
+			// A service it starts again is counted once, by its
+			// estimate; one it also recreates while warming is counted
+			// twice until the lease ends, at most what the old lease
+			// reserved for it. Either way, as decided, and on top of
+			// what their containers use.
 			e.cost, e.used = max(e.cost, reserved)+used, used
 			if idle {
 				// It adds nothing: what it took over ends when that would
@@ -1346,7 +1482,7 @@ func (b *Book) lapsedFor(r resource) bool {
 
 // judge records how r started.
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
-	v := &verdict{how: how, project: r.project, dir: r.dir, last: now, present: true,
+	v := &verdict{how: how, project: r.project, dir: r.dir, service: r.service, oneoff: r.oneoff, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
 	if old := b.verdicts[r.key]; old != nil {
 		v.owner, v.lease = old.owner, old.lease // an event's r is unattributed

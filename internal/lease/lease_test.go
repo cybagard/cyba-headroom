@@ -990,6 +990,41 @@ func TestAGuessThatHitsBindsItsStack(t *testing.T) {
 	}
 }
 
+// A guess that hits after its timeout (a slow pull): it lapses as a real
+// key's lease does, so its container, read in its own worktree, is gated
+// and nothing says it never appeared. The same container in another
+// worktree, or unattributed, is no guess's, nor is one after a further
+// timeout (#120).
+func TestAGuessThatHitsAfterItsTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wt      string        // the container's worktree
+		after   time.Duration // when it appears, from the check
+		ungated bool
+	}{
+		{"in its own worktree", "w1", 3 * time.Minute, false},
+		{"in another worktree", "w2", 3 * time.Minute, true},
+		{"unattributed", "", 3 * time.Minute, true},
+		{"after a further timeout", "w1", 5 * time.Minute, true},
+	} {
+		b, c, log := book(t)
+		b.Observe(snap())
+		b.Check(guessed("w1", "app"), snap(), cfg)
+		c.t = t0.Add(2 * time.Minute)
+		b.Observe(snap()) // past its timeout, nothing yet
+		c.t = t0.Add(tc.after - time.Second)
+		b.Observe(snap())
+		c.t = t0.Add(tc.after)
+		b.Observe(withComposeProject(snap(), "app-web-1", tc.wt, "app", gib/4))
+		if ungated := len(b.Ungated()) > 0; ungated != tc.ungated {
+			t.Errorf("%s: ungated %v, want %v: %+v", tc.name, ungated, tc.ungated, b.Ungated())
+		}
+		if strings.Contains(log.String(), "never appeared") {
+			t.Errorf("%s: log: %s", tc.name, log)
+		}
+	}
+}
+
 // A guess that hits while another worktree's checked up names the same
 // project: each binds the container its own worktree runs, the guess too.
 func TestAGuessThatHitsKeepsItsOwnContainerFromAnotherWorktree(t *testing.T) {

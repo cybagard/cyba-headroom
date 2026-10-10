@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -357,5 +358,158 @@ func TestADieNewerThanTheReadingKeepsNeverAppeared(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("no never appeared for an up that started nothing: %s", log)
+	}
+}
+
+// composeUp is a compose up whose project the shim read.
+func composeUp(wt, project string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: project}
+}
+
+// stopped runs A1, a service of project app, in a reading, then compose
+// stop: two readings without it make it gone. Its verdict is kept.
+func stopped(b *lease.Book, c *clock) {
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.Observe(read(snap(), t0))
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(service("A1", "app", "w1")(snap()), t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("stop", "A1", "A1", lab)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+}
+
+// diesDuringTheReading starts A1 again, and it exits (a one-shot
+// service) after a reading began that lists it.
+func diesDuringTheReading(b *lease.Book, c *clock) {
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("start", "A1", "A1", lab)
+	began := c.t.Add(time.Second)
+	c.t = c.t.Add(3 * time.Second)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	c.t = c.t.Add(time.Second)
+	b.Observe(read(service("A1", "app", "w1")(snap()), began))
+}
+
+// w1 and w2 each run compose up of project app, so the start event of
+// A1, stopped since its last reading, is a tie. A1 exits during the
+// reading that lists it: the reading binds it to w1's up, as for a new
+// service. The verdict kept from its last life is not its start event's.
+func TestATiedUpOfAStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	stopped(b, c)
+	log.Reset()
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("A1, started by a checked up, is listed ungated: %+v", u)
+	}
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// The same with no earlier life: the tied start binds nothing, and the
+// reading binds A1.
+func TestATiedUpOfANewServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// The same when w1's up started A1 in its last life: its gated verdict,
+// kept since compose stop, is not this start event's either.
+func TestATiedUpOfAGatedStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "app"}
+	b.Observe(read(snap(), t0))
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "A1", "A1", lab) // binds w1's up: gated
+	for c.t.Before(t0.Add(130 * time.Second)) {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(service("A1", "app", "w1")(snap()), c.t.Add(-time.Second)))
+	}
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases = %+v, want none", ls)
+	}
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("stop", "A1", "A1", lab)
+	b.ContainerEvent("die", "A1", "A1", lab)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+	log.Reset()
+	b.Check(composeUp("w1", "app"), snap(), cfg)
+	b.Check(composeUp("w2", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	c.t = c.t.Add(4 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's up warned never appeared: %s", log)
+	}
+}
+
+// A guessed up in one worktree: the start event's container has no
+// worktree, so the guess keys no lease. A1, stopped since its last
+// reading, exits during the reading that lists it: the reading binds it to
+// w1's up and judges it gated.
+func TestAGuessedUpOfAStoppedServiceThatDiesDuringTheReadingBinds(t *testing.T) {
+	b, c, _ := book(t)
+	stopped(b, c)
+	b.Check(guessed("w1", "app"), snap(), cfg)
+	diesDuringTheReading(b, c)
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Errorf("leases = %+v, want w1's bound to A1", ls)
+	}
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("A1, started by w1's checked up, is listed ungated: %+v", u)
+	}
+}
+
+// A container gated in its last life, stopped, then started through the
+// socket with no check, that exits during the reading that lists it: it
+// keeps its verdict, so it is not warned.
+func TestAGatedContainerRestartedUngatedThatDiesDuringTheReadingKeepsItsVerdict(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), t0))
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker run", CostBytes: gib, Name: "x"}, snap(), cfg)
+	c.t = t0.Add(5 * time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib/2), t0.Add(4*time.Second)))
+	c.t = t0.Add(10 * time.Second)
+	b.ContainerEvent("stop", "x", "x", nil)
+	b.ContainerEvent("die", "x", "x", nil)
+	for range 2 {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t.Add(-time.Second)))
+	}
+	log.Reset()
+	c.t = c.t.Add(2 * time.Second)
+	b.ContainerEvent("start", "x", "x", nil)
+	began := c.t.Add(time.Second)
+	c.t = c.t.Add(3 * time.Second)
+	b.ContainerEvent("die", "x", "x", nil)
+	c.t = c.t.Add(time.Second)
+	b.Observe(read(withContainerMem(snap(), "x", "w1", gib/2), began))
+	if strings.Contains(log.String(), "ungated") {
+		t.Errorf("x was warned ungated: %s", log)
+	}
+	if u := b.Ungated(); len(u) != 0 {
+		t.Errorf("ungated = %+v, want none", u)
 	}
 }

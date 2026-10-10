@@ -794,10 +794,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	var fresh []resource // new this tick, or back after a reading it was missing from (not gone: a die), and bound to no lease yet
 	for _, r := range res {
-		if sn := b.seen[r.key]; sn.gone && sn.at.After(began) && b.verdicts[r.key] != nil {
-			// Its start event judged it, and it died since the reading
-			// began: gone, not new to a lease checked since. One no event
-			// bound is the reading's to bind or judge (#131).
+		if sn := b.seen[r.key]; sn.gone && sn.at.After(began) && sn.bound {
+			// This life's start event bound it, and it died since the
+			// reading began: gone, not new to a lease checked since. One
+			// no event bound, whatever verdict an earlier life left, is
+			// the reading's to bind or judge (#131).
 			continue
 		}
 		if (!b.prev[r.key] || b.missed[r.key] > 0 && !b.gone(r.key)) && !bound[r.key] {
@@ -1039,6 +1040,9 @@ type seen struct {
 	// stopped: by docker stop or kill, or compose stop or kill (a stop or
 	// kill event), not a restart policy's restart or a crash.
 	stopped bool
+	// bound: its start event bound it to a lease, in this life (a start
+	// resets it; a stop or die keeps it).
+	bound bool
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
@@ -1066,7 +1070,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 	now := b.now()
 	switch action {
 	case "stop":
-		b.seen[r.key] = seen{at: now, gone: true, stopped: true}
+		b.seen[r.key] = seen{at: now, gone: true, stopped: true, bound: b.seen[r.key].bound}
 	case "kill":
 		if sig := labels["signal"]; sig == "9" || sig == "15" {
 			// SIGKILL or SIGTERM: it stops (its die says it is gone). Any
@@ -1125,8 +1129,10 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		e.bind(r)
 		b.judge(r, gated, now)
 		b.boundBy(r, e)
+		b.seen[r.key] = seen{at: now, bound: true}
 	case "die":
-		b.seen[r.key] = seen{at: now, gone: true, stopped: b.seen[r.key].stopped}
+		last := b.seen[r.key]
+		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
 		}

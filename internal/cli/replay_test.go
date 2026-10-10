@@ -60,6 +60,20 @@ func replay(f *fakeEvents, now *time.Time, gap func(i int)) ([]delivered, string
 // since, and its start binds db: the up then reserves only what db does
 // not use yet, rather than count db twice (#170).
 func TestAReplayDatesACrashBeforeAnUpCheckedInTheGap(t *testing.T) {
+	crashBeforeUp(t, false)
+}
+
+// The same, with a reconnect that Docker's socket refuses after the
+// reading: it opens no stream, so the crash is still dated before the up,
+// not a second before the refused reconnect (#170, review round 1 B1).
+func TestAReplayAfterARefusedReconnectDatesACrashBeforeAnUp(t *testing.T) {
+	crashBeforeUp(t, true)
+}
+
+// crashBeforeUp is the gap above, with a refused reconnect in it if
+// refused.
+func crashBeforeUp(t *testing.T, refused bool) {
+	t.Helper()
 	const gib = 1 << 30
 	now := h0
 	vm := func(at time.Time) int64 { return at.Add(-3 * time.Second).UnixNano() }
@@ -87,27 +101,35 @@ func TestAReplayDatesACrashBeforeAnUpCheckedInTheGap(t *testing.T) {
 	book.Observe(s)
 	book.Observe(s)
 	crash, start := vm(h0.Add(time.Second)), vm(h0.Add(3*time.Second))
-	f := &fakeEvents{
-		streams: []fakeStream{
-			{events: []fakeEvent{{"kill", "y", "y", vm(h0)}}},
-			{events: []fakeEvent{{"kill", "y", "y", vm(h0)}, {"die", "db", "db", crash}, {"start", "db", "db", start}}},
-			{}},
-		vmNow: func() int64 { return vm(now) },
+	streams := []fakeStream{
+		{events: []fakeEvent{{"kill", "y", "y", vm(h0)}}},
+		{events: []fakeEvent{{"kill", "y", "y", vm(h0)}, {"die", "db", "db", crash}, {"start", "db", "db", start}}},
+		{}}
+	if refused {
+		streams = append(streams[:1], append([]fakeStream{{err: errors.New("connect: connection refused")}}, streams[1:]...)...)
 	}
+	f := &fakeEvents{streams: streams, vmNow: func() int64 { return vm(now) }}
 	ctx, cancel := context.WithCancel(context.Background())
 	f.cancel = cancel
 	waits := 0
 	followEvents(ctx, f, func(at time.Time, action, id, name string, _ map[string]string) {
 		book.ContainerEventAt(at, action, id, name, lab)
 	}, func() time.Time { return now }, discardLog(), func(context.Context, time.Duration) {
-		if waits++; waits > 1 {
-			return
+		switch waits++; {
+		case waits == 1:
+			now = h0.Add(2 * time.Second) // db crashed at 1 s
+			book.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
+			now = h0.Add(2500 * time.Millisecond)
+			book.Observe(read(0))
+			now = h0.Add(4 * time.Second) // db started at 3 s; the reconnect
+			if refused {
+				now = h0.Add(3500 * time.Millisecond) // refused
+				f.clockErr = errors.New("connect: connection refused")
+			}
+		case waits == 2 && refused:
+			f.clockErr = nil
+			now = h0.Add(5 * time.Second) // the reconnect
 		}
-		now = h0.Add(2 * time.Second) // db crashed at 1 s
-		book.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: "app", OnEngine: true}, s, cfg)
-		now = h0.Add(2500 * time.Millisecond)
-		book.Observe(read(0))
-		now = h0.Add(4 * time.Second) // db started at 3 s; the reconnect
 	})
 	now = now.Add(5 * time.Second)
 	book.Observe(read(gib / 4))

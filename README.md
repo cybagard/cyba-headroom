@@ -1,6 +1,8 @@
 # headroom
 
 [![CI](https://github.com/cybagard/cyba-headroom/actions/workflows/ci.yml/badge.svg)](https://github.com/cybagard/cyba-headroom/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/cybagard/cyba-headroom?include_prereleases&sort=semver)](https://github.com/cybagard/cyba-headroom/releases)
+[![Homebrew](https://img.shields.io/badge/homebrew-cybagard%2Ftap%2Fheadroom-orange?logo=homebrew)](https://github.com/cybagard/homebrew-tap)
 
 Admission control for a fleet of parallel coding agents on one Mac.
 
@@ -24,7 +26,24 @@ headroom also gates the containers and VMs that an agent in an Orca worktree sta
 
 ## Install
 
-headroom runs on macOS on Apple silicon.
+headroom runs on macOS on Apple silicon. Install it with Homebrew:
+
+```sh
+brew install cybagard/tap/headroom
+brew services start headroom
+```
+
+The service starts the daemon at login and puts the shims in `~/.config/headroom/shims`. In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`, for example:
+
+```sh
+headroom run -- claude
+```
+
+Do not also run `headroom install`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then `rm -rf ~/.config/headroom/shims`.
+
+### Install from the release tarball
+
+If you do not use Homebrew, install from the release tarball:
 
 ```sh
 curl -fLO https://github.com/cybagard/cyba-headroom/releases/download/vX.Y.Z/headroom-vX.Y.Z-darwin-arm64.tar.gz
@@ -62,13 +81,13 @@ The view shows the headroom figure (host memory minus reserved memory) and the m
 
 ### Gate
 
-`install` puts the shims (`docker`, `podman` and `tart`) in `~/.config/headroom/shims`. Launch each agent with the shims first on PATH. A call from outside an Orca worktree is not gated.
+`brew services start headroom` or `headroom install` puts the shims (`docker`, `podman` and `tart`) in `~/.config/headroom/shims`. Launch each agent with the shims first on PATH. A call from outside an Orca worktree is not gated.
 
 ```sh
 headroom run -- claude
 ```
 
-In Orca, open Settings → Agents and set the command of each agent to the line that `install` prints for it. An agent that already runs keeps its old PATH until you restart it.
+In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`. With the release tarball, use the line that `install` prints for each agent. An agent that already runs keeps its old PATH until you restart it.
 
 Each gated call gets one of these verdicts:
 

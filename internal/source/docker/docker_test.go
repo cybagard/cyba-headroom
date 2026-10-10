@@ -347,19 +347,19 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 	}
 }
 
-// A reconnect asks for the events since the last one's time, as Docker
-// reads it: seconds, and nine digits of nanoseconds (#146).
+// A reconnect asks for the events since a time, as Docker reads it:
+// seconds, and nine digits of nanoseconds (#146).
 func TestEventsAskForThoseSinceATime(t *testing.T) {
 	sock, _ := engine(t, map[string]string{
-		docker.EventsPath + "&since=1700000000.050000000": `{"Type":"container","Action":"start","Actor":{"ID":"abc"},"timeNano":1700000000050000000}
+		docker.EventsPath + "&since=1700000000.050000007": `{"Type":"container","Action":"start","Actor":{"ID":"abc"},"timeNano":1700000000050000007}
 `,
 	})
 	var got []string
-	_ = docker.New(sock, nil).Events(context.Background(), 1700000000050000000, func(action, id string, _ int64, _ map[string]string) {
+	_ = docker.New(sock, nil).Events(context.Background(), 1700000000050000007, func(action, id string, _ int64, _ map[string]string) {
 		got = append(got, action+" "+id)
 	})
 	if fmt.Sprint(got) != "[start abc]" {
-		t.Fatalf("events = %q, want the stream since 1700000000.050000000", got)
+		t.Fatalf("events = %q, want the stream since 1700000000.050000007", got)
 	}
 }
 

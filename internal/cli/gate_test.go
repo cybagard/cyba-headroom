@@ -331,36 +331,36 @@ func TestFollowEventsReconnectsWithBackoff(t *testing.T) {
 	}
 }
 
-// A reconnect asks Docker for the events since the last one delivered,
-// which Docker sends again: each event is delivered once, in order, with
-// its time. Another action at that nanosecond is a new event (#146).
+// A reconnect's replay sends again what was delivered: each event is
+// delivered once, in order, with its time. Another action at that
+// nanosecond is a new event (#146).
 func TestFollowEventsReplaysFromTheLastDelivered(t *testing.T) {
 	got, since, _ := follow(farOff,
-		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}, {"kill", "A", "a", 200}}},
-		fakeStream{events: []fakeEvent{{"kill", "A", "a", 200}, {"die", "A", "a", 200}, {"start", "B", "b", 300}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5*sec + 100}, {"kill", "A", "a", 5*sec + 200}}},
+		fakeStream{events: []fakeEvent{{"kill", "A", "a", 5*sec + 200}, {"die", "A", "a", 5*sec + 200}, {"start", "B", "b", 5*sec + 300}}},
 		fakeStream{})
-	want := []string{"start A a 100", "kill A a 200", "die A a 200", "start B b 300"}
+	want := []string{fmt.Sprint("start A a ", 5*sec+100), fmt.Sprint("kill A a ", 5*sec+200), fmt.Sprint("die A a ", 5*sec+200), fmt.Sprint("start B b ", 5*sec+300)}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
-	if fmt.Sprint(since) != "[0 200 300]" {
-		t.Errorf("since = %v, want none, then each stream's last event's time", since)
+	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 4*sec + 200, 4*sec + 300}) {
+		t.Errorf("since = %v, want none, then a second before each stream's newest", since)
 	}
 }
 
-// An event is dated when Docker says it happened, but never later than
-// now (Docker's VM clock may run ahead), and at now when Docker gave no
-// time; such an event moves no since (#146).
+// An event more than a second old, a replay from a gap, is dated when
+// Docker says it happened; any other at now (Docker's VM clock may run
+// ahead), as is one Docker gave no time, which moves no since (#146).
 func TestFollowEventsDatesEventsNoLaterThanNow(t *testing.T) {
-	now := time.Unix(0, 1000)
+	now := time.Unix(0, 10*sec)
 	got, since, _ := follow(now,
-		fakeStream{events: []fakeEvent{{"start", "A", "a", 900}, {"die", "A", "a", 1500}, {"start", "B", "b", 0}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 8 * sec}, {"die", "A", "a", 11 * sec}, {"start", "B", "b", 0}}},
 		fakeStream{})
-	if want := []string{"start A a 900", "die A a 1000", "start B b 1000"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{fmt.Sprint("start A a ", 8*sec), fmt.Sprint("die A a ", 10*sec), fmt.Sprint("start B b ", 10*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
-	if fmt.Sprint(since) != "[0 1500]" {
-		t.Errorf("since = %v, want the last time Docker gave", since)
+	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 10 * sec}) {
+		t.Errorf("since = %v, want a second before the newest time Docker gave", since)
 	}
 }
 
@@ -380,18 +380,134 @@ func TestFollowEventsAReplayedEventAloneKeepsTheBackoff(t *testing.T) {
 // at once without one, and delivers what comes, older or not (#146).
 func TestFollowEventsDropsASinceDockerRefuses(t *testing.T) {
 	got, since, waits := follow(farOff,
-		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}}},
 		fakeStream{err: docker.ErrBadSince},
-		fakeStream{events: []fakeEvent{{"start", "B", "b", 50}}},
+		fakeStream{events: []fakeEvent{{"start", "B", "b", 3 * sec}}},
 		fakeStream{})
-	if fmt.Sprint(since) != "[0 100 0 50]" {
+	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 4 * sec, 0, 2 * sec}) {
 		t.Errorf("since = %v, want the refused one dropped", since)
 	}
-	if want := []string{"start A a 100", "start B b 50"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if want := []string{fmt.Sprint("start A a ", 5*sec), fmt.Sprint("start B b ", 3*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
 	if fmt.Sprint(waits) != "[1s 1s]" {
 		t.Errorf("waits = %v, want none after the refusal", waits)
+	}
+}
+
+// sec is a second in Unix ns: a reconnect asks Docker for the events from
+// a second before the newest delivered (#146).
+const sec = int64(time.Second)
+
+// Docker sends live events out of time order: it dates an event before it
+// takes its publish lock, and sends each from its own goroutine. Every
+// event is delivered, however old (#146).
+func TestFollowEventsDeliversALiveEventOutOfOrder(t *testing.T) {
+	got, _, _ := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "X", "x", 100}, {"kill", "Y", "y", 300}, {"start", "Z", "z", 250}, {"die", "Y", "y", 400}}},
+		fakeStream{})
+	if want := []string{"start X x 100", "kill Y y 300", "start Z z 250", "die Y y 400"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// The replay comes from Docker's ring in the order it was logged, not
+// its time order: an event in the gap older than one before it is
+// delivered (#146).
+func TestFollowEventsDeliversAReplayOutOfOrder(t *testing.T) {
+	got, _, _ := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}}},
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 100}, {"start", "B", "b", 150}, {"die", "C", "c", 140}}},
+		fakeStream{})
+	if want := []string{"start A a 100", "start B b 150", "die C c 140"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// The Docker VM's clock stepping back (a resync, or a VM restart while the
+// daemon stays up) drops no live event (#146).
+func TestFollowEventsDeliversEventsAfterTheClockSteppedBack(t *testing.T) {
+	got, _, _ := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 1000}}},
+		fakeStream{events: []fakeEvent{{"start", "B", "b", 900}, {"die", "B", "b", 950}}},
+		fakeStream{})
+	if want := []string{"start A a 1000", "start B b 900", "die B b 950"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// A live event is dated now, though Docker's VM clock, a few ms behind,
+// dates it just before: else a die just after a reading began would be
+// dated before it, and its container's next run warned ungated (#146).
+func TestFollowEventsDatesALiveEventNow(t *testing.T) {
+	now := time.Unix(0, 10*sec)
+	got, _, _ := follow(now,
+		fakeStream{events: []fakeEvent{{"die", "A", "a", 10*sec - 2e6}, {"die", "B", "b", 9 * sec}}},
+		fakeStream{})
+	if want := []string{fmt.Sprint("die A a ", 10*sec), fmt.Sprint("die B b ", 10*sec)}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want both dated now", got)
+	}
+}
+
+// A start Docker sends after a later-dated kill still binds its lease, so
+// its die frees the cost, with no "never appeared" (#146).
+func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
+	var log strings.Builder
+	now := farOff
+	book := lease.New(2*time.Minute, func() time.Time { return now }, slog.New(slog.NewTextHandler(&log, nil)))
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+	book.Observe(s)
+	d := book.Check(policy.Request{Worktree: "w", Kind: "container", Command: "docker run x", CostBytes: 2 << 30, Labelled: true}, s, config.Defaults("/x").PolicyConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	lab := map[string]string{protocol.LeaseLabel: d.LeaseID}
+	f := &fakeEvents{streams: []fakeStream{{}}, cancel: cancel}
+	f.streams[0].events = []fakeEvent{{"kill", "Y", "y", 300}, {"start", "Q", "quick", 250}, {"die", "Q", "quick", 400}}
+	followEvents(ctx, f, func(at time.Time, action, id, name string, _ map[string]string) {
+		if id == "Q" {
+			book.ContainerEventAt(at, action, id, name, lab)
+		}
+	}, func() time.Time { return now }, func(context.Context, time.Duration) {})
+	if l := book.List(); len(l) != 0 {
+		t.Errorf("leases = %+v after the die, want none", l)
+	}
+	now = now.Add(3 * time.Minute)
+	book.Observe(s)
+	if strings.Contains(log.String(), "never appeared") {
+		t.Errorf("log: %s", log.String())
+	}
+}
+
+// A reconnect asks Docker for the events from a second before the newest
+// delivered, to nanosecond precision, so an event dated just before it but
+// not yet sent comes too; what was delivered already is not again (#146).
+func TestFollowEventsReplaysASecondBeforeTheNewest(t *testing.T) {
+	got, since, _ := follow(farOff,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5*sec + 1}, {"kill", "A", "a", 7*sec + 3}, {"start", "B", "b", 6*sec + 2}}},
+		fakeStream{events: []fakeEvent{{"die", "C", "c", 6*sec + 9}, {"kill", "A", "a", 7*sec + 3}}},
+		fakeStream{})
+	want := []string{fmt.Sprint("start A a ", 5*sec+1), fmt.Sprint("kill A a ", 7*sec+3), fmt.Sprint("start B b ", 6*sec+2), fmt.Sprint("die C c ", 6*sec+9)}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+	if fmt.Sprint(since) != fmt.Sprint([]int64{0, 6*sec + 3, 6*sec + 3}) {
+		t.Errorf("since = %v, want none, then a second before the newest delivered", since)
+	}
+}
+
+// followEvents remembers only as many delivered events as Docker keeps to
+// replay: the oldest beyond them is delivered again (#146).
+func TestFollowEventsRemembersTheLast256(t *testing.T) {
+	var first fakeStream
+	for i := range int64(257) {
+		first.events = append(first.events, fakeEvent{"start", "A", "a", 5*sec + i})
+	}
+	got, _, _ := follow(farOff, first,
+		fakeStream{events: []fakeEvent{{"start", "A", "a", 5 * sec}, {"start", "A", "a", 5*sec + 256}}},
+		fakeStream{})
+	if len(got) != 258 || got[257] != fmt.Sprint("start A a ", 5*sec) {
+		t.Fatalf("delivered %d, the last %q: want the oldest of 257 again, and only it", len(got), got[len(got)-1])
 	}
 }
 

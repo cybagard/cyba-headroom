@@ -529,34 +529,44 @@ type Eventer interface {
 // wait that doubles up to maxWait, and starts at a second again once a
 // stream delivered: meanwhile leases bind from readings alone.
 //
-// A stream opened again asks for the events since the last one delivered,
-// which Docker replays, that one included (#146): an event older than it,
-// or at its nanosecond with the same container and action, was delivered
-// already. Docker refusing the since, it is dropped. Each event reaches fn
-// dated when it happened, but no later than now: the time is the Docker
-// VM's clock.
+// A stream opened again asks for the events from a second before the
+// newest delivered, which Docker replays, so one dated just before it but
+// not yet sent comes too (#146). Docker sends events out of time order, so
+// an event is dropped only when it was delivered already: the last
+// replayLen delivered are kept by their time, container and action.
+// Docker refusing the since, it is dropped. An event more than a second
+// old, a replay from a gap, reaches fn dated when it happened; any other
+// is dated now, since the time is the Docker VM's clock, which runs a few
+// ms off the host's.
 func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action, id, name string, labels map[string]string), now func() time.Time, wait func(context.Context, time.Duration)) {
 	const maxWait = 30 * time.Second
 	backoff := time.Second
-	var last int64                 // the last delivered event's time
-	atLast := map[[2]string]bool{} // the containers and actions delivered at last
+	var newest int64 // the newest delivered event's time
+	type event struct {
+		timeNano   int64
+		id, action string
+	}
+	seen := map[event]bool{} // the last replayLen delivered
+	var order []event        // seen's, oldest first
 	for ctx.Err() == nil {
 		delivered := false
-		err := src.Events(ctx, last, func(action, id string, timeNano int64, attrs map[string]string) {
-			key := [2]string{id, action}
+		err := src.Events(ctx, max(newest-int64(time.Second), 0), func(action, id string, timeNano int64, attrs map[string]string) {
 			if timeNano > 0 {
-				if timeNano < last || timeNano == last && atLast[key] {
+				e := event{timeNano, id, action}
+				if seen[e] {
 					return // replayed
 				}
-				if timeNano > last {
-					last = timeNano
-					clear(atLast)
+				if len(order) == replayLen {
+					delete(seen, order[0])
+					order = order[1:]
 				}
-				atLast[key] = true
+				seen[e] = true
+				order = append(order, e)
+				newest = max(newest, timeNano)
 			}
 			delivered = true
 			at := now()
-			if t := time.Unix(0, timeNano); timeNano > 0 && t.Before(at) {
+			if t := time.Unix(0, timeNano); timeNano > 0 && t.Before(at.Add(-time.Second)) {
 				at = t
 			}
 			fn(at, action, id, attrs["name"], attrs)
@@ -565,8 +575,9 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 			return
 		}
 		if errors.Is(err, docker.ErrBadSince) {
-			last = 0
-			clear(atLast)
+			newest = 0
+			clear(seen)
+			order = nil
 			continue
 		}
 		if delivered {
@@ -576,6 +587,9 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 		backoff = min(2*backoff, maxWait)
 	}
 }
+
+// replayLen is how many events Docker keeps to replay.
+const replayLen = 256
 
 // sleepCtx waits d, or until ctx ends.
 func sleepCtx(ctx context.Context, d time.Duration) {

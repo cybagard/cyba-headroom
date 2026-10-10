@@ -1095,7 +1095,7 @@ func TestALapsedComposeLeaseVouchesForItsWholeStack(t *testing.T) {
 	}
 }
 
-// A manual compose up's lapsed lease is spent on its first service,
+// A manual compose up's lapsed lease with no dir (#158) is spent on its first service,
 // whatever its attribution, as on main: it has no worktree to tell its
 // call's stack from another worktree's of the same project name, so a
 // slow-pulled stack has one service gated and the rest warned. Spent, it
@@ -1120,7 +1120,7 @@ func TestALapsedManualComposeLeaseIsSpentOnItsFirstService(t *testing.T) {
 	}
 }
 
-// Once a manual compose up's lapsed lease vouched for w1's service, it
+// Once a manual compose up's lapsed lease with no dir (#158) vouched for w1's service, it
 // vouches for nothing more: another worktree's unchecked stack of the
 // same project name is warned, in the same reading or a later one (#145).
 func TestALapsedManualComposeLeaseVouchesForNoMoreOnceSpent(t *testing.T) {

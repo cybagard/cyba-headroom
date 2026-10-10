@@ -332,6 +332,46 @@ func TestATiedRestartOfAnEventBoundOneoffThatDiesDuringTheReadingBinds(t *testin
 	}
 }
 
+// A start that finds the container still bound to a lease is its start
+// event binding it too: w1's compose run binds db and a one-off by their
+// start events, and db's restart policy starts it again while the run's
+// lease holds it. A compose up checked after the one-off exits starts
+// nothing; db then dies after a reading began that lists it. The reading
+// does not bind dead db to the up's lease, which ends as never appeared
+// (#147).
+func TestARestartOfABoundServiceThatDiesDuringTheReadingKeepsNeverAppeared(t *testing.T) {
+	b, c, log := book(t)
+	svc := map[string]string{"com.docker.compose.project": "p"}
+	one := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(1 * time.Second)
+	b.ContainerEvent("start", "db", "db", svc)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", one)
+	c.t = t0.Add(3 * time.Second)
+	b.ContainerEvent("die", "db", "db", svc) // a crash
+	c.t = t0.Add(3500 * time.Millisecond)
+	b.ContainerEvent("start", "db", "db", svc) // its restart policy's: still bound
+	c.t = t0.Add(4 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", one)
+	c.t = t0.Add(5 * time.Second)
+	b.Check(composeUp("w1", "p"), snap(), cfg)
+	c.t = t0.Add(7 * time.Second)
+	b.ContainerEvent("die", "db", "db", svc) // ends the run's lease
+	c.t = t0.Add(8 * time.Second)
+	b.Observe(read(service("db", "p", "w1")(snap()), t0.Add(6*time.Second))) // began before db's die
+	ls := b.List()
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if len(ls) == 1 && ls[0].Bytes != gib {
+		t.Errorf("the up's lease bound dead db: %+v", ls)
+	}
+	if !strings.Contains(log.String(), "never appeared") {
+		t.Errorf("no never appeared for an up that started nothing: %s", log)
+	}
+}
+
 // A second die with no start between says the events lost a start (a
 // reconnect): the life it ends is one no event bound, so the first life's
 // mark does not keep docker start x from binding x1 from the reading.

@@ -1136,6 +1136,8 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		delete(b.missed, r.key) // it runs again
 		from, d := b.deadIn(r.key)
 		if from == nil && b.boundAnywhere(r.key) {
+			// Its lease still holds it: this start is bound too (#147).
+			b.seen[r.key] = seen{at: now, bound: true}
 			return
 		}
 		if from != nil && d.last().ran.IsZero() {

@@ -25,10 +25,11 @@
 // (entry.target). It has neither when its first target was resolved or
 // missing and Docker resolved none of the targets it starts (docker start
 // a b, a running, b unresolved). It does not start those that run, or
-// that a worktree's open lease holds or waits for (Book.covered). A
-// compose project the shim guessed, Compose's config having failed (#84),
-// binds only containers its own worktree's reading shows, and when it
-// binds none, ends as one with no key (entry.guessed).
+// that a worktree's open lease has bound (not as entry.held) or lists in
+// its containerIDs (Book.covered). A compose project the shim guessed,
+// Compose's config having failed (#84), binds only containers its own
+// worktree's reading shows, and when it binds none, ends as one with no
+// key (entry.guessed).
 //
 // Manual calls (no worktree) are outside admission control: their lease
 // reserves nothing and only marks the call as checked. Their containers

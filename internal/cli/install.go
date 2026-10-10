@@ -200,7 +200,7 @@ func (in *installer) waitUp(ctx context.Context) bool {
 	}
 }
 
-// uninstall stops the agent and removes it and the installed binary. Config,
+// uninstall stops the agent and removes it and the binary install copied. Config,
 // samples and logs stay: weeks of samples are worth keeping.
 func (in *installer) uninstall(ctx context.Context) int {
 	// The binary to remove is the one the installed agent runs, unless --bin
@@ -214,7 +214,12 @@ func (in *installer) uninstall(ctx context.Context) int {
 			owned = bin
 		}
 	}
-	if owned != "" {
+	// A link is not a copy install made: with --bin "$(brew --prefix)/bin/headroom"
+	// it is Homebrew's, and removing it would break the formula (#181).
+	kept := ""
+	if fi, err := os.Lstat(owned); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		kept = owned
+	} else if owned != "" {
 		remove = append(remove, owned)
 	}
 	if err := in.agent.Unload(ctx); err != nil {
@@ -242,6 +247,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 		}
 	}
 	fmt.Fprintln(in.out, "headroom daemon removed from launchd; kept:")
+	if kept != "" {
+		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
+	}
 	if dir, err := config.Dir(in.getenv); err == nil {
 		fmt.Fprintf(in.out, "  config   %s\n  samples  %s\n", dir, filepath.Join(dir, "samples"))
 	}

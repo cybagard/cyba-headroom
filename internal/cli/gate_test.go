@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -99,6 +100,59 @@ func TestGateCountsMacOSSlots(t *testing.T) {
 	d := check(&protocol.CheckRequest{Worktree: "w", Kind: "tart", Command: "tart run c-mac", MacOS: true}, s)
 	if d.Allow || d.Reasons[0].Code != policy.VMSlots || !strings.Contains(d.Message, "a-mac (manual)") {
 		t.Fatalf("third macOS VM: %+v", d)
+	}
+}
+
+// A VM a worktree's tart run started, whose launching shell has exited so
+// no evidence says whose it is, is named with that worktree in the slot
+// deny, even after its lease ended; run again by hand, it is manual (#74).
+func TestDeriveGivesALeasedVMItsWorktree(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	cfg := config.Defaults("/x")
+	cfg.Budget.MaxMacOSVMs = 1
+	tick := derive(book, cfg.Budget.Params())
+	check := gateCheckOn(book, cfg.PolicyConfig(), nil, "")
+	const w = "repo::/Users/dev/w/project-a"
+	snap := func(vms ...protocol.TartVM) *protocol.Snapshot {
+		s := &protocol.Snapshot{
+			Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+			Orca: &protocol.Orca{Running: true, Worktrees: []protocol.Worktree{{ID: w, Path: "/Users/dev/w/project-a", Name: "A"}}},
+			Tart: &protocol.Tart{Installed: true, MacOSRunning: len(vms), VMs: vms},
+		}
+		tick(s)
+		return s
+	}
+	mac1 := func(mem uint64, pid int) protocol.TartVM {
+		return protocol.TartVM{Name: "mac1", OS: "darwin", MemoryBytes: mem, RunPID: pid}
+	}
+	second := func(s *protocol.Snapshot) string {
+		t.Helper()
+		d := check(&protocol.CheckRequest{Worktree: "w2", Kind: "tart", Command: "tart run mac2", MacOS: true}, s)
+		if d.Allow || len(d.Reasons) == 0 || d.Reasons[0].Code != policy.VMSlots {
+			t.Fatalf("second macOS VM: %+v", d)
+		}
+		return d.Message
+	}
+
+	s := snap()
+	if d := check(&protocol.CheckRequest{Worktree: w, Kind: "tart", Command: "tart run mac1", MacOS: true, CostBytes: 8 << 30, PID: os.Getpid()}, s); !d.Allow {
+		t.Fatalf("first: %+v", d)
+	}
+	s = snap(mac1(4<<30, os.Getpid()))
+	if msg := second(s); !strings.Contains(msg, `mac1 (worktree "A"`) {
+		t.Fatalf("lease open: %s", msg)
+	}
+	s = snap(mac1(8<<30, os.Getpid())) // it uses its cost: the lease ends
+	if l := book.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v", l)
+	}
+	if msg := second(s); !strings.Contains(msg, `mac1 (worktree "A"`) {
+		t.Fatalf("lease ended: %s", msg)
+	}
+	snap()
+	s = snap(mac1(8<<30, 0)) // run again by hand
+	if msg := second(s); !strings.Contains(msg, "mac1 (manual)") {
+		t.Fatalf("run again: %s", msg)
 	}
 }
 

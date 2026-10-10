@@ -784,7 +784,11 @@ func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
 	up := policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}
 	b.Observe(snap())
 	b.Check(up, snap(), cfg)
+	// web is w1's by evidence (its compose dir), as the book requires: a
+	// placement by the first up's lease would not count (#74).
 	s := withComposeContainer(snap(), "web", "w1", gib/2)
+	s.Orca.Worktrees[0].Path = "/Users/dev/w/w1"
+	s.Docker.Containers[len(s.Docker.Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/Users/dev/w/w1"
 	b.Observe(s)
 	c.t = c.t.Add(3 * time.Minute)
 	b.Observe(s)

@@ -34,6 +34,8 @@ const (
 	ByMount      = "mount"
 	BySharedDir  = "shared_dir"
 	ByVMName     = "vm_name"
+	// ByLease: no evidence, but the lease it bound was this worktree's.
+	ByLease = "lease"
 )
 
 // Why something is unattributed.

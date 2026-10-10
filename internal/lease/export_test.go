@@ -27,3 +27,17 @@ func Bound(b *Book, id string) []string {
 	slices.Sort(keys)
 	return keys
 }
+
+// Bindings are the open leases that bind container id, oldest first, each
+// marked " (held)" if it holds it (entry.held).
+func Bindings(b *Book, id string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for _, e := range b.open {
+		if k := "container:" + id; e.bound[k] {
+			out = append(out, e.ID+map[bool]string{true: " (held)"}[e.held[k]])
+		}
+	}
+	return out
+}

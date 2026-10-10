@@ -54,7 +54,23 @@ type mcont struct {
 	missing                  bool      // left out of this reading
 	missedAt                 int       // the last reading it was left out of
 	read                     int       // the last reading it was in
-	multi                    bool      // its call started others too (docker start a b)
+	// deaths are its deaths since a reading showed it, while deadIn, a
+	// start of several's lease (model.several), binds it, each with when it
+	// ran again: that lease keeps it until a lease checked in one of them
+	// binds it (lease.go markDead, deaths.takenBy).
+	deaths []mdeath
+	deadIn string
+	// owned is set once a reading with attribution showed it, or a
+	// project's lease bound it: the book knows its worktree (lease.go owner,
+	// boundBy). pending is set while a call's start of it, crashed and
+	// owned by no worktree, bound no lease at its event (lease.go
+	// bindsAfterCrash): the next reading binds it as new, if it attributes
+	// it. verdict is set while the book has a verdict of it (lease.go
+	// judge): a reading showed it or an event bound it, at verdictAt at the
+	// latest, and it was not absent for the timeout since; owned goes with
+	// it.
+	owned, pending, verdict bool
+	verdictAt               time.Time
 	// guess is the guessed up that started it as its own stack's (a hit),
 	// until its first reading, which decides whether the guess binds it, or
 	// another call's start, whose lease it is then (lease.go keyed).
@@ -78,7 +94,16 @@ type mcont struct {
 	judged   int
 	judgedAt time.Time
 	unbound  bool
+	// byGuess is set once a guessed up started it: the differential compares
+	// its binding with the book's (model.differ). restarted is set while a
+	// restart policy, not a call, last started it: the model does not bind
+	// it then as the book does at the start event or the next reading
+	// (#168's (a)), and the differential skips it.
+	byGuess, restarted bool
 }
+
+// mdeath is a death and when it ran again (lease.go death).
+type mdeath struct{ at, ran time.Time }
 
 // A miss's container's verdict (mcont.judged).
 const (
@@ -89,10 +114,9 @@ const (
 )
 
 // mguess is a guessed up's lease (lease.go entry.guessed): what its
-// containers come up as, and whether it bound one (confirmed).
+// containers come up as. Whether it bound one is model.confirmed.
 type mguess struct {
 	name, project, wt string // what it names, and what its stack comes up as
-	confirmed         bool
 }
 
 type op struct{ kind, a, b int }
@@ -113,9 +137,12 @@ type model struct {
 	trace    []string
 	last     time.Time // the last allowed call
 	ticks    int
-	headroom int64        // what the readings say is free
-	low      int          // readings left before headroom is plenty again
-	open     map[int]bool // the open bugs whose cases run
+	headroom int64          // what the readings say is free
+	low      int            // readings left before headroom is plenty again
+	open     map[int]bool   // the open bugs whose cases run
+	several  map[string]int // a docker start's lease → the containers it waits for (lease.go entry.starts)
+	readAt   time.Time      // when the last reading was taken
+	diff     bool           // HEADROOM_MODEL_DIFF=1: compare guessed bookkeeping with the book's after each op (differ)
 }
 
 // openBugs are the cases that expose a bug still open, by its issue. They
@@ -160,6 +187,14 @@ func (m *model) fail(f string, a ...any) {
 func (m *model) snapshot() *protocol.Snapshot {
 	s := snap()
 	s.Docker.Containers = nil
+	// Each worktree's directory, as Compose labels its stacks with, so the
+	// book's matcher finds the attribution below again (lease.go Observe,
+	// attribution.AttributeLeased); none while attribution is lost.
+	for i := range s.Orca.Worktrees {
+		if !m.flick {
+			s.Orca.Worktrees[i].Path = "/src/" + s.Orca.Worktrees[i].ID
+		}
+	}
 	for _, x := range m.conts {
 		if !x.running || x.missing {
 			continue
@@ -181,13 +216,22 @@ func (m *model) start(x *mcont, by string) {
 	if by != "covered" && !m.bound(x) {
 		x.boundBy = by
 	}
+	crashed := m.crashedToBook(x) // before it starts: the book's word for its start event
 	x.shown = m.inLast(x)
-	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.multi, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, false, "", 0
-	x.began, x.guess, x.taken, x.unbound = m.ticks, "", false, false
+	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, "", 0
+	x.began, x.guess, x.taken, x.unbound, x.restarted, x.pending = m.ticks, "", false, false, false, false
 	if by != "" {
 		m.starts[by]++
 	}
 	m.event("start", x)
+	m.ranAgain(x, crashed)
+}
+
+// crashedToBook reports whether the book takes a start of x for one after
+// a crash: it crashed, and no reading has dropped the crash's event since,
+// or a verdict of it keeps it (lease.go ContainerEvent, verdict.crashed).
+func (m *model) crashedToBook(x *mcont) bool {
+	return !x.crashed.IsZero() && (x.crashed.After(m.readAt) || x.verdict)
 }
 
 // inLast reports whether the last reading showed x, or only missed it
@@ -328,7 +372,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 			continue // a guess takes nothing over
 		}
 		// A guess only once it bound something (lease.go composeTakes).
-		if g := m.guesses[l.ID]; m.leases[l.ID] == cmd || g != nil && g.confirmed && g.project == project && g.wt == wt {
+		if g := m.guesses[l.ID]; m.leases[l.ID] == cmd || g != nil && m.confirmed(l.ID) && g.project == project && g.wt == wt {
 			taken[l.ID] = true
 		}
 	}
@@ -361,9 +405,14 @@ func (m *model) composeUp(st stack, guess int) bool {
 	} else {
 		m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
 	}
-	for _, x := range m.of(project, wt) {
+	for _, x := range m.conts {
+		// Removed ones and another worktree's too: the up binds and holds all
+		// it took (lease.go Check).
 		if taken[x.boundBy] {
 			x.boundBy = d.LeaseID
+		}
+		if taken[x.heldBy] {
+			x.heldBy = d.LeaseID // it stays held
 		}
 	}
 	for _, sv := range []string{"a", "b"} {
@@ -372,9 +421,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 		case x == nil || !x.running:
 		case guess >= 0:
 			// A guess holds no running stack (lease.go Check).
-		case taken[x.heldBy]:
-			x.heldBy = d.LeaseID // it stays held
-		case !m.bound(x) && x.read == m.ticks && !m.flick:
+		case !m.bound(x) && m.ticks > 0 && x.read == m.ticks && !m.flick:
 			x.heldBy = d.LeaseID // the last reading found it running in wt, no lease's
 		}
 		if x == nil {
@@ -386,14 +433,26 @@ func (m *model) composeUp(st stack, guess int) bool {
 		}
 		if !x.running {
 			bound := m.bound(x) // a start's lease keeps it (lease.go boundAnywhere)
+			up, unowned := up, m.crashedToBook(x) && !x.owned
+			if m.bindsNoneAfterCrash(x, up) || unowned {
+				up = "" // its start event binds no lease (#168's restart row)
+			}
 			m.start(x, d.LeaseID)
+			x.byGuess = x.byGuess || guess >= 0
 			switch {
 			case bound:
+			case unowned && guess < 0:
+				x.boundBy, x.pending = "", true
 			case guess == guessHit:
+				x.pending = unowned
 				// The up's, or not the guess's until a reading says so.
 				x.guess, x.taken, x.boundBy = d.LeaseID, up != "", up
 			case guess == guessMiss || guess == guessMissOther:
 				x.boundBy, x.unbound = "", true // as with no key
+			}
+			x.owned = x.owned || m.isOpen(x.boundBy) && x.boundBy == d.LeaseID || x.taken // bound by its project
+			if m.bound(x) {
+				x.verdict, x.verdictAt = true, m.c.t
 			}
 			m.step("  started %s", x.id)
 		}
@@ -408,13 +467,78 @@ func (m *model) stop(x *mcont, crash bool) {
 	m.event("die", x)
 	if crash {
 		x.crashed = m.c.t
+		if x.verdict {
+			x.verdictAt = m.c.t // kept from its die (lease.go verdict.event, crashKept)
+		}
 	} else {
 		x.crashed = time.Time{}
 	}
 	x.running, x.heldBy = false, ""
-	if x.multi {
-		x.boundBy = "" // a start of several lets it go (#111)
+	if m.several[x.boundBy] >= 2 && m.isOpen(x.boundBy) && (len(x.deaths) == 0 || !x.deaths[len(x.deaths)-1].ran.IsZero()) {
+		x.deaths, x.deadIn = append(x.deaths, mdeath{at: m.c.t}), x.boundBy // its start of several's lease keeps it (#111)
 	}
+}
+
+// ranAgain settles x, a start of several's container that died, as it runs
+// again: at its start event, an up of its project in its worktree checked
+// since a death takes it (lease.go ContainerEvent); else the start's lease
+// keeps it until a reading (letGo). After a crash the book saw (crashed),
+// only if it knows x's worktree (lease.go bindsAfterCrash).
+func (m *model) ranAgain(x *mcont, crashed bool) {
+	if !m.dead(x) {
+		return
+	}
+	if d := &x.deaths[len(x.deaths)-1]; d.ran.IsZero() {
+		d.ran = m.c.t
+	}
+	if !crashed || x.owned {
+		m.letGo(x, m.eventBinder(x)) // else no project's lease binds it (lease.go bindsAfterCrash)
+	}
+}
+
+// dead reports whether x is marked dead in the open start of several's
+// lease that binds it (lease.go deadIn).
+func (m *model) dead(x *mcont) bool {
+	if x.deadIn != x.boundBy || !m.isOpen(x.deadIn) {
+		x.deaths = nil // the mark ended with the lease
+	}
+	return len(x.deaths) > 0
+}
+
+// letGo binds x, dead, to lease id if it was checked in one of its deaths
+// (takenBy): the start of several's lease lets it go, and waits for one
+// container less (lease.go entry.letGo).
+func (m *model) letGo(x *mcont, id string) {
+	if m.takenBy(x, id) {
+		m.several[x.boundBy]--
+		x.boundBy, x.deaths, x.owned = id, nil, true
+	}
+}
+
+// created is when open lease id was checked, and whether it is open.
+func (m *model) created(id string) (time.Time, bool) {
+	ls := m.b.List()
+	if i := slices.IndexFunc(ls, func(l protocol.Lease) bool { return l.ID == id }); i >= 0 {
+		return ls[i].Created, true
+	}
+	return time.Time{}, false
+}
+
+// bindsNoneAfterCrash reports whether a start of x binds no lease at its
+// event though open lease id keys it: x crashed since the last reading
+// showed it, and id was checked before the crash. The book still has x, so
+// that is a start without a stop, no call's (lease.go ContainerEvent prev,
+// checkedSinceCrash).
+func (m *model) bindsNoneAfterCrash(x *mcont, id string) bool {
+	created, ok := m.created(id)
+	return ok && !x.crashed.IsZero() && m.inLast(x) && !created.After(x.crashed)
+}
+
+// takenBy reports whether lease id was checked in one of x's deaths, by
+// when it ran again: its call can have started x (lease.go deaths.takenBy).
+func (m *model) takenBy(x *mcont, id string) bool {
+	created, ok := m.created(id)
+	return ok && slices.ContainsFunc(x.deaths, func(d mdeath) bool { return !created.Before(d.at) && !created.After(d.ran) })
 }
 
 // held reports whether x is held: an up found it running and bound to no
@@ -433,10 +557,12 @@ func (m *model) isOpen(id string) bool {
 // a start event and no call. It was checked if its first start was, and its
 // call's reservation is long spent.
 func (m *model) restart(x *mcont) {
+	crashed := m.crashedToBook(x) // before it starts: the book's word for its start event
 	x.shown = m.inLast(x)
 	x.running, x.cur, x.startedBy, x.startedAt, x.crashed, x.missedAt = true, 0, "", m.c.t, time.Time{}, 0
-	x.began, x.unbound = m.ticks, x.miss && !m.bound(x)
+	x.began, x.unbound, x.restarted = m.ticks, x.miss && !m.bound(x), true
 	m.event("start", x)
+	m.ranAgain(x, crashed)
 }
 
 // dockerStart starts xs in one call: docker start a b, where a lease may
@@ -463,9 +589,16 @@ func (m *model) dockerStart(xs ...*mcont) bool {
 		by = "covered"
 	}
 	for _, x := range xs {
+		if by != "covered" && (!m.bound(x) || m.held(x)) {
+			m.several[by]++ // one its lease waits for: not covered (lease.go Check)
+		}
+	}
+	for _, x := range xs {
 		bound := m.bound(x)
 		m.start(x, by)
-		x.multi = len(xs) > 1
+		if by != "covered" {
+			x.verdict, x.verdictAt = true, m.c.t // its lease binds it by ID (lease.go judge)
+		}
 		if by != "covered" && !bound {
 			x.judged, x.judgedAt = judgedGated, m.c.t // its lease binds it by ID
 		}
@@ -535,6 +668,7 @@ func (m *model) dressedRun() {
 	m.step("w2: dressed docker run → %s as %s", d.LeaseID, x.id)
 	m.start(x, d.LeaseID)
 	m.starts[d.LeaseID]-- // it loses its own lease, as declined: only the forger is hurt
+	x.boundBy = ""        // and binds none (lease.go key: its mark)
 }
 
 func (m *model) rawRun() {
@@ -560,17 +694,29 @@ func (m *model) tick() {
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
 	for _, x := range m.conts {
 		if x.running && !x.missing {
-			back, gone := x.guess == "" && x.missedAt > 0 && x.missedAt == m.ticks-1, x.read < m.ticks-2
+			// A hit's container the last reading before its start showed is
+			// not new to its first (shown): back after missing it, it is
+			// back as any other (#168 F4).
+			back, gone := (x.guess == "" || x.shown) && x.missedAt > 0 && x.missedAt == m.ticks-1, x.read < m.ticks-2
 			x.read = m.ticks
+			x.owned, x.verdict, x.verdictAt = x.owned || !m.flick && x.wt != "", true, m.c.t
+			m.deadReading(x)
 			m.firstReading(x)
+			m.pendingReading(x)
 			if back {
 				m.backReading(x, gone)
 			}
 		}
 	}
 	m.judge()
+	m.readAt = m.c.t
 	m.step("tick %s (flicker %v)", m.c.t.Format("15:04:05"), m.flick)
 	m.b.Observe(m.snapshot())
+	for _, x := range m.conts {
+		if x.verdict && m.c.t.Sub(x.verdictAt) >= timeout {
+			x.verdict, x.owned = false, false // absent for the timeout (lease.go Observe)
+		}
+	}
 	for _, x := range m.conts {
 		switch {
 		case !x.miss:
@@ -610,13 +756,35 @@ func (m *model) judge() {
 	}
 }
 
+// deadReading ends x's dead mark at the first reading that shows it running
+// again: the lease that reading binds it to takes it if it was checked in
+// one of its deaths (lease.go Observe, deadIn).
+func (m *model) deadReading(x *mcont) {
+	if !m.dead(x) {
+		return
+	}
+	m.letGo(x, m.binder(x))
+	x.deaths = nil
+}
+
+// pendingReading binds x, which a call started crashed and owned by no
+// worktree (mcont.pending), at the next reading as new, if it attributes x
+// (lease.go Observe fresh, binder).
+func (m *model) pendingReading(x *mcont) {
+	if x.pending && !m.flick && !x.shown && !m.bound(x) {
+		x.boundBy = m.binder(x) // at a reading that attributes it: owned
+	}
+	x.pending = false
+}
+
 // firstReading settles a guessed hit's container at its first reading: if
 // the reading attributes it, it binds the lease keyed would (binder), and is
 // gated; a guess it binds is confirmed. Unless an up of its project there
 // took it at its event and still binds it, or the last reading showed it,
-// so it is not new. A flickered reading leaves it judged as with no key
-// (O1): nothing is asserted of it, unless an up took it, which judged it
-// gated.
+// so it is not new. A flickered reading binds it to an up that keys it
+// with no attribution (binder), which judges it gated, else leaves it
+// judged as with no key (O1): nothing is asserted of it, unless an up took
+// it, which judged it gated.
 func (m *model) firstReading(x *mcont) {
 	if x.guess == "" {
 		return
@@ -624,49 +792,86 @@ func (m *model) firstReading(x *mcont) {
 	switch {
 	case x.taken && (m.bound(x) || m.flick):
 	case m.flick:
-		x.firstGated = false
 		m.outcomes["flicker"]++
+		if id := m.binder(x); id != "" && !x.shown && !x.pending {
+			x.boundBy, x.owned = id, true // an up keys it with no attribution, as at an event (#168 F5)
+		} else {
+			x.firstGated = false
+		}
 	case x.shown:
 	default:
 		if id := m.binder(x); id != "" {
 			x.boundBy = id
-			if g := m.guesses[id]; g != nil {
-				g.confirmed = true
-			}
 		}
 	}
 	x.guess = ""
 }
 
-// backReading settles a guessed hit's container back after a reading it
-// was missing from, and bound to no lease: if the reading attributes it, it
-// binds the lease keyed would (binder). Missing from one, it is held
-// (lease.go Observe) until it stops, which confirms no guess. Missing from
-// two in a row, it went, and binds as new, as at a first reading.
+// backReading settles a container back after a reading it was missing
+// from, and bound to no lease, whoever started it: it binds the lease the
+// reading keys it to (binder). Missing from one, it is held (lease.go
+// Observe) until it stops: a guess that holds it is confirmed (lease.go
+// composeTakes) until then. Missing from two in a row, it went, and binds
+// as new, as at a first reading.
 func (m *model) backReading(x *mcont, gone bool) {
-	if x.miss || m.guesses[x.startedBy] == nil || m.bound(x) || m.flick {
+	if x.miss || m.bound(x) {
 		return
 	}
 	id := m.binder(x)
+	x.owned = x.owned || id != "" // its project's lease's worktree (lease.go boundBy)
 	if !gone {
 		x.heldBy = id
 		return
 	}
 	x.boundBy = id
-	if g := m.guesses[id]; g != nil {
-		g.confirmed = true
-	}
 }
 
-// binder is the open lease an attributed reading binds x, a new container
-// of a compose project, to (lease.go keyed): an up of the project in x's
-// worktree before a guess of it, and the oldest of equals.
+// confirmed reports whether guess id binds a container, held or not: a
+// later up of its project in its worktree takes it over then (lease.go
+// composeTakes).
+func (m *model) confirmed(id string) bool {
+	return slices.ContainsFunc(m.conts, func(x *mcont) bool { return x.boundBy == id || x.heldBy == id })
+}
+
+// binder is the open lease a reading binds x, a new container of a compose
+// project, to (lease.go keyed): an up of the project in x's worktree (its
+// dir), then, if the reading attributes x, a guess of the project there,
+// then an up of the project in another worktree; the oldest of equals.
 func (m *model) binder(x *mcont) string {
 	if up := m.upOf(x.project, x.wt); up != "" {
 		return up
 	}
+	if g := m.guessOf(x); g != "" && !m.flick {
+		return g
+	}
+	return m.upElsewhere(x)
+}
+
+// eventBinder is the open lease x's start event binds it to (lease.go
+// keyed, tied): an up of its project in its worktree, else one in another
+// worktree, unless a guess of the project in x's worktree, which may be
+// x's, ties with it.
+func (m *model) eventBinder(x *mcont) string {
+	if up := m.upOf(x.project, x.wt); up != "" || m.guessOf(x) != "" {
+		return up
+	}
+	return m.upElsewhere(x)
+}
+
+// guessOf is the oldest open guess in x's worktree that names its project.
+func (m *model) guessOf(x *mcont) string {
 	for _, l := range m.b.List() {
 		if g := m.guesses[l.ID]; l.Worktree == x.wt && g != nil && g.name == x.project {
+			return l.ID
+		}
+	}
+	return ""
+}
+
+// upElsewhere is the oldest open up of x's project in another worktree.
+func (m *model) upElsewhere(x *mcont) string {
+	for _, l := range m.b.List() {
+		if l.Worktree != x.wt && x.project != "" && m.leases[l.ID] == upCommand(x.project) {
 			return l.ID
 		}
 	}
@@ -876,6 +1081,47 @@ func (m *model) run(ops []op) {
 		default:
 			m.tick()
 		}
+		if m.diff {
+			m.differ()
+		}
+	}
+}
+
+// differ fails where the model's bookkeeping of guessed ups is not the
+// book's: the open leases that bind each container a guess started, and
+// held which, and whether each open guess bound anything, which a later up
+// of its project takes over (lease.go composeTakes). It skips a container a
+// restart policy restarted, and a guess of its project in its worktree
+// (mcont.restarted).
+func (m *model) differ() {
+	restarted := func(project, wt string) bool {
+		return slices.ContainsFunc(m.conts, func(x *mcont) bool { return x.restarted && x.project == project && x.wt == wt })
+	}
+	for _, x := range m.conts {
+		if !x.byGuess || x.restarted {
+			continue
+		}
+		var want []string
+		for _, l := range m.b.List() {
+			switch l.ID {
+			case x.heldBy:
+				want = append(want, l.ID+" (held)")
+			case x.boundBy:
+				want = append(want, l.ID)
+			}
+		}
+		if got := lease.Bindings(m.b, x.id); !slices.Equal(got, want) {
+			m.fail("binding differs: %s is bound by %q in the model, %q in the book", x.id, want, got)
+		}
+	}
+	for _, l := range m.b.List() {
+		g := m.guesses[l.ID]
+		if g == nil || restarted(g.name, g.wt) {
+			continue
+		}
+		if c := m.confirmed(l.ID); c != (len(lease.Bound(m.b, l.ID)) > 0) {
+			m.fail("confirmed differs: the guess %s is confirmed %v in the model, binds anything %v in the book", l.ID, c, !c)
+		}
 	}
 }
 
@@ -941,7 +1187,7 @@ func (m *model) reserves(id string) (uint64, bool) {
 func newModel(t *testing.T) *model {
 	b, c, log := book(t)
 	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
-		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}}
+		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}, several: map[string]int{}, diff: os.Getenv("HEADROOM_MODEL_DIFF") == "1"}
 	b.Observe(m.snapshot())
 	return m
 }
@@ -1195,8 +1441,8 @@ func TestTheLeaseModelOnAGuessBackAfterItWent(t *testing.T) {
 		op{10, 0, 0}, // tick: c3 is back
 	)
 	c3 := m.of("p1", "w1")[0]
-	if c3.boundBy != guess || !m.guesses[guess].confirmed {
-		t.Errorf("%s boundBy = %q, the guess %s confirmed %v: want the guess's, confirmed, as in the book", c3.id, c3.boundBy, guess, m.guesses[guess].confirmed)
+	if c3.boundBy != guess || !m.confirmed(guess) {
+		t.Errorf("%s boundBy = %q, the guess %s confirmed %v: want the guess's, confirmed, as in the book", c3.id, c3.boundBy, guess, m.confirmed(guess))
 	}
 	m.runOK(
 		op{3, 0, 0}, // compose stop p1
@@ -1236,8 +1482,8 @@ func TestTheLeaseModelOnAGuessFirstReadAfterItsUpEnded(t *testing.T) {
 		t.Fatalf("leases %+v, want only the guess", m.b.List())
 	}
 	c3 := m.of("p1", "w1")[0]
-	if c3.boundBy != guess || !m.guesses[guess].confirmed {
-		t.Errorf("%s boundBy = %q, the guess %s confirmed %v: want the guess's, confirmed, as in the book", c3.id, c3.boundBy, guess, m.guesses[guess].confirmed)
+	if c3.boundBy != guess || !m.confirmed(guess) {
+		t.Errorf("%s boundBy = %q, the guess %s confirmed %v: want the guess's, confirmed, as in the book", c3.id, c3.boundBy, guess, m.confirmed(guess))
 	}
 	m.runOK(
 		op{3, 0, 0}, // compose stop p1
@@ -1263,7 +1509,7 @@ func TestTheLeaseModelOnAGuessThenAnIdleUp(t *testing.T) {
 		op{0, 0, 0},  // w1: an idle compose up p1
 		op{10, 0, 0}, // tick: the up binds c1 and c2
 	)
-	if m.guesses[guess].confirmed {
+	if m.confirmed(guess) {
 		t.Errorf("the guess %s confirmed, want not: the up binds c1 and c2", guess)
 	}
 	for _, x := range m.of("p1", "w1") {
@@ -1302,6 +1548,540 @@ func TestTheLeaseModelOnAGuessTakenThenAFlicker(t *testing.T) {
 	}
 	if n := m.outcomes["flicker"]; n != 0 {
 		t.Errorf("%d flickered first readings, want none: the up took the hit's containers", n)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAnIdleUpBeforeAReading plays #168's differential's
+// first row: an up holds only what the last reading showed running (lease.go
+// Check stack), and before any reading, it showed nothing. A guessed hit of
+// p1 starts c1 and c2; an idle up of p1 holds neither.
+func TestTheLeaseModelOnAnIdleUpBeforeAReading(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 0, 1}, // w1: a guessed hit of p1 starts c1 and c2
+		op{0, 0, 0}, // w1: an idle compose up p1
+	)
+	for _, x := range m.of("p1", "w1") {
+		if m.held(x) {
+			t.Errorf("%s held by %s, want by nothing: no reading showed it", x.id, x.heldBy)
+		}
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAGuessThatHolds plays #168's F3: a guess that holds a
+// container has bound it (lease.go composeTakes counts held ones), so a later
+// up of its project in its worktree takes it over, and holds what it held.
+// As TestTheLeaseModelOnAGuessBackAfterAMissingReading, until the guess
+// holds c3; an up of p1 then comes while c3 runs.
+func TestTheLeaseModelOnAGuessThatHolds(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 0, 0}, // w1: compose up p1 starts c1 and c2
+		op{4, 0, 0}, // compose down p1
+		op{2, 0, 1}, // w1: a guessed hit of p1 starts c3 and c4, the up's
+		op{10, 0, 0},
+		op{10, 0, 0},
+		op{10, 0, 0}, // ticks: the up ends
+		op{16, 0, 0}, // c3 missing from a reading
+		op{10, 0, 0}, // tick: c3 is back, held by the guess
+	)
+	ls := m.b.List()
+	if len(ls) != 1 || m.guesses[ls[0].ID] == nil {
+		t.Fatalf("leases %+v, want only the guess", ls)
+	}
+	guess := ls[0].ID
+	m.runOK(op{0, 0, 0}) // w1: compose up p1, idle: it takes the guess over
+	ls = m.b.List()
+	up := ls[len(ls)-1].ID
+	if _, ok := m.reserves(guess); ok || m.outcomes["takeover"] != 1 {
+		t.Errorf("the guess %s open %v, takeovers %d: want it taken over, in the book and the model", guess, ok, m.outcomes["takeover"])
+	}
+	if c3 := m.of("p1", "w1")[0]; c3.heldBy != up || !m.held(c3) {
+		t.Errorf("%s held by %q (held %v), want by the up %s, which took the guess over", c3.id, c3.heldBy, m.held(c3), up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnATakeoverOfRemovedContainers plays #168's (d): an up
+// that takes a lease over binds all it bound, removed containers too
+// (lease.go Check). A guessed hit of app in w1 binds c1 and c2 at a reading;
+// compose down removes them; an up of app takes the guess over.
+func TestTheLeaseModelOnATakeoverOfRemovedContainers(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 2, 1},  // w1: a guessed hit of app starts c1 and c2
+		op{10, 0, 0}, // tick: they bind the guess
+		op{4, 2, 0},  // compose down app
+		op{0, 2, 0},  // w1: compose up app starts c3 and c4: it takes the guess over
+	)
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	if m.outcomes["takeover"] != 1 {
+		t.Fatalf("takeovers %d, want the up %s to take the guess over", m.outcomes["takeover"], up)
+	}
+	for _, x := range m.conts[:2] {
+		if x.boundBy != up {
+			t.Errorf("%s (removed) boundBy = %q, want the up's %s, which took the guess over", x.id, x.boundBy, up)
+		}
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnACoveredStartOfSeveralThatStops plays #168's #111
+// let-go row: a docker start a b its lease covers makes no lease, so the
+// stop after it lets nothing go (lease.go markDead marks only a start's
+// lease). A guessed hit of p1 binds c1 and c2 at a reading; compose stop;
+// docker start c1 c2, covered; compose stop.
+func TestTheLeaseModelOnACoveredStartOfSeveralThatStops(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 0, 1},  // w1: a guessed hit of p1 starts c1 and c2
+		op{10, 0, 0}, // tick: they bind the guess
+		op{3, 0, 0},  // compose stop p1
+		op{5, 0, 0},  // w1: docker start c1 c2: the guess covers them
+		op{3, 0, 0},  // compose stop p1
+	)
+	guess := m.b.List()[0].ID
+	for _, x := range m.of("p1", "w1") {
+		if x.boundBy != guess {
+			t.Errorf("%s boundBy = %q, want the guess's %s: no start of several's lease let it go", x.id, x.boundBy, guess)
+		}
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAStartOfSeveralRestarted is the #111 let-go row with a
+// lease: a start of several's container that crashed stays its lease's
+// when a restart policy brings it back, no lease checked since its death
+// being there to take it (lease.go deaths.takenBy). A guessed hit of p1
+// binds c1 and c2 and ends; compose stop; docker start c1 c2; c1 crashes and
+// is restarted.
+func TestTheLeaseModelOnAStartOfSeveralRestarted(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 0, 1},  // w1: a guessed hit of p1 starts c1 and c2
+		op{9, 0, 0},  // wait 1m: they bind the guess and use its cost
+		op{3, 0, 0},  // compose stop p1
+		op{5, 0, 0},  // w1: docker start c1 c2
+		op{10, 0, 0}, // tick
+	)
+	ls := m.b.List()
+	if len(ls) != 1 {
+		t.Fatalf("leases %+v, want only the start's", ls)
+	}
+	start := ls[0].ID
+	m.runOK(
+		op{6, 0, 0},  // c1 crashes
+		op{17, 0, 0}, // the restart policy starts c1
+		op{10, 0, 0}, // tick
+	)
+	if c1 := m.conts[0]; c1.boundBy != start || !m.bound(c1) {
+		t.Errorf("%s boundBy = %q (bound %v), want the start's %s: no lease was checked since it died", c1.id, c1.boundBy, m.bound(c1), start)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAnUpsContainerBackToAGuess plays #168's (c): any
+// container back after one reading it was missing from, and bound to no
+// lease, is held by the lease the reading binds it to (lease.go Observe), a
+// guess too, whoever started it. An up of p1 starts c1 and c2 and ends; a
+// guessed hit of p1 finds them running; c1 is missing from a reading.
+func TestTheLeaseModelOnAnUpsContainerBackToAGuess(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 0, 0}, // w1: compose up p1 starts c1 and c2
+		op{9, 0, 0}, // wait 1m: its lease ends
+		op{2, 0, 1}, // w1: a guessed hit of p1 starts nothing
+	)
+	ls := m.b.List()
+	if len(ls) != 1 || m.guesses[ls[0].ID] == nil {
+		t.Fatalf("leases %+v, want only the guess", ls)
+	}
+	guess := ls[0].ID
+	m.runOK(
+		op{16, 0, 0}, // c1 missing from a reading
+		op{10, 0, 0}, // tick: c1 is back
+	)
+	if c1 := m.conts[0]; c1.heldBy != guess || !m.confirmed(guess) {
+		t.Errorf("%s held by %q, the guess %s confirmed %v: want held by the guess, as in the book", c1.id, c1.heldBy, guess, m.confirmed(guess))
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAShownHitMissingItsFirstReading plays #168's F4: a
+// guessed hit's container that the last reading showed is not new to the
+// next (lease.go Observe prev), and when it misses that one, the reading
+// after holds it for the guess, as for any container back (backReading).
+// An up of p1 starts c1 and c2 and ends; compose stop; a guessed hit of p1
+// starts them again; c1 misses its first reading.
+func TestTheLeaseModelOnAShownHitMissingItsFirstReading(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 0, 0}, // w1: compose up p1 starts c1 and c2
+		op{9, 0, 0}, // wait 1m: its lease ends
+		op{3, 0, 0}, // compose stop p1
+		op{2, 0, 1}, // w1: a guessed hit of p1 starts c1 and c2
+	)
+	ls := m.b.List()
+	if len(ls) != 1 || m.guesses[ls[0].ID] == nil {
+		t.Fatalf("leases %+v, want only the guess", ls)
+	}
+	guess := ls[0].ID
+	m.runOK(
+		op{16, 0, 0}, // c1 missing from its first reading
+		op{10, 0, 0}, // tick: c1 is back
+	)
+	if c1 := m.conts[0]; c1.heldBy != guess || !m.confirmed(guess) {
+		t.Errorf("%s held by %q, the guess %s confirmed %v: want held by the guess, as in the book", c1.id, c1.heldBy, guess, m.confirmed(guess))
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAHitRestartingACrash plays #168's restart row: a
+// guessed hit that starts a container crashed since the last reading, which
+// showed it, while an up of its project checked before the crash is open:
+// the start event binds it to no lease, an up of the stack restarting
+// it without a stop being no call of that up's (lease.go ContainerEvent), and
+// the next reading finds nothing new. An up of app in w2 starts c1 and c2; an
+// idle up holds them; c1 crashes; a guessed hit of app starts it again.
+func TestTheLeaseModelOnAHitRestartingACrash(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 3, 0},  // w2: compose up app starts c1 and c2
+		op{10, 0, 0}, // tick
+		op{10, 0, 0}, // tick: they use its cost, it ends
+		op{0, 3, 0},  // w2: an idle compose up app holds c1 and c2
+		op{6, 0, 0},  // c1 crashes
+		op{2, 3, 1},  // w2: a guessed hit of app starts c1
+	)
+	c1 := m.conts[0]
+	if m.bound(c1) {
+		t.Errorf("%s bound by %q, want by nothing: the up was checked before it crashed", c1.id, c1.boundBy)
+	}
+	m.runOK(op{10, 0, 0}) // tick
+	if m.bound(c1) {
+		t.Errorf("after the reading, %s bound by %q, want by nothing: it is not new", c1.id, c1.boundBy)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAnotherWorktreesUpAtAReading plays a row of #168's
+// differential: with no lease of its own worktree keying it, a container
+// of app back after a missing reading binds another worktree's open up of
+// app, the dir only preferring its own (lease.go keyed), and a later up
+// that takes that one over holds it (lease.go Check). A guessed hit of app
+// in w2 binds c1 and c2 and ends; c1 is missing from a reading; w1's up of
+// app starts c3 and c4; c1 is back; w1's next up of app.
+func TestTheLeaseModelOnAnotherWorktreesUpAtAReading(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 3, 1},  // w2: a guessed hit of app starts c1 and c2
+		op{9, 0, 0},  // wait 1m: they bind it and use its cost
+		op{16, 0, 0}, // c1 missing from a reading
+		op{0, 2, 0},  // w1: compose up app starts c3 and c4
+	)
+	ls := m.b.List()
+	if len(ls) != 1 {
+		t.Fatalf("leases %+v, want only w1's up", ls)
+	}
+	up := ls[0].ID
+	m.runOK(op{10, 0, 0}) // tick: c1 is back
+	c1 := m.conts[0]
+	if c1.heldBy != up {
+		t.Errorf("%s held by %q, want by w1's up %s, as in the book", c1.id, c1.heldBy, up)
+	}
+	m.runOK(op{0, 2, 0}) // w1: compose up app takes the up over
+	ls = m.b.List()
+	if again := ls[len(ls)-1].ID; c1.heldBy != again || !m.held(c1) {
+		t.Errorf("%s held by %q (held %v), want by w1's later up %s, which took %s over", c1.id, c1.heldBy, m.held(c1), again, up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnATiedHitThenAFlicker plays #168's F5: a guessed hit's
+// start event ties when only another worktree's up of its project is open
+// (the guess, of its own dir, may be its: lease.go tied), and binds
+// nothing; a first reading with no attribution then binds it to that up, a
+// guess keying only what a reading attributes (lease.go keyed). w1's up of
+// app starts c1 and c2; w2's guessed hit of app starts c3 and c4; a
+// flicker.
+func TestTheLeaseModelOnATiedHitThenAFlicker(t *testing.T) {
+	m := newModel(t)
+	m.runOK(op{0, 2, 0}) // w1: compose up app starts c1 and c2
+	up := m.b.List()[0].ID
+	m.runOK(op{2, 3, 1}) // w2: a guessed hit of app starts c3 and c4
+	for _, x := range m.of("app", "w2") {
+		if m.bound(x) {
+			t.Errorf("at its start, %s bound by %q, want by nothing: its event ties", x.id, x.boundBy)
+		}
+	}
+	m.runOK(op{10, 1, 0}) // tick: a flicker ((1 + 7) % 8)
+	if !m.flick {
+		t.Fatal("the reading had attribution, want a flicker")
+	}
+	for _, x := range m.of("app", "w2") {
+		if x.boundBy != up {
+			t.Errorf("after the flicker, %s boundBy = %q, want w1's up %s, as in the book", x.id, x.boundBy, up)
+		}
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAStartOfSeveralsContainerStartedByAnUp is the #111
+// let-go row where a lease takes the container: an up checked after it
+// died starts it again, and its start event binds it to that up (lease.go
+// ContainerEvent, deaths.takenBy). A guessed hit of app in w2 binds c1 and
+// c2 and ends; compose stop; docker start c1 c2; c1 crashes; an up of app
+// starts it again.
+func TestTheLeaseModelOnAStartOfSeveralsContainerStartedByAnUp(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 3, 1},  // w2: a guessed hit of app starts c1 and c2
+		op{9, 0, 0},  // wait 1m: they bind it and use its cost
+		op{3, 3, 0},  // compose stop app
+		op{5, 0, 0},  // w2: docker start c1 c2
+		op{10, 0, 0}, // tick
+		op{6, 0, 0},  // c1 crashes
+		op{0, 3, 0},  // w2: compose up app starts c1
+	)
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	if c1 := m.conts[0]; c1.boundBy != up {
+		t.Errorf("%s boundBy = %q, want the up's %s: it was checked since c1 died", c1.id, c1.boundBy, up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnADressedRun plays a row of #168's differential: a
+// docker run dressed as a compose container loses its own lease (as
+// declined), so no lease binds it, and a later docker start of it with a
+// guess's container is a start of several (lease.go Check covered).
+func TestTheLeaseModelOnADressedRun(t *testing.T) {
+	m := newModel(t)
+	m.runOK(op{13, 0, 0}, op{10, 0, 0}) // w2: a dressed docker run starts c1; tick
+	c1 := m.conts[0]
+	if got := lease.Bindings(m.b, c1.id); m.bound(c1) || len(got) > 0 {
+		t.Errorf("%s bound by %q in the model, %q in the book: want by nothing in both", c1.id, c1.boundBy, got)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnADeadMarkAfterItsLease plays a row of #168's
+// differential: a dead mark is the start of several's lease's (lease.go
+// entry.dead), and ends with it: a later start's lease that binds the
+// container keeps it at the reading. An up of p1 starts c1 and c2 and ends;
+// compose stop; docker start c1 c2; c1 crashes; a guessed hit of p1 starts
+// it; compose stop ends the start's lease; docker start c1 c2 again.
+func TestTheLeaseModelOnADeadMarkAfterItsLease(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 0, 0},  // w1: compose up p1 starts c1 and c2
+		op{9, 0, 0},  // wait 1m: its lease ends
+		op{3, 0, 0},  // compose stop p1
+		op{5, 0, 0},  // w1: docker start c1 c2
+		op{10, 0, 0}, // tick
+		op{6, 0, 0},  // c1 crashes
+		op{2, 0, 1},  // w1: a guessed hit of p1 starts c1
+		op{3, 0, 0},  // compose stop p1: the start's lease ends
+		op{5, 0, 0},  // w1: docker start c1 c2
+	)
+	ls := m.b.List()
+	start := ls[len(ls)-1].ID
+	m.runOK(op{10, 0, 0}) // tick
+	if c1 := m.conts[0]; c1.boundBy != start {
+		t.Errorf("%s boundBy = %q, want the later start's %s", c1.id, c1.boundBy, start)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnACrashOfNoKnownWorktree plays a row of #168's
+// differential: an up's start of a crashed container whose worktree no
+// reading named, nor a project's lease it bound, binds no lease at its event
+// (lease.go bindsAfterCrash, #89); the next reading, which attributes it,
+// binds it. A guessed hit of app in w2 starts c1 and c2, stopped before a
+// reading; docker start c1; c1 crashes; an up of app starts it again.
+func TestTheLeaseModelOnACrashOfNoKnownWorktree(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 3, 1}, // w2: a guessed hit of app starts c1 and c2
+		op{3, 3, 0}, // compose stop app
+		op{5, 1, 0}, // w2: docker start c1
+		op{6, 0, 0}, // c1 crashes: the start's lease ends
+		op{0, 3, 0}, // w2: compose up app starts c1 and c2
+	)
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	c1 := m.conts[0]
+	if m.bound(c1) {
+		t.Errorf("at its start, %s bound by %q, want by nothing: no reading named its worktree", c1.id, c1.boundBy)
+	}
+	m.runOK(op{10, 0, 0}) // tick
+	if c1.boundBy != up {
+		t.Errorf("after the reading, %s boundBy = %q, want the up's %s", c1.id, c1.boundBy, up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnACrashAReadingForgot is TestTheLeaseModelOnACrashOfNoKnownWorktree
+// with a reading between the crash and the start: the reading drops the
+// crash's event, and no reading ever showed the container, so the book
+// keeps no verdict of it, and its start is no restart after a crash
+// (lease.go ContainerEvent crashed): the up binds it at its event. A guessed
+// hit of p2 starts c1 and c2; c1 crashes; a reading; an up of p2 starts it.
+func TestTheLeaseModelOnACrashAReadingForgot(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 1, 1},  // w2: a guessed hit of p2 starts c1 and c2
+		op{6, 0, 0},  // c1 crashes
+		op{10, 0, 0}, // tick
+		op{1, 1, 0},  // w2: compose up p2 starts c1
+	)
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	if c1 := m.conts[0]; c1.boundBy != up {
+		t.Errorf("%s boundBy = %q, want the up's %s: the book forgot the crash", c1.id, c1.boundBy, up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAWorktreeForgotten plays a row of #168's
+// differential: the book forgets a container's worktree with its verdict,
+// absent for the timeout (lease.go Observe), and a docker start's event
+// judges it afresh with none, so an up's start of it after it crashes binds
+// no lease at its event (lease.go bindsAfterCrash). A guessed hit of app in
+// w2 binds c1 and c2 at a reading; compose stop; 2m pass; docker start c1;
+// c1 crashes; an up of app starts it.
+func TestTheLeaseModelOnAWorktreeForgotten(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 3, 1},  // w2: a guessed hit of app starts c1 and c2
+		op{10, 0, 0}, // tick: they bind it
+		op{3, 3, 0},  // compose stop app
+		op{9, 0, 0},
+		op{9, 0, 0}, // 2m: their verdicts go
+		op{5, 1, 0}, // w2: docker start c1
+		op{6, 0, 0}, // c1 crashes
+		op{0, 3, 0}, // w2: compose up app starts c1 and c2
+	)
+	if c1 := m.conts[0]; m.bound(c1) {
+		t.Errorf("%s bound by %q, want by nothing: the book forgot its worktree", c1.id, c1.boundBy)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnACrashedStartOfSeveralsContainer plays a row of
+// #168's differential: a start of several's container whose worktree the
+// book does not know, crashed, stays that start's when an up starts it
+// again, the event binding no project's lease to it (lease.go
+// bindsAfterCrash). A guessed hit of app in w1 starts c1 and c2; c1
+// crashes; docker start c1 c2; c1 crashes; an up of app starts it.
+func TestTheLeaseModelOnACrashedStartOfSeveralsContainer(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 2, 1}, // w1: a guessed hit of app starts c1 and c2
+		op{3, 2, 0}, // compose stop app
+		op{5, 0, 0}, // w1: docker start c1 c2
+	)
+	start := m.b.List()[len(m.b.List())-1].ID
+	m.runOK(
+		op{6, 0, 0}, // c1 crashes
+		op{0, 2, 0}, // w1: compose up app starts c1
+	)
+	if c1 := m.conts[0]; c1.boundBy != start {
+		t.Errorf("%s boundBy = %q, want the start's %s: no reading named its worktree", c1.id, c1.boundBy, start)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAWorktreeFromAFlickeredBinding plays a row of #168's
+// differential: a project's lease that binds a container tells the book
+// its worktree (lease.go boundBy), at a reading with no attribution too, so
+// a later up's start of it after a crash binds at its event. A guessed hit
+// of app in w2 starts c1 and c2; an idle up of app; a flickered reading
+// binds them to it; c1 crashes; an up of app starts it.
+func TestTheLeaseModelOnAWorktreeFromAFlickeredBinding(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{2, 3, 1},  // w2: a guessed hit of app starts c1 and c2
+		op{0, 3, 0},  // w2: an idle compose up app
+		op{10, 1, 0}, // tick: a flicker ((1 + 7) % 8)
+	)
+	if !m.flick {
+		t.Fatal("the reading had attribution, want a flicker")
+	}
+	m.runOK(
+		op{6, 0, 0}, // c1 crashes
+		op{0, 3, 0}, // w2: compose up app starts c1
+	)
+	ls := m.b.List()
+	up := ls[len(ls)-1].ID
+	if c1 := m.conts[0]; c1.boundBy != up {
+		t.Errorf("%s boundBy = %q, want the up's %s: the book knows its worktree", c1.id, c1.boundBy, up)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAStackItsLeasePlaced plays the model's readings after
+// #74: the book re-derives the latest reading's attribution with the
+// attribution matcher (lease.go Observe), so the model's must be what the
+// matcher finds (model.snapshot), or a compose up finds no stack running in
+// its worktree. An up of p1 starts c1 and c2, and its lease ends; an idle up
+// of p1 holds them.
+func TestTheLeaseModelOnAStackItsLeasePlaced(t *testing.T) {
+	m := newModel(t)
+	m.runOK(
+		op{0, 0, 0}, // w1: compose up p1 starts c1 and c2
+		op{9, 0, 0}, // wait 1m: its lease ends
+		op{0, 0, 0}, // w1: an idle compose up p1 holds c1 and c2
+	)
+	up := m.b.List()[0].ID
+	if got, want := lease.Bound(m.b, up), []string{"container:c1", "container:c2"}; !slices.Equal(got, want) {
+		t.Errorf("the idle up %s binds %q in the book, want %q: it holds the stack", up, got, want)
+	}
+	for _, x := range m.of("p1", "w1") {
+		if x.heldBy != up {
+			t.Errorf("%s held by %q in the model, want by the idle up %s", x.id, x.heldBy, up)
+		}
 	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))

@@ -156,6 +156,56 @@ func TestDeriveGivesALeasedVMItsWorktree(t *testing.T) {
 	}
 }
 
+// A leased VM run again with no empty reading between, under another tart
+// run process (or none it can name), is another run: it loses the lease's
+// worktree and is manual. Under the same process it keeps it (#205).
+func TestDeriveDropsTheWorktreeOfAVMRunAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pid  int // the next reading's RunPID
+		want string
+	}{
+		{"another PID", os.Getpid() + 1, "mac1 (manual)"},
+		{"PID 0", 0, "mac1 (manual)"},
+		{"same PID", os.Getpid(), `mac1 (worktree "A"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			book := lease.New(time.Minute, time.Now, discardLog())
+			cfg := config.Defaults("/x")
+			cfg.Budget.MaxMacOSVMs = 1
+			tick := derive(book, cfg.Budget.Params())
+			check := gateCheckOn(book, cfg.PolicyConfig(), nil, "")
+			const w = "repo::/Users/dev/w/project-a"
+			snap := func(vms ...protocol.TartVM) *protocol.Snapshot {
+				s := &protocol.Snapshot{
+					Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+					Orca: &protocol.Orca{Running: true, Worktrees: []protocol.Worktree{{ID: w, Path: "/Users/dev/w/project-a", Name: "A"}}},
+					Tart: &protocol.Tart{Installed: true, MacOSRunning: len(vms), VMs: vms},
+				}
+				tick(s)
+				return s
+			}
+			mac1 := func(pid int) protocol.TartVM {
+				return protocol.TartVM{Name: "mac1", OS: "darwin", MemoryBytes: 4 << 30, RunPID: pid}
+			}
+
+			s := snap()
+			if d := check(&protocol.CheckRequest{Worktree: w, Kind: "tart", Command: "tart run mac1", MacOS: true, CostBytes: 8 << 30, PID: os.Getpid()}, s); !d.Allow {
+				t.Fatalf("first: %+v", d)
+			}
+			snap(mac1(os.Getpid()))
+			s = snap(mac1(tc.pid))
+			d := check(&protocol.CheckRequest{Worktree: "w2", Kind: "tart", Command: "tart run mac2", MacOS: true}, s)
+			if d.Allow || len(d.Reasons) == 0 || d.Reasons[0].Code != policy.VMSlots {
+				t.Fatalf("second macOS VM: %+v", d)
+			}
+			if !strings.Contains(d.Message, tc.want) {
+				t.Fatalf("want %s: %s", tc.want, d.Message)
+			}
+		})
+	}
+}
+
 // Through the daemon's wiring: a snapshot the collector stopped refreshing
 // is not decided on (#30).
 func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {

@@ -223,6 +223,9 @@ type verdict struct {
 	// event says nothing of whose a container is (#89).
 	owner string
 	lease string // the worktree of the lease it last bound
+	// runPID is the tart run process a VM was judged or last seen with:
+	// another (or a change to or from 0) is another run (#205).
+	runPID int
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
 	// list it still. Until then its restart binds as bindsAfterCrash says,
@@ -932,6 +935,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present = now, true
+		if r.kind == "vm" && r.runPID != v.runPID {
+			// Run again with no reading between: another run, not the
+			// lease's, nor the owner's.
+			v.lease, v.owner = "", ""
+		}
+		v.runPID = r.runPID
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
@@ -1682,7 +1691,7 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 // judge records how r started.
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, service: r.service, oneoff: r.oneoff, last: now, present: true,
-		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
+		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}, runPID: r.runPID}
 	if old := b.verdicts[r.key]; old != nil && r.kind != "vm" {
 		// An event's r is unattributed. A VM run again is a new run.
 		v.owner, v.lease = old.owner, old.lease

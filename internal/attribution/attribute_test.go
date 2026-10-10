@@ -133,3 +133,28 @@ func TestEmptyListsAreArraysNotNull(t *testing.T) {
 		t.Fatalf("json has null lists: %s", b)
 	}
 }
+
+// A container or VM a worktree's lease bound lands under that worktree only
+// when the evidence finds none (#74).
+func TestLeasedFallsBackOnlyWithoutEvidence(t *testing.T) {
+	leased := map[string]string{
+		"container:c3": "repo::/Users/dev/w/project-b", // no match
+		"container:c1": "repo::/Users/dev/w/project-b", // compose dir says fix-login
+		"container:c4": "repo::/Users/dev/w/project-b", // ambiguous
+		"vm:orphan":    "repo::/Users/dev/w/gone",      // no longer live
+	}
+	a := attribution.AttributeLeased(snapshot(), leased)
+	b := a.Worktrees[1]
+	if len(b.Containers) != 1 || b.Containers[0].Name != "stray" || b.Containers[0].By != attribution.ByLease ||
+		b.Containers[0].Reason != "" || b.ContainerMemoryBytes != 3*gib {
+		t.Fatalf("project-b = %+v", b)
+	}
+	if f := a.Worktrees[0]; len(f.Containers) != 2 || f.Containers[0].Name != "db" || f.Containers[0].By != attribution.ByComposeDir {
+		t.Fatalf("fix-login = %+v", f)
+	}
+	u := a.Unattributed
+	if len(u.Containers) != 1 || u.Containers[0].Name != "both" || u.Containers[0].Reason != attribution.Ambiguous ||
+		len(u.TartVMs) != 1 || u.TartVMs[0].Name != "orphan" || u.TartVMs[0].Reason != attribution.NoMatch || u.ContainerMemoryBytes != gib {
+		t.Fatalf("unattributed = %+v", u)
+	}
+}

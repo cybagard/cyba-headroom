@@ -7,7 +7,16 @@ import "github.com/cybagard/cyba-headroom/internal/protocol"
 const OrcaUnknown = "orca_unknown"
 
 // Attribute assigns s's containers and Tart VMs to its live worktrees.
-func Attribute(s *protocol.Snapshot) protocol.Attribution {
+func Attribute(s *protocol.Snapshot) protocol.Attribution { return attribute(s, nil) }
+
+// AttributeLeased is Attribute, but an item the evidence matches to no
+// worktree goes to the worktree leased names for its key (container:<ID>,
+// vm:<name>), the worktree of the lease it bound, if that one is live (#74).
+func AttributeLeased(s *protocol.Snapshot, leased map[string]string) protocol.Attribution {
+	return attribute(s, leased)
+}
+
+func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribution {
 	a := protocol.Attribution{Worktrees: []protocol.WorktreeUsage{}, OrcaStale: s.Sources["orca"].Stale}
 	known := s.Orca != nil && s.Orca.Running
 	var wts []Worktree
@@ -25,11 +34,15 @@ func Attribute(s *protocol.Snapshot) protocol.Attribution {
 		}
 	}
 	m := NewMatcher(wts)
-	match := func(k Keys) Match {
+	match := func(key string, k Keys) Match {
 		if !known {
 			return Match{Reason: OrcaUnknown}
 		}
-		return m.Match(k)
+		r := m.Match(k)
+		if _, live := index[leased[key]]; r.Reason == NoMatch && live {
+			return Match{WorktreeID: leased[key], By: ByLease}
+		}
+		return r
 	}
 	// usage is where a match lands: its worktree, or the unattributed set.
 	usage := func(m Match) *protocol.Usage {
@@ -41,7 +54,7 @@ func Attribute(s *protocol.Snapshot) protocol.Attribution {
 
 	if s.Docker != nil {
 		for _, c := range s.Docker.Containers {
-			m := match(Keys{ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts})
+			m := match("container:"+c.ID, Keys{ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts})
 			u := usage(m)
 			u.Containers = append(u.Containers, protocol.AttributedContainer{
 				ID: c.ID, Name: c.Name, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
@@ -51,7 +64,7 @@ func Attribute(s *protocol.Snapshot) protocol.Attribution {
 	}
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
-			m := match(Keys{LaunchCwd: vm.LaunchCwd, SharedDirs: vm.SharedDirs, VMName: vm.Name})
+			m := match("vm:"+vm.Name, Keys{LaunchCwd: vm.LaunchCwd, SharedDirs: vm.SharedDirs, VMName: vm.Name})
 			u := usage(m)
 			u.TartVMs = append(u.TartVMs, protocol.AttributedVM{
 				Name: vm.Name, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes,

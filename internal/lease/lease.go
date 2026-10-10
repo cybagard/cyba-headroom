@@ -53,6 +53,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -988,6 +989,12 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	b.prev = next
 	b.markBased(s)
+	// What no evidence places goes to the worktree of the lease it bound
+	// (#74). Last, so resources and verdicts above stay evidence's alone.
+	if leased := b.leasedWorktrees(present); s.Attribution != nil && len(leased) > 0 {
+		a := attribution.AttributeLeased(s, leased)
+		s.Attribution = &a
+	}
 	cp := *s // a copy: the daemon keeps writing to s after this
 	b.latest, b.observed = &cp, now
 
@@ -1040,6 +1047,18 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 	}
 	b.expire(now)
+}
+
+// leasedWorktrees maps each resource in present to the worktree of the
+// lease it last bound, if any.
+func (b *Book) leasedWorktrees(present map[string]uint64) map[string]string {
+	m := map[string]string{}
+	for k, v := range b.verdicts {
+		if _, ok := present[k]; ok && v.lease != "" {
+			m[k] = v.lease
+		}
+	}
+	return m
 }
 
 // binder is the open lease r, new in a reading, binds, or nil.
@@ -1363,10 +1382,11 @@ func (b *Book) owner(r resource) string {
 	return r.worktree
 }
 
-// boundBy records that r bound e, if e's key says whose r is: its label or
-// its project. A start by ID names the container, not whose it is (#89).
+// boundBy records that r bound e, if e's key says whose r is: its label,
+// its project, or a tart run's process or VM name (#74). A start by ID
+// names the container, not whose it is (#89).
 func (b *Book) boundBy(r resource, e *entry) {
-	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
+	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "tart" || e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
 		v.lease = e.Worktree
 	}
 }
@@ -1646,8 +1666,9 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, service: r.service, oneoff: r.oneoff, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}}
-	if old := b.verdicts[r.key]; old != nil {
-		v.owner, v.lease = old.owner, old.lease // an event's r is unattributed
+	if old := b.verdicts[r.key]; old != nil && r.kind != "vm" {
+		// An event's r is unattributed. A VM run again is a new run.
+		v.owner, v.lease = old.owner, old.lease
 	}
 	v.owner = cmp.Or(r.worktree, v.owner)
 	b.verdicts[r.key] = v

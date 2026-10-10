@@ -33,13 +33,15 @@ brew install cybagard/tap/headroom
 brew services start headroom
 ```
 
-The service starts the daemon at login and puts the shims in `~/.config/headroom/shims`. In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`, for example:
+The service starts the daemon now and at login, and puts the shims in `~/.config/headroom/shims`. In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`, for example:
 
 ```sh
 headroom run -- claude
 ```
 
-Do not also run `headroom install`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then `rm -rf ~/.config/headroom/shims`.
+If Orca does not find `headroom`, use the full path, `/opt/homebrew/bin/headroom run -- <agent>`.
+
+Do not also run `headroom install`. To upgrade, run `brew upgrade cybagard/tap/headroom`, then `brew services restart headroom`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then `rm -rf ~/.config/headroom/shims`.
 
 ### Install from the release tarball
 

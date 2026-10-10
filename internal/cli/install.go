@@ -93,7 +93,13 @@ func (in *installer) install(ctx context.Context) int {
 	}
 	// Copying over a link replaces it: Homebrew's link to the formula's
 	// binary would become this older copy (#183).
-	if fi, err := os.Lstat(in.bin); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+	// A plain install still replaces a link at the default path.
+	if fi, err := os.Lstat(in.bin); in.binGiven && err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		if _, err := os.Stat(in.bin); err != nil {
+			target, _ := os.Readlink(in.bin)
+			fmt.Fprintf(in.errw, "headroom: %s is a broken link to %s (%v); remove it or choose another --bin\n", in.bin, target, err)
+			return 1
+		}
 		if same, _ := sameFile(in.bin, in.exe); !same {
 			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install it, run: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
 			return 1

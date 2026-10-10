@@ -618,3 +618,66 @@ func TestUninstallWithBothAgentsRemovesHeadrooms(t *testing.T) {
 		})
 	}
 }
+
+// A dangling link at --bin is refused as broken, with its target named and
+// no command that would run it (#183).
+func TestInstallRefusesABrokenLink(t *testing.T) {
+	f := newInstallFixture(t)
+	missing := filepath.Join(f.home, "Cellar", "headroom", "0.0.9", "bin", "headroom")
+	f.in.bin, f.in.binGiven = filepath.Join(f.home, "opt", "bin", "headroom"), true
+	if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(missing, f.in.bin); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 1 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	msg := f.errb.String()
+	if !strings.Contains(msg, "broken") || !strings.Contains(msg, missing) {
+		t.Errorf("message does not call the link broken or name %s:\n%s", missing, msg)
+	}
+	if strings.Contains(msg, "install --bin") {
+		t.Errorf("message suggests running the broken link:\n%s", msg)
+	}
+	if got, err := os.Readlink(f.in.bin); err != nil || got != missing {
+		t.Fatalf("%s -> %q, %v", f.in.bin, got, err)
+	}
+	for _, p := range []string{f.plistPath(), f.in.shimDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written: %v", p, err)
+		}
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+}
+
+// A plain install still replaces a link at the default path with a copy:
+// the refusal is for --bin only (#183).
+func TestPlainInstallReplacesALinkWithACopy(t *testing.T) {
+	f := newInstallFixture(t)
+	other := filepath.Join(t.TempDir(), "headroom") // a dev build
+	if err := os.WriteFile(other, []byte("#!binary dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, f.in.bin); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if fi, err := os.Lstat(f.in.bin); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("%s is not a copy: %v %v", f.in.bin, fi, err)
+	}
+	if b, err := os.ReadFile(f.in.bin); err != nil || !bytes.Equal(b, f.exeData) {
+		t.Errorf("installed binary: %q %v", b, err)
+	}
+	if b, err := os.ReadFile(other); err != nil || string(b) != "#!binary dev" {
+		t.Errorf("the dev build changed: %q %v", b, err)
+	}
+}

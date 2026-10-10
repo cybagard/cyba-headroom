@@ -1,0 +1,11 @@
+# markdownlint-cli2 config: run by `make lint-docs` and CI's docs job.
+config:
+  default: true
+  # Prose is not wrapped: one paragraph is one line.
+  MD013: false
+
+# Only the top-level documents, for now.
+globs:
+  - README.md
+  - SECURITY.md
+  - CONTRIBUTING.md

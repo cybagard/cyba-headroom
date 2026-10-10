@@ -16,7 +16,7 @@ endif
 # The host is darwin/arm64; build for it wherever the build runs.
 BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-.PHONY: build test test-host test-tart darwin-tests test-hooks hooks lint fmt tidy clean dc-image dc-shell
+.PHONY: build test test-host test-tart darwin-tests test-hooks hooks lint lint-docs fmt tidy clean dc-image dc-shell
 
 build: $(DC_DEP)
 	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
@@ -54,6 +54,18 @@ lint: $(DC_DEP)
 	$(RUN) golangci-lint run
 	$(RUN) env GOOS=darwin go vet ./...
 	$(RUN) env GOOS=darwin golangci-lint run
+
+# Docs lint runs in the official markdownlint-cli2 and Vale images, not the
+# devcontainer. Configs: .markdownlint-cli2.yaml, .vale.ini.
+MDLINT_IMAGE := davidanson/markdownlint-cli2:v0.23.3@sha256:d5f3f3f04b2e285dcbcdcd13b4454d119e273e3c393a9dabd163dba4abad526d
+VALE_IMAGE := jdkato/vale:v3.23.0@sha256:d87d6355dc8992f92ec39c4c862a388e56e30302a771fd4512c02660fb25cdf3
+DOCS := README.md SECURITY.md CONTRIBUTING.md
+DOCS_RUN := docker run --rm -v "$(CURDIR)":/src -w /src --user $(shell id -u):$(shell id -g) -e HOME=/tmp
+
+lint-docs:
+	$(DOCS_RUN) --entrypoint markdownlint-cli2 $(MDLINT_IMAGE)
+	$(DOCS_RUN) $(VALE_IMAGE) sync
+	$(DOCS_RUN) $(VALE_IMAGE) $(DOCS)
 
 fmt: $(DC_DEP)
 	$(RUN) gofmt -s -w .

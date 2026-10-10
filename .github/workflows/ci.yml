@@ -22,6 +22,7 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: make NATIVE=1 build && ./bin/headroom version
+      - run: make NATIVE=1 test-release
       - uses: golangci/golangci-lint-action@v8
         with:
           version: latest

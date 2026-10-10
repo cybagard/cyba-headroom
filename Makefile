@@ -16,7 +16,7 @@ endif
 # The host is darwin/arm64; build for it wherever the build runs.
 BUILD_ENV := GOOS=darwin GOARCH=arm64 CGO_ENABLED=0
 
-.PHONY: build test test-host test-tart darwin-tests test-hooks hooks lint lint-docs fmt tidy clean dc-image dc-shell
+.PHONY: build test test-host test-tart darwin-tests test-hooks test-release hooks lint lint-docs fmt tidy clean dc-image dc-shell
 
 build: $(DC_DEP)
 	$(RUN) env $(BUILD_ENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/headroom ./cmd/headroom
@@ -48,6 +48,10 @@ hooks:
 
 test-hooks:
 	scripts/hooks/pre-commit_test.sh
+
+# The release workflow's tag checks (scripts/release-tag.sh), on the host.
+test-release:
+	scripts/release-tag_test.sh
 
 # Lint as darwin too: CI runs on macOS, and darwin-only files are invisible
 # to a Linux lint.

@@ -552,3 +552,69 @@ func TestInstallRefusesALinkToAnotherBinary(t *testing.T) {
 		t.Errorf("touched launchd: %v", f.agent.calls)
 	}
 }
+
+// writeBrewPlist puts Homebrew's LaunchAgent for headroom in the fixture's
+// home under name, as `brew services start headroom` does.
+func (f *installFixture) writeBrewPlist(t *testing.T, name string) {
+	t.Helper()
+	brew := filepath.Join(f.home, "Library", "LaunchAgents", name)
+	if err := os.MkdirAll(filepath.Dir(brew), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brew, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// When only Homebrew runs the daemon, uninstall would remove the formula's
+// shims and leave its agent running: it refuses and changes nothing (#186).
+func TestUninstallRefusesWhenOnlyHomebrewRunsTheDaemon(t *testing.T) {
+	for _, name := range brewPlistNames {
+		t.Run(name, func(t *testing.T) {
+			f, link, target := newBrewFixture(t)
+			if _, err := linkShims(f.in.shimDir, link); err != nil {
+				t.Fatal(err)
+			}
+			f.writeBrewPlist(t, name)
+			if code := f.in.uninstall(context.Background()); code != 1 || !strings.Contains(f.errb.String(), "brew services stop headroom") {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			for _, n := range []string{"docker", "podman", "tart"} {
+				if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != link {
+					t.Errorf("%s -> %q, %v", n, got, err)
+				}
+			}
+			if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("link removed: %v %v", fi, err)
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("Cellar binary removed: %v", err)
+			}
+			if len(f.agent.calls) != 0 {
+				t.Errorf("touched launchd: %v", f.agent.calls)
+			}
+		})
+	}
+}
+
+// With both agents, uninstall removes headroom's, as doctor advises (#186).
+func TestUninstallWithBothAgentsRemovesHeadrooms(t *testing.T) {
+	for _, name := range brewPlistNames {
+		t.Run(name, func(t *testing.T) {
+			f := newInstallFixture(t)
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("install: exit %d: %s", code, f.errb.String())
+			}
+			f.writeBrewPlist(t, name)
+			if code := f.in.uninstall(context.Background()); code != 0 {
+				t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+			}
+			if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+				t.Errorf("plist left: %v", err)
+			}
+			if !f.agent.unloaded {
+				t.Error("agent not unloaded")
+			}
+		})
+	}
+}

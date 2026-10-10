@@ -233,6 +233,14 @@ func (in *installer) waitUp(ctx context.Context) bool {
 // uninstall stops the agent and removes it and the binary install copied. Config,
 // samples and logs stay: weeks of samples are worth keeping.
 func (in *installer) uninstall(ctx context.Context) int {
+	// Homebrew's agent alone: removing its shims would leave its daemon
+	// running ungated (#186). With both, ours goes, as doctor advises.
+	if brew := brewPlist(in.home); brew != "" {
+		if _, err := os.Stat(in.plistPath()); errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); remove it with `brew services stop headroom` and `brew uninstall headroom`, not headroom uninstall\n", brew)
+			return 1
+		}
+	}
 	// The binary to remove is the one the installed agent runs, unless --bin
 	// names it; with neither, no binary is ours to delete.
 	remove := []string{in.plistPath()}

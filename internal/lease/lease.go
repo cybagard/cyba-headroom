@@ -114,9 +114,9 @@ type Book struct {
 	// lapsed are leases that expired before their resource appeared (a
 	// slow image pull), kept for another timeout: a resource they name is
 	// their call's, so not ungated, though they no longer reserve. A
-	// worktree's compose lease vouches for every service of its stack
-	// until a timeout after it lapsed; any other is spent on its first
-	// match, until Observe drops it (lapsedFor).
+	// worktree's compose lease, or one with a dir, vouches for every
+	// service of its stack until a timeout after it lapsed; any other is
+	// spent on its first match, until Observe drops it (lapsedFor).
 	lapsed []*entry
 }
 
@@ -142,6 +142,11 @@ type entry struct {
 	// project is the compose project a compose lease locked onto with its
 	// first container.
 	project string
+	// dir is the working dir Compose labels a compose lease's project
+	// with, as the shim found it (policy.Request.ComposeDir), or "":
+	// lapsed, it tells the call's stack from another of the same project
+	// name (lapsedFor, #158).
+	dir string
 	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
 	macOS bool
 	// pid is the tart run process, for a tart lease: if it exits before its
@@ -548,7 +553,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.Kind == "compose" {
 		// Its key: the project, -p or as docker compose config names it.
 		// Compose labels each container with it.
-		e.target, e.project, e.oneoff = "", r.Target, r.Op == "run"
+		e.target, e.project, e.oneoff, e.dir = "", r.Target, r.Op == "run", r.ComposeDir
 		// compose up again for the project an open lease of this worktree
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost:
@@ -1570,23 +1575,35 @@ func (e *entry) hasKey() bool {
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
-// spends it unless it is a worktree's compose lease. That one spends
-// nothing on a service: it has no list of its services, so it vouches for
-// every one until a timeout after it lapsed, though no reading came
-// between to drop it (#145), and only for one its worktree could have
+// spends it unless it is a compose lease that can tell its call's stack:
+// a worktree's, or one with a dir. That one spends nothing on a service:
+// it has no list of its services, so it vouches for every one until a
+// timeout after it lapsed, though no reading came between to drop it
+// (#145), and only for one its call could have started. With a dir, one
+// Compose labelled with that dir, whatever the attribution: the dir tells
+// another stack of the same project name, and a compose file in another
+// worktree is the call's (#158). Without, one its worktree could have
 // started: a guess's, its own worktree's (entry.guessed); a real key's,
 // its own worktree's or an unattributed one, which a reading that drops
-// attribution shows. Never another worktree's. It is spent on a compose
-// run's one-off, which it names. Any other lease is spent on its first
-// match, until Observe drops it: a key that names one container, and a
-// manual compose lease, which has no worktree to tell its call's stack
-// from another worktree's of the same project name. A vouch only gates r:
-// the lease reserves nothing again.
+// attribution shows; never another worktree's. A guess binds only its own
+// worktree's either way (key). It is spent on a compose run's one-off,
+// which it names. Any other lease is spent on its first match, until
+// Observe drops it: a key that names one container, and a manual compose
+// lease with no dir, which has nothing to tell its call's stack from
+// another worktree's of the same project name. A vouch only gates r: the
+// lease reserves nothing again.
 func (b *Book) lapsedFor(r resource, now time.Time) bool {
-	stack := func(o *entry) bool { return o.Kind == "compose" && o.Worktree != "" }
+	stack := func(o *entry) bool { return o.Kind == "compose" && (o.Worktree != "" || o.dir != "") }
 	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(o *entry) bool {
-		return stack(o) && (!now.Before(o.Expires.Add(b.timeout)) ||
-			r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree)
+		switch {
+		case !stack(o):
+			return false
+		case !now.Before(o.Expires.Add(b.timeout)):
+			return true
+		case o.dir != "":
+			return r.dir != o.dir
+		}
+		return r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree
 	}), r, true)
 	if e == nil {
 		return false

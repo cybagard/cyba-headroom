@@ -114,6 +114,9 @@ type Request struct {
 	// Guessed is set when a compose call's Target is the shim's guess at
 	// Compose's default name, its config having failed (#84).
 	Guessed bool
+	// ComposeDir is the working dir Compose labels a compose call's
+	// project with, or "" when the shim cannot be sure of it (#158).
+	ComposeDir string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

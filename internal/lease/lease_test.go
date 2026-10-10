@@ -1227,6 +1227,119 @@ func TestALapsedComposeRunVouchesForOneOneoff(t *testing.T) {
 	}
 }
 
+// withServiceIn is withService with Compose's working dir label dir, none
+// when "".
+func withServiceIn(s *protocol.Snapshot, sv, wt, dir string) *protocol.Snapshot {
+	labels := map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeServiceLabel: sv}
+	if dir != "" {
+		labels[protocol.ComposeWorkingDirLabel] = dir
+	}
+	return addContainer(s, protocol.Container{ID: sv, Name: sv, MemoryBytes: gib / 4, Labels: labels}, wt)
+}
+
+// A compose up whose shim knew Compose's working dir, and whose stack
+// appears after its timeout (a slow pull): its lapsed lease vouches for
+// every service labelled with that dir, manual or a worktree's, real key
+// or guess, until a further timeout, and reserves nothing again. The dir,
+// not the attribution, tells its stack from another of the same project
+// name; a guess still binds only its own worktree's (#158).
+func TestALapsedComposeLeaseWithADirVouchesForItsStack(t *testing.T) {
+	const own, other = "/src/one", "/src/two"
+	type service struct{ sv, wt, dir string }
+	type reading struct {
+		at       time.Duration // from the check
+		services []service
+	}
+	for _, tc := range []struct {
+		name     string
+		readings []reading
+		byManual []string // ungated, for a manual up
+		byKey    []string // ungated, for a worktree's real key
+		byGuess  []string // ungated, for a worktree's guess
+	}{
+		{"own dir, attributed", []reading{{3 * time.Minute, []service{{"web", "w1", own}}}}, nil, nil, nil},
+		{"own dir, unattributed", []reading{{3 * time.Minute, []service{{"web", "", own}}}}, nil, nil, []string{"web"}},
+		{"own dir, attributed to another worktree",
+			[]reading{{3 * time.Minute, []service{{"web", "w2", own}}}}, nil, nil, []string{"web"}},
+		{"two services in one reading",
+			[]reading{{3 * time.Minute, []service{{"web", "w1", own}, {"db", "w1", own}}}}, nil, nil, nil},
+		{"another dir's same-name service", []reading{{3 * time.Minute, []service{{"web", "w1", other}}}},
+			[]string{"web"}, []string{"web"}, []string{"web"}},
+		{"its stack and another dir's",
+			[]reading{{3 * time.Minute, []service{{"x", "w2", other}, {"web", "w1", own}, {"db", "w1", own}}}},
+			[]string{"x"}, []string{"x"}, []string{"x"}},
+		{"no dir label", []reading{{3 * time.Minute, []service{{"web", "w1", ""}}}},
+			[]string{"web"}, []string{"web"}, []string{"web"}},
+		{"a first service gone before the second",
+			[]reading{{3 * time.Minute, []service{{"web", "w1", own}}}, {3*time.Minute + 10*time.Second, []service{{"db", "w1", own}}}},
+			nil, nil, nil},
+		{"after a further timeout", []reading{{5 * time.Minute, []service{{"web", "w1", own}, {"db", "w1", own}}}},
+			[]string{"web", "db"}, []string{"web", "db"}, []string{"web", "db"}},
+	} {
+		manual := appUp
+		manual.Worktree = ""
+		for _, key := range []struct {
+			name string
+			up   policy.Request
+			want []string
+		}{{"manual", manual, tc.byManual}, {"real key", appUp, tc.byKey}, {"guess", guessed("w1", "app"), tc.byGuess}} {
+			b, c, _ := book(t)
+			b.Observe(snap())
+			key.up.ComposeDir = own
+			b.Check(key.up, snap(), cfg)
+			c.t = t0.Add(2 * time.Minute)
+			b.Observe(snap()) // past its timeout, nothing yet
+			for _, r := range tc.readings {
+				c.t = t0.Add(r.at - time.Second)
+				b.Observe(snap())
+				c.t = t0.Add(r.at)
+				s := snap()
+				for _, sv := range r.services {
+					withServiceIn(s, sv.sv, sv.wt, sv.dir)
+				}
+				b.Observe(s)
+			}
+			var got []string
+			for _, u := range b.Ungated() {
+				got = append(got, u.Name)
+			}
+			slices.Sort(got)
+			want := slices.Sorted(slices.Values(key.want))
+			if !slices.Equal(got, want) {
+				t.Errorf("%s, %s: ungated %v, want %v", tc.name, key.name, got, want)
+			}
+			if l := b.List(); len(l) != 0 {
+				t.Errorf("%s, %s: a lapsed lease reserves again: %+v", tc.name, key.name, l)
+			}
+		}
+	}
+}
+
+// A compose run whose shim knew the dir, manual or a worktree's: its
+// lapsed lease still vouches for one one-off, not each (#158).
+func TestALapsedComposeRunWithADirVouchesForOneOneoff(t *testing.T) {
+	for _, wt := range []string{"", "w1"} {
+		b, c, _ := book(t)
+		b.Observe(snap())
+		r := run(wt, "p")
+		r.ComposeDir = "/src/one"
+		b.Check(r, snap(), cfg)
+		c.t = t0.Add(2 * time.Minute)
+		b.Observe(snap())
+		c.t = t0.Add(3 * time.Minute)
+		s := oneoff("r2", "p", "w1")(oneoff("r1", "p", "w1")(snap()))
+		for _, ct := range s.Docker.Containers {
+			if ct.Labels != nil {
+				ct.Labels[protocol.ComposeWorkingDirLabel] = "/src/one"
+			}
+		}
+		b.Observe(s)
+		if u := b.Ungated(); len(u) != 1 {
+			t.Errorf("worktree %q: ungated %+v, want one of the two one-offs", wt, u)
+		}
+	}
+}
+
 // A guess that hits while another worktree's checked up names the same
 // project: each binds the container its own worktree runs, the guess too.
 func TestAGuessThatHitsKeepsItsOwnContainerFromAnotherWorktree(t *testing.T) {

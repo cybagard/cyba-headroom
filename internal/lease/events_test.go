@@ -248,6 +248,28 @@ func TestADieNewerThanTheReadingBindsNoNewRun(t *testing.T) {
 	}
 }
 
+// The same for a one-off no reading showed yet: its start event bound it,
+// so a reading begun before its die that lists it does not make it new.
+func TestADieNewerThanTheReadingBindsNoNewRunNeverRead(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab)
+	c.t = t0.Add(5 * time.Second)
+	b.Check(run("w1", "p"), snap(), cfg) // the next compose run
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	c.t = t0.Add(16 * time.Second)
+	b.Observe(read(oneoff("r2", "p", "w1")(snap()), t0.Add(15*time.Second)))
+	if strings.Contains(log.String(), "ungated") {
+		t.Fatalf("the run's own one-off was warned ungated: %s", log)
+	}
+}
+
 // The same for a compose up checked after a service died: the up that
 // starts nothing still logs never appeared.
 func TestADieNewerThanTheReadingKeepsNeverAppeared(t *testing.T) {

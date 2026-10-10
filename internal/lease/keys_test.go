@@ -17,16 +17,16 @@ func TestComposeUpAfterStopBindsByItsProject(t *testing.T) {
 		return addContainer(s, protocol.Container{ID: "A1", Name: "app-db-1", MemoryBytes: gib / 2,
 			Labels: map[string]string{"com.docker.compose.project": "app", protocol.ComposeWorkingDirLabel: "/Users/dev/src/a"}}, "w1")
 	}
-	b.Observe(app(snap()))
+	b.Observe(read(app(snap()), c.t))
 	c.t = c.t.Add(5 * time.Second)
 	// docker compose stop: its events say A1 is gone, not just missing (#87).
 	lab := map[string]string{"com.docker.compose.project": "app"}
 	b.ContainerEvent("stop", "A1", "app-db-1", lab)
 	b.ContainerEvent("die", "A1", "app-db-1", lab)
-	b.Observe(snap())
+	b.Observe(read(snap(), c.t))
 	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Command: "docker compose up", CostBytes: gib, Target: "app"}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
-	b.Observe(app(snap())) // docker compose up -d: the same containers
+	b.Observe(read(app(snap()), c.t)) // docker compose up -d: the same containers
 	if l := b.List(); len(l) != 1 || l[0].Bytes != gib/2 {
 		t.Fatalf("leases = %+v, want the up's lease bound to its container", l)
 	}

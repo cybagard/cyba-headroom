@@ -630,7 +630,8 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 	return func(r *protocol.CheckRequest, s *protocol.Snapshot) protocol.Decision {
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
-			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Idle: r.Idle, Guessed: r.Guessed, OnEngine: sameSocket(r.Engine, socket)}
+			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Idle: r.Idle, Guessed: r.Guessed, ComposeDir: r.ComposeDir,
+			OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
 		}

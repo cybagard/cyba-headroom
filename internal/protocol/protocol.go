@@ -82,6 +82,10 @@ type CheckRequest struct {
 	// Guessed is set when a compose call's Target is the name Compose
 	// gives by default, guessed because its config failed (#84).
 	Guessed bool `json:"guessed,omitempty"`
+	// ComposeDir is the working dir Compose will label a compose call's
+	// project with, absolute, or "" when the shim cannot be sure of it
+	// (#158). An older daemon ignores it; an older shim sends none.
+	ComposeDir string `json:"compose_dir,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

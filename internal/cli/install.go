@@ -331,22 +331,29 @@ func tail(w io.Writer, path string, n int) {
 		return
 	}
 	defer func() { _ = f.Close() }()
+	tailFile(w, f, n)
+}
+
+// tailFile is tail on an open file. It returns the offset it read up to, where
+// a follower carries on (#149).
+func tailFile(w io.Writer, f *os.File, n int) int64 {
 	fi, err := f.Stat()
 	if err != nil || fi.Size() == 0 {
-		return
+		return 0
 	}
 	const window = 256 << 10 // far more than n log lines
 	start := max(fi.Size()-window, 0)
 	buf := make([]byte, fi.Size()-start)
 	if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
-		return
+		return fi.Size()
 	}
 	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
 	if start > 0 {
 		lines = lines[1:] // the window may begin mid-line
 	}
 	lines = lines[max(len(lines)-n, 0):]
-	fmt.Fprintf(w, "==> %s <==\n%s\n", path, strings.Join(lines, "\n"))
+	fmt.Fprintf(w, "==> %s <==\n%s\n", f.Name(), strings.Join(lines, "\n"))
+	return fi.Size()
 }
 
 // trimCrashLog empties the crash log launchd gives the daemon as stderr once

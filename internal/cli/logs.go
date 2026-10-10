@@ -31,10 +31,20 @@ func runLogs(e Env) int {
 		fmt.Fprintf(e.Stdout, "no logs yet in %s (is the daemon installed? `headroom install`)\n", dir)
 		return 0
 	}
-	tail(e.Stdout, logPath, 50)
+	// The follower carries on from the open file where the tail stopped, so a
+	// line logged in between is shown once (#149).
+	f := &follower{path: logPath, out: e.Stdout}
+	if lf, err := os.Open(logPath); err == nil {
+		_, _ = lf.Seek(tailFile(e.Stdout, lf, 50), io.SeekStart)
+		f.f = lf
+	}
+	defer f.close()
 	tail(e.Stdout, crashPath, 20)
 	if !follow {
 		return 0
+	}
+	if e.tailed != nil {
+		e.tailed()
 	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -42,14 +52,11 @@ func runLogs(e Env) int {
 	if every == 0 {
 		every = 500 * time.Millisecond
 	}
-	f := &follower{path: logPath, out: e.Stdout}
-	f.skipToEnd()
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			f.close()
 			return 0
 		case <-tick.C:
 			f.poll()
@@ -63,14 +70,6 @@ type follower struct {
 	path string
 	out  io.Writer
 	f    *os.File
-}
-
-// skipToEnd opens the file positioned at its end: the tail is already shown.
-func (fl *follower) skipToEnd() {
-	if f, err := os.Open(fl.path); err == nil {
-		_, _ = f.Seek(0, io.SeekEnd)
-		fl.f = f
-	}
 }
 
 func (fl *follower) poll() {

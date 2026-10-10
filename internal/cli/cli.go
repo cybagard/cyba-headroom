@@ -84,6 +84,7 @@ type Env struct {
 	watchEvery time.Duration                                                          // poll interval (1s)
 	suspend    chan os.Signal                                                         // delivers Ctrl-Z (SIGTSTP)
 	stopSelf   func()                                                                 // stops the process (SIGSTOP)
+	tailed     func()                                                                 // logs -f: the tail is shown, the follow not begun
 }
 
 // signalContext is e.Context (or Background) that also ends on sigs.

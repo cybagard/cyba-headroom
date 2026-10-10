@@ -82,7 +82,7 @@ func doctor(e Env) []finding {
 		out = append(out, finding{mark: pass, name: "config", detail: file})
 	}
 
-	out = append(out, shimsFinding(cfg.ShimDir, self))
+	out = append(out, shimsFinding(e.Getenv("HOME"), cfg.ShimDir, self))
 	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks, self))
 
 	snap, serr := h.status(cfg)
@@ -129,8 +129,9 @@ func daemonStatus(cfg config.Config) (*protocol.Snapshot, error) {
 }
 
 // shimsFinding checks that each shim in dir links to a headroom binary
-// that exists.
-func shimsFinding(dir, self string) finding {
+// that exists. Under Homebrew, install refuses and the daemon relinks them
+// when it starts (#186).
+func shimsFinding(home, dir, self string) finding {
 	var bad []string
 	target := ""
 	for _, n := range shimList() {
@@ -142,7 +143,11 @@ func shimsFinding(dir, self string) finding {
 		target = t
 	}
 	if len(bad) > 0 {
-		return finding{mark: fail, name: "shims", detail: fmt.Sprintf("in %s: %s; then run `headroom install`", dir, strings.Join(bad, ", "))}
+		relink := "`headroom install`"
+		if home != "" && brewPlist(home) != "" {
+			relink = "`brew services restart headroom`"
+		}
+		return finding{mark: fail, name: "shims", detail: fmt.Sprintf("in %s: %s; then run %s", dir, strings.Join(bad, ", "), relink)}
 	}
 	return finding{mark: pass, name: "shims", detail: fmt.Sprintf("%s in %s → %s", strings.Join(shimList(), ", "), dir, target)}
 }

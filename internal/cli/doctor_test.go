@@ -648,3 +648,38 @@ func TestDoctorPATHHintNamesWhatStartsTheDaemon(t *testing.T) {
 		})
 	}
 }
+
+// Under Homebrew, install refuses and the daemon relinks the shims when it
+// starts, so the shims remedy names brew services instead (#186).
+func TestDoctorShimsRemedyNamesWhatRelinksThem(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plist     string
+		want, not string
+	}{
+		"no agent": {want: "then run `headroom install`"},
+		"homebrew": {plist: "sh.brew.headroom.plist", want: "then run `brew services restart headroom`", not: "headroom install"},
+		"legacy":   {plist: "homebrew.mxcl.headroom.plist", want: "then run `brew services restart headroom`", not: "headroom install"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			r.env["HOME"] = filepath.Join(r.cfg, "home")
+			if tc.plist != "" {
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", tc.plist)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(r.shims, "tart")); err != nil {
+				t.Fatal(err)
+			}
+			_, out := r.run()
+			wantMark(t, out, "shims", "✗", "tart", tc.want)
+			if l := doctorLine(t, out, "shims"); tc.not != "" && strings.Contains(l, tc.not) {
+				t.Errorf("shims line %q says %q", l, tc.not)
+			}
+		})
+	}
+}

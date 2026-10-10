@@ -486,3 +486,27 @@ func TestUninstallFromTheCopyRemovesIt(t *testing.T) {
 		t.Fatalf("copy left: %v", err)
 	}
 }
+
+// With Homebrew's LaunchAgent in place, install would start a second
+// daemon: it refuses and changes nothing (#185).
+func TestInstallRefusesWhenHomebrewRunsTheDaemon(t *testing.T) {
+	f := newInstallFixture(t)
+	brew := filepath.Join(f.home, "Library", "LaunchAgents", "homebrew.mxcl.headroom.plist")
+	if err := os.MkdirAll(filepath.Dir(brew), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brew, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 1 || !strings.Contains(f.errb.String(), "brew services") {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	for _, p := range []string{f.in.bin, f.plistPath(), f.in.shimDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written: %v", p, err)
+		}
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+}

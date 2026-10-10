@@ -62,13 +62,27 @@ type installer struct {
 	wait, poll time.Duration
 }
 
-func (in *installer) plistPath() string {
-	return filepath.Join(in.home, "Library", "LaunchAgents", agentLabel+".plist")
+func (in *installer) plistPath() string { return agentPlist(in.home) }
+
+// agentPlist is where install writes headroom's LaunchAgent.
+func agentPlist(home string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", agentLabel+".plist")
+}
+
+// brewPlist is the LaunchAgent `brew services` writes for headroom (#185).
+func brewPlist(home string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", "homebrew.mxcl.headroom.plist")
 }
 
 // install copies the binary, writes the plist, (re)loads the agent and waits
 // for the daemon to answer.
 func (in *installer) install(ctx context.Context) int {
+	// A second agent would start a second daemon, which crash-loops on the
+	// socket the first holds (#185).
+	if _, err := os.Stat(brewPlist(in.home)); err == nil {
+		fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); manage it with `brew services`, not headroom install\n", brewPlist(in.home))
+		return 1
+	}
 	// Only the launchd daemon may hold the socket: a terminal daemon would
 	// make the agent's daemon fail to start and crash-loop.
 	if pid, err := in.ping(ctx); err == nil {

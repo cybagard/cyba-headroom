@@ -568,3 +568,47 @@ func TestAskLoginShellReal(t *testing.T) {
 		}
 	}
 }
+
+// Doctor names what runs the daemon: headroom's LaunchAgent or Homebrew's
+// (#185).
+func TestDoctorNamesTheDaemonsManager(t *testing.T) {
+	agents := map[string]string{
+		"headroom": agentLabel + ".plist",
+		"homebrew": "homebrew.mxcl.headroom.plist",
+	}
+	for name, tc := range map[string]struct {
+		plists    []string
+		down      bool
+		mark      string
+		subs      []string
+		forbidden string
+	}{
+		"headroom's":     {plists: []string{"headroom"}, mark: "✓", subs: []string{"headroom's LaunchAgent", "headroom install"}},
+		"homebrew's":     {plists: []string{"homebrew"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
+		"none":           {mark: "✓", subs: []string{"no LaunchAgent"}},
+		"both":           {plists: []string{"headroom", "homebrew"}, mark: "!", subs: []string{"both", "headroom uninstall"}},
+		"homebrew's off": {plists: []string{"homebrew"}, down: true, mark: "!", subs: []string{"brew services start headroom"}, forbidden: "headroom install"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			r.env["HOME"] = filepath.Join(r.cfg, "home")
+			for _, p := range tc.plists {
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", agents[p])
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.down {
+				r.snap, r.statusErr = nil, errors.New("connection refused")
+			}
+			_, out := r.run()
+			wantMark(t, out, "daemon", tc.mark, tc.subs...)
+			if l := doctorLine(t, out, "daemon"); tc.forbidden != "" && strings.Contains(l, tc.forbidden) {
+				t.Errorf("daemon line %q says %q", l, tc.forbidden)
+			}
+		})
+	}
+}

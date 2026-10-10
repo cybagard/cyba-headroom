@@ -164,13 +164,26 @@ func runConfig(e Env) int {
 
 // runDaemon runs the collector daemon until SIGINT or SIGTERM.
 func runDaemon(e Env) int {
-	logPath := ""
+	logPath, link := "", false
 	for a := e.Args[2:]; len(a) > 0; a = a[1:] {
-		if a[0] != "--log" || len(a) < 2 {
-			fmt.Fprintf(e.Stderr, "headroom: daemon: usage: headroom daemon [--log FILE]\n")
+		switch {
+		case a[0] == "--link-shims":
+			link = true
+		case a[0] == "--log" && len(a) > 1:
+			logPath, a = a[1], a[1:]
+		default:
+			fmt.Fprintf(e.Stderr, "headroom: daemon: usage: headroom daemon [--log FILE] [--link-shims]\n")
 			return 2
 		}
-		logPath, a = a[1], a[1:]
+	}
+	// brew services cannot name the home dir in its plist (#185).
+	if rest, ok := strings.CutPrefix(logPath, "~/"); ok {
+		home := e.Getenv("HOME")
+		if home == "" {
+			fmt.Fprintf(e.Stderr, "headroom: --log %s: HOME is not set\n", logPath)
+			return 1
+		}
+		logPath = filepath.Join(home, rest)
 	}
 	// Open the log first, so a startup failure under launchd is in the log
 	// that `headroom logs` shows, not only in the crash log.
@@ -200,6 +213,9 @@ func runDaemon(e Env) int {
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {
 		return fail(err)
+	}
+	if link {
+		linkOwnShims(e.Args[0], cfg.ShimDir, log)
 	}
 	// Collectors register here as they land (#49). Docker and Tart
 	// share one VM process listing per tick.
@@ -418,9 +434,10 @@ func usage(w io.Writer) {
   headroom --watch [--all]
                       observe view, redrawn in place; Ctrl-C to quit
   headroom config     print the effective config and its path
-  headroom daemon [--log FILE]
+  headroom daemon [--log FILE] [--link-shims]
                       run the collector daemon; --log writes its log to FILE,
-                      rotated at 5 MB
+                      rotated at 5 MB; --link-shims links the shims to the
+                      path the daemon was started from (for brew services)
   headroom check [--worktree ID] [--cost 2G] [--kind container|compose|tart] -- cmd...
                       ask the policy whether cmd may start; exit 0 allow, 75 deny
   headroom status [--json]

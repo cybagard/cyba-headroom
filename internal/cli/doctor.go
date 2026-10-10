@@ -180,10 +180,14 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 			via = filepath.Dir(first)
 		}
 	}
-	// headroom install refuses while Homebrew's agent is there (#185).
+	// headroom install refuses while Homebrew's agent is there (#185); with
+	// both, the daemon line's advice (#192).
 	start := "`headroom install`"
 	if home := getenv("HOME"); home != "" && brewPlist(home) != "" {
 		start = "`brew services start headroom`"
+		if _, err := os.Stat(agentPlist(home)); err == nil {
+			start = "`headroom uninstall`, then `brew services restart headroom`"
+		}
 	}
 	restart := ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after " + start + ")"
 	switch {

@@ -620,19 +620,22 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 // names brew services instead (#185).
 func TestDoctorPATHHintNamesWhatStartsTheDaemon(t *testing.T) {
 	for name, tc := range map[string]struct {
-		plist     string
+		plists    []string
 		want, not string
 	}{
 		"no agent": {want: "(after `headroom install`)"},
-		"homebrew": {plist: "sh.brew.headroom.plist", want: "(after `brew services start headroom`)", not: "headroom install"},
-		"legacy":   {plist: "homebrew.mxcl.headroom.plist", want: "(after `brew services start headroom`)", not: "headroom install"},
+		"homebrew": {plists: []string{"sh.brew.headroom.plist"}, want: "(after `brew services start headroom`)", not: "headroom install"},
+		"legacy":   {plists: []string{"homebrew.mxcl.headroom.plist"}, want: "(after `brew services start headroom`)", not: "headroom install"},
+		// As the daemon line advises (#192).
+		"both": {plists: []string{agentLabel + ".plist", "sh.brew.headroom.plist"},
+			want: "(after `headroom uninstall`, then `brew services restart headroom`)", not: "brew services start"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newDoctorRig(t)
 			r.env["HOME"] = filepath.Join(r.cfg, "home")
 			r.env["PATH"] = r.tools + ":/usr/bin"
-			if tc.plist != "" {
-				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", tc.plist)
+			for _, plist := range tc.plists {
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", plist)
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					t.Fatal(err)
 				}

@@ -518,3 +518,37 @@ func TestInstallRefusesWhenHomebrewRunsTheDaemon(t *testing.T) {
 		})
 	}
 }
+
+// install --bin with Homebrew's link, run from an older copy, would replace
+// the link with that copy: it refuses, changes nothing, and names the
+// binary to run (#183).
+func TestInstallRefusesALinkToAnotherBinary(t *testing.T) {
+	f, link, target := newBrewFixture(t)
+	f.in.exe = filepath.Join(f.home, ".local", "bin", "headroom") // an older copy
+	if err := os.MkdirAll(filepath.Dir(f.in.exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.in.exe, []byte("#!binary v0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 1 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if want := `"` + link + `" install --bin "` + link + `"`; !strings.Contains(f.errb.String(), want) {
+		t.Errorf("message lacks %s:\n%s", want, f.errb.String())
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a link: %v %v", link, fi, err)
+	}
+	if b, err := os.ReadFile(target); err != nil || !bytes.Equal(b, f.exeData) {
+		t.Errorf("Cellar binary: %q %v", b, err)
+	}
+	for _, p := range []string{f.plistPath(), f.in.shimDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written: %v", p, err)
+		}
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+}

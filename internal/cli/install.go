@@ -91,6 +91,14 @@ func (in *installer) install(ctx context.Context) int {
 		fmt.Fprintf(in.errw, "headroom: Homebrew runs the daemon (%s); manage it with `brew services`, not headroom install\n", brew)
 		return 1
 	}
+	// Copying over a link replaces it: Homebrew's link to the formula's
+	// binary would become this older copy (#183).
+	if fi, err := os.Lstat(in.bin); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		if same, _ := sameFile(in.bin, in.exe); !same {
+			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install it, run: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
+			return 1
+		}
+	}
 	// Only the launchd daemon may hold the socket: a terminal daemon would
 	// make the agent's daemon fail to start and crash-loop.
 	if pid, err := in.ping(ctx); err == nil {

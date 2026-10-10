@@ -1943,6 +1943,12 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 	missing := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, 0)) }
 	gone := func(k *book) { missing(k); missing(k) } // with no events
 	up := func(k *book) { tick(k); k.upID = k.b.Check(k.up, k.p1(gib/8, 0), cfg).LeaseID }
+	guessedUp := func(k *book) { // #84: an event binds it nothing
+		tick(k)
+		g := k.up
+		g.Guessed = true
+		k.upID = k.b.Check(g, k.p1(gib/8, 0), cfg).LeaseID
+	}
 	runP1 := func(k *book) { tick(k); k.b.Check(run("w1", "p1"), k.p1(gib/8, 0), cfg) }
 	upW2 := func(k *book) {
 		tick(k)
@@ -1952,6 +1958,13 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 	}
 	start := func(k *book) { tick(k); k.b.ContainerEvent("start", "c2", "c2", lab) }
 	back := func(k *book) { k.c.t = k.c.t.Add(5 * time.Second); k.b.Observe(k.p1(gib/8, gib)) }
+	startInReading := func(k *book) { // the reading, begun before it, shows c2
+		k.c.t = k.c.t.Add(4 * time.Second)
+		began := k.c.t
+		start(k)
+		k.c.t = k.c.t.Add(2 * time.Second)
+		k.b.Observe(read(k.p1(gib/8, gib), began))
+	}
 	for _, tc := range []struct {
 		name  string
 		steps []func(*book)
@@ -1977,6 +1990,12 @@ func TestAStartOfSeveralGivesADeadContainerOnlyToALeaseCheckedWhileItWasDead(t *
 		// and a second crash: Compose's own restart after the crash reads
 		// as the policy's, so c2 stays the start's.
 		{"die, start, up, die, start", []func(*book){die, missing, start, up, die, start, back}, false},
+		// A start the event leaves to the reading, which last showed c2
+		// before it died, or showed it in a reading begun before the start
+		// (#136).
+		{"die, guessed up, start", []func(*book){die, guessedUp, start, back}, true},
+		{"die, w2's up, w1's up, start", []func(*book){die, upW2, up, start, back}, true},
+		{"die, reading, w2's up, w1's up, start in a reading", []func(*book){die, missing, upW2, up, startInReading, back}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &book{}

@@ -658,6 +658,36 @@ func TestGatePassesAGuessedProjectOn(t *testing.T) {
 	}
 }
 
+// A manual compose up's dir reaches the book: its lapsed lease vouches for
+// each service of its slow-pulled stack, not only the first (#158).
+func TestGatePassesTheComposeDirOn(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	now := t0
+	book := lease.New(2*time.Minute, func() time.Time { return now }, discardLog())
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
+	snap := func(services ...string) *protocol.Snapshot {
+		headroom := int64(8 << 30)
+		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+			Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
+			Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{Installed: true}, CollectedAt: now}
+		for _, sv := range services {
+			s.Docker.Containers = append(s.Docker.Containers, protocol.Container{ID: sv, Name: sv, MemoryBytes: 1 << 28,
+				Labels: map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeServiceLabel: sv,
+					protocol.ComposeWorkingDirLabel: "/Users/dev/project-a"}})
+		}
+		return s
+	}
+	book.Observe(snap())
+	check(&protocol.CheckRequest{Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", ComposeDir: "/Users/dev/project-a"}, snap())
+	now = t0.Add(2 * time.Minute)
+	book.Observe(snap()) // lapses it
+	now = t0.Add(3 * time.Minute)
+	book.Observe(snap("web", "db"))
+	if u := book.Ungated(); len(u) != 0 {
+		t.Fatalf("ungated %+v", u)
+	}
+}
+
 // The Docker VM's clock 1.5 s behind the host's (after host sleep, until
 // its time sync catches up): a compose run's one-off dies 2 ms after a
 // reading began, and the die is dated now, not by the VM's clock before

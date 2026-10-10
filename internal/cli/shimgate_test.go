@@ -49,6 +49,8 @@ type shimRig struct {
 	composeAsk func(string, []string) ([]byte, error)
 	// composeDry stands in for docker compose --dry-run.
 	composeDry func(string, []string) ([]byte, error)
+	// getwd stands in for os.Getwd when set.
+	getwd func() (string, error)
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -87,6 +89,7 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			return r.ask(req)
 		},
 		ancestors: func() []int { return []int{4321, 1} },
+		getwd:     r.getwd,
 		now:       func() time.Time { return r.now },
 		wait: func(d time.Duration) os.Signal {
 			if d == 0 { // is a signal pending?
@@ -1764,5 +1767,187 @@ func TestComposeReadsItsContextFromTheCallsConfig(t *testing.T) {
 	r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "a"))
 	if code, _ := r.run("docker", "--config", filepath.Join(r.dir, "b"), "--context", "foo", "compose", "-p", "proj", "up"); code != 0 || len(r.asked) != 1 {
 		t.Errorf("code %d, asked %d, want gated", code, len(r.asked))
+	}
+}
+
+// composeDir is the working dir Compose labels a project with, as probed on
+// Compose v5 (#158): --project-directory, else the dir of the first -f that
+// is not -, else of COMPOSE_FILE's first entry, else of the compose file
+// found in the working dir or a parent, else (-f - alone) the working dir;
+// cleaned, absolute, symlinks kept. Unsure is "", never a guess.
+func TestComposeDir(t *testing.T) {
+	const cwd = "/Users/dev/project-a/sub"
+	wd := func() (string, error) { return cwd, nil }
+	noWd := func() (string, error) { return "", errors.New("getwd: gone") }
+	found := func(p string) (fs.FileInfo, error) {
+		if p == "/Users/dev/project-a/compose.yaml" || p == "/tmp/link/compose.yaml" {
+			return nil, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	none := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		wd   func() (string, error)
+		stat func(string) (fs.FileInfo, error)
+		left time.Duration
+		want string
+	}{
+		{"--project-directory, relative", []string{"--project-directory", "../b", "-f", "x.yaml"}, nil, wd, none, time.Second, "/Users/dev/project-a/b"},
+		{"--project-directory, absolute", []string{"--project-directory", "/srv/api/"}, nil, wd, none, time.Second, "/srv/api"},
+		{"--project-directory beats COMPOSE_FILE", []string{"--project-directory", "/srv/api"}, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml"}, wd, none, time.Second, "/srv/api"},
+		{"-f", []string{"-f", "../other/x.yaml"}, nil, wd, none, time.Second, "/Users/dev/project-a/other"},
+		{"-f, cleaned", []string{"-f", "a/../b/x.yaml"}, nil, wd, none, time.Second, "/Users/dev/project-a/sub/b"},
+		{"the first -f", []string{"-f", "/srv/c/x.yaml", "-f", "/srv/d/y.yaml"}, nil, wd, none, time.Second, "/srv/c"},
+		{"the first -f not stdin's", []string{"-f", "-", "-f", "/srv/c/x.yaml"}, nil, wd, none, time.Second, "/srv/c"},
+		{"-f - alone", []string{"-f", "-"}, nil, wd, none, time.Second, cwd},
+		{"-f beats COMPOSE_FILE", []string{"-f", "/srv/c/x.yaml"}, map[string]string{"COMPOSE_FILE": "/srv/d/y.yaml"}, wd, none, time.Second, "/srv/c"},
+		{"COMPOSE_FILE's first entry", nil, map[string]string{"COMPOSE_FILE": "../c/x.yaml:y.yaml"}, wd, found, time.Second, "/Users/dev/project-a/c"},
+		{"COMPOSE_FILE, COMPOSE_PATH_SEPARATOR", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;y.yaml", "COMPOSE_PATH_SEPARATOR": ";"}, wd, found, time.Second, "/srv/c"},
+		{"found in a parent", nil, nil, wd, found, time.Second, "/Users/dev/project-a"},
+		{"found through a symlink, kept", nil, nil, func() (string, error) { return "/tmp/link/sub", nil }, found, time.Second, "/tmp/link"},
+		{"none found", nil, nil, wd, none, time.Second, ""},
+		{"the search out of time", nil, nil, wd, found, 0, ""},
+		{"--workdir", []string{"--workdir", "/srv/api", "-f", "/srv/c/x.yaml"}, nil, wd, none, time.Second, ""},
+		{"--workdir=", []string{"--workdir=/srv/api", "-f", "/srv/c/x.yaml"}, nil, wd, none, time.Second, ""},
+		{"no working dir, -f relative", []string{"-f", "x.yaml"}, nil, noWd, none, time.Second, ""},
+		{"no working dir, -f absolute", []string{"-f", "/srv/c/x.yaml"}, nil, noWd, none, time.Second, "/srv/c"},
+		{"no working dir, --project-directory absolute", []string{"--project-directory", "/srv/api"}, nil, noWd, none, time.Second, "/srv/api"},
+		{"no working dir, no -f", nil, nil, noWd, found, time.Second, ""},
+		{"no working dir, -f - alone", []string{"-f", "-"}, nil, noWd, none, time.Second, ""},
+		{"a remote -f", []string{"-f", "https://github.com/org/repo.git"}, nil, wd, none, time.Second, ""},
+		{"an OCI -f", []string{"-f", "oci://registry.example/app:1"}, nil, wd, none, time.Second, ""},
+		{"a remote COMPOSE_FILE", nil, map[string]string{"COMPOSE_FILE": "git@github.com:org/repo.git;x.yaml", "COMPOSE_PATH_SEPARATOR": ";"}, wd, found, time.Second, ""},
+	} {
+		args := slices.Concat([]string{"compose"}, tc.args, []string{"up", "-d"})
+		got := composeDir(args, shim.Parse("docker", args), envMap(tc.env), tc.wd, tc.left, tc.stat)
+		if got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A COMPOSE_FILE that an env file sets moves the label (the probe's .env and
+// --env-file cases): the shim does not follow it, and sends no dir. One in
+// the call's environment beats the env files, and -f beats both (#158). So
+// does a COMPOSE_PATH_SEPARATOR an env file sets, which splits the
+// environment's COMPOSE_FILE, and a COMPOSE_FILE entry of stdin (review
+// round 1).
+func TestComposeDirWithEnvFiles(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	write := func(name, src string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("compose.yaml", "services: {}\n")
+	write("other.env", "COMPOSE_FILE=sub/y.yaml\n")
+	write("sep.env", "COMPOSE_PATH_SEPARATOR=;\n")
+	wd := func() (string, error) { return dir, nil }
+	for _, tc := range []struct {
+		name string
+		dot  string // .env, none when ""
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{".env sets COMPOSE_FILE", "COMPOSE_FILE=sub/y.yaml\n", nil, nil, ""},
+		{".env sets something else", "COMPOSE_PROJECT_NAME=x\n", nil, nil, dir},
+		{"--env-file sets COMPOSE_FILE", "", []string{"--env-file", "other.env"}, nil, ""},
+		{"COMPOSE_ENV_FILES sets COMPOSE_FILE", "", nil, map[string]string{"COMPOSE_ENV_FILES": "other.env"}, ""},
+		{".env disabled", "COMPOSE_FILE=sub/y.yaml\n", nil, map[string]string{"COMPOSE_DISABLE_ENV_FILE": "true"}, dir},
+		{"the environment's COMPOSE_FILE beats .env's", "COMPOSE_FILE=sub/y.yaml\n", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml"}, "/srv/c"},
+		{"-f beats .env's", "COMPOSE_FILE=sub/y.yaml\n", []string{"-f", "/srv/c/x.yaml"}, nil, "/srv/c"},
+		{"an --env-file that does not exist", "", []string{"--env-file", "missing.env"}, nil, ""},
+		{".env sets COMPOSE_PATH_SEPARATOR", "COMPOSE_PATH_SEPARATOR=;\n", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b"}, ""},
+		{"--env-file sets COMPOSE_PATH_SEPARATOR", "", []string{"--env-file", "sep.env"}, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b"}, ""},
+		{"the environment's COMPOSE_PATH_SEPARATOR beats .env's", "COMPOSE_PATH_SEPARATOR=,\n", nil,
+			map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml;b", "COMPOSE_PATH_SEPARATOR": ";"}, "/srv/c"},
+		{"COMPOSE_FILE is stdin", "", nil, map[string]string{"COMPOSE_FILE": "-"}, ""},
+		{"a COMPOSE_FILE entry is stdin", "", nil, map[string]string{"COMPOSE_FILE": "/srv/c/x.yaml" + string(filepath.ListSeparator) + "-"}, ""},
+	} {
+		_ = os.Remove(filepath.Join(dir, ".env"))
+		if tc.dot != "" {
+			write(".env", tc.dot)
+		}
+		args := slices.Concat([]string{"compose"}, tc.args, []string{"up", "-d"})
+		if got := composeDir(args, shim.Parse("docker", args), envMap(tc.env), wd, time.Second, os.Stat); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The working dir is the shell's, through a symlink, as Compose labels it
+// (the probe's symlinked cwd): Go's os.Getwd keeps $PWD (#158).
+func TestComposeDirKeepsALogicalWorkingDir(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	target, link := filepath.Join(dir, "real"), filepath.Join(dir, "link")
+	if err := os.MkdirAll(filepath.Join(target, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(link, "sub"))
+	t.Setenv("PWD", filepath.Join(link, "sub")) // as a shell's cd sets it
+	args := []string{"compose", "up", "-d"}
+	if got := composeDir(args, shim.Parse("docker", args), noEnv, os.Getwd, time.Second, os.Stat); got != link {
+		t.Errorf("%q, want %q", got, link)
+	}
+}
+
+// The shim sends Compose's working dir with every docker compose check:
+// when config names the project, with -p, with a guess, and with stdin's
+// file; "" when it cannot be sure (#158).
+func TestTheComposeDirIsSent(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w")
+	r.ask = allow
+	proj := filepath.Join(r.dir, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.getwd = func() (string, error) { return filepath.Join(proj, "sub"), nil }
+	var config []byte
+	r.composeAsk = func(string, []string) ([]byte, error) {
+		if config == nil {
+			return nil, errors.New("exit status 1")
+		}
+		return config, nil
+	}
+	for _, tc := range []struct {
+		name   string
+		config []byte
+		call   []string
+		want   string
+	}{
+		{"config names it", []byte(`{"name":"x"}`), []string{"docker", "compose", "up", "-d"}, proj},
+		{"-p", nil, []string{"docker", "compose", "-p", "p", "--project-directory", "/srv/api", "up", "-d"}, "/srv/api"},
+		{"a guess", nil, []string{"docker", "compose", "up", "-d"}, proj},
+		{"stdin", nil, []string{"docker", "compose", "-f", "-", "up", "-d"}, filepath.Join(proj, "sub")},
+		{"--workdir", []byte(`{"name":"x"}`), []string{"docker", "compose", "--workdir", "/srv/api", "up", "-d"}, ""},
+	} {
+		config = tc.config
+		r.asked = nil
+		r.run(tc.call...)
+		if len(r.asked) != 1 || r.asked[0].ComposeDir != tc.want {
+			t.Errorf("%s: asked %+v, want dir %q", tc.name, r.asked, tc.want)
+		}
 	}
 }

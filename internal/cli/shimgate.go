@@ -167,6 +167,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// down (R7).
 		env, _ := e.envOf()
 		lookupEnv := lookupIn(env)
+		asked := h.now()
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target = composeStdinProject(c, lookupEnv, h.getwd)
@@ -179,6 +180,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			if c.Op == "up" && c.ComposeDetached && composePlain(bin, e.Args[1:], h.composeAsk) {
 				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
 			}
+		}
+		// The dir Compose labels it with, within what is left of the
+		// budget (#158).
+		req.ComposeDir = composeDir(e.Args[1:], c, lookupEnv, h.getwd, asked.Add(composeTimeout).Sub(h.now()), h.stat)
+		if getenv("HEADROOM_SHIM_DEBUG") != "" {
+			fmt.Fprintf(e.Stderr, "headroom: compose project %q in %q\n", req.Target, req.ComposeDir)
 		}
 	}
 	// A run or create carries its lease as a label: runShim adds it the
@@ -358,19 +365,7 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 		return normalProject(name)
 	}
 	if dir == cwd && c.ComposeProjectDir == "" {
-		files := c.ComposeFiles
-		if f := getenv("COMPOSE_FILE"); len(files) == 0 && f != "" {
-			sep := getenv("COMPOSE_PATH_SEPARATOR")
-			if sep == "" {
-				sep = string(filepath.ListSeparator)
-			}
-			files = strings.Split(f, sep)
-		}
-		if i := firstComposeFile(files); i >= 0 {
-			dir = filepath.Dir(absIn(cwd, files[i]))
-		} else if found, ok := composeFileDirWithin(cwd, deadline.Sub(now()), stat); ok {
-			dir = found
-		}
+		dir, _ = composeProjectDir(c, getenv, cwd, deadline.Sub(now()), stat)
 		if dir != cwd {
 			// The working directory's .env again, first: one that sets it
 			// to a name the shim cannot know wins too.
@@ -380,6 +375,108 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 		}
 	}
 	return normalProject(filepath.Base(dir))
+}
+
+// composeProjectDir is the project directory Compose ends with, in the
+// working directory cwd: composeWorkingDir when the call has
+// --project-directory or an -f, else the directory of COMPOSE_FILE's first
+// entry (split by COMPOSE_PATH_SEPARATOR; getenv is the call's
+// environment), else of the compose file found in cwd or the nearest of
+// its parents, searched within left (composeFileDirWithin). found is false
+// when the search found none or gave up: dir is then cwd.
+func composeProjectDir(c shim.Call, getenv func(string) string, cwd string, left time.Duration,
+	stat func(string) (fs.FileInfo, error)) (dir string, found bool) {
+	if c.ComposeProjectDir != "" || len(c.ComposeFiles) > 0 {
+		return composeWorkingDir(c, cwd), true
+	}
+	if i := firstComposeFile(composeFileEnv(getenv)); i >= 0 {
+		return filepath.Dir(absIn(cwd, composeFileEnv(getenv)[i])), true
+	}
+	if d, ok := composeFileDirWithin(cwd, left, stat); ok {
+		return d, true
+	}
+	return cwd, false
+}
+
+// composeFileEnv is COMPOSE_FILE in the call's environment (getenv), split
+// by COMPOSE_PATH_SEPARATOR, else the OS's list separator; nil when unset.
+func composeFileEnv(getenv func(string) string) []string {
+	f := getenv("COMPOSE_FILE")
+	if f == "" {
+		return nil
+	}
+	sep := getenv("COMPOSE_PATH_SEPARATOR")
+	if sep == "" {
+		sep = string(filepath.ListSeparator)
+	}
+	return strings.Split(f, sep)
+}
+
+// composeDir is the working dir Compose labels a docker compose call's
+// project with (com.docker.compose.project.working_dir), absolute and
+// cleaned, symlinks kept as given, as Compose v5 does (the #158 probe):
+// composeProjectDir, with the working directory from getwd, which keeps a
+// shell's $PWD. Within left, what is left of the call's compose budget.
+// It is "" whenever the shim cannot be sure, never a guess: args (after
+// docker) give --workdir, Compose's hidden alias of --project-directory;
+// the working directory is unknown and the dir would be relative to it;
+// the search finds no compose file or gives up; the file is remote (a git
+// or OCI reference); a COMPOSE_FILE entry is stdin (-); or, with neither
+// --project-directory nor an -f, an env file sets, or could set
+// (composeEnvFileValue), COMPOSE_FILE when the call's environment has
+// none, or COMPOSE_PATH_SEPARATOR when it has COMPOSE_FILE but not that.
+func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), left time.Duration,
+	stat func(string) (fs.FileInfo, error)) string {
+	global, ok := shim.ComposeConfig(args, false)
+	if !ok || slices.ContainsFunc(global[:len(global)-3], func(a string) bool { return a == "--workdir" || strings.HasPrefix(a, "--workdir=") }) {
+		return ""
+	}
+	getenv := getenvOf(lookupEnv)
+	files := c.ComposeFiles
+	if c.ComposeProjectDir == "" && len(files) == 0 {
+		if files = composeFileEnv(getenv); slices.Contains(files, "-") {
+			return ""
+		}
+	}
+	if c.ComposeProjectDir == "" {
+		if i := firstComposeFile(files); i >= 0 && remoteComposeFile(files[i]) {
+			return ""
+		}
+	}
+	cwd, err := getwd()
+	if err != nil {
+		if dir := composeWorkingDir(c, ""); filepath.IsAbs(dir) {
+			return dir
+		}
+		return ""
+	}
+	key := "" // the setting an env file could move the dir with
+	switch {
+	case c.ComposeProjectDir != "" || len(c.ComposeFiles) > 0:
+	case len(files) == 0:
+		key = "COMPOSE_FILE"
+	case getenv("COMPOSE_PATH_SEPARATOR") == "":
+		key = "COMPOSE_PATH_SEPARATOR" // it splits the environment's COMPOSE_FILE
+	}
+	if key != "" {
+		if _, set, done := composeEnvFileValue(c, lookupEnv, key, cwd, []string{cwd}, left); set || !done {
+			return ""
+		}
+	}
+	if dir, found := composeProjectDir(c, getenv, cwd, left, stat); found {
+		return dir
+	}
+	return ""
+}
+
+// remoteComposeFile reports whether compose file f is one Compose fetches:
+// a URL (oci://, https://...) or a git reference in scp form (git@host:).
+func remoteComposeFile(f string) bool {
+	if strings.Contains(f, "://") {
+		return true
+	}
+	at, colon := strings.Index(f, "@"), strings.Index(f, ":")
+	return at > 0 && colon > at && !strings.Contains(f[:at], "/")
 }
 
 // composeWorkingDir is the project directory Compose has before it looks
@@ -621,6 +718,16 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 	if _, set := lookupEnv("COMPOSE_PROJECT_NAME"); set {
 		return "", false
 	}
+	name, _, done := composeEnvFileValue(c, lookupEnv, "COMPOSE_PROJECT_NAME", cwd, dirs, left)
+	return name, done && name != ""
+}
+
+// composeEnvFileValue is key's value as the env files Compose loads set it,
+// the files and their order as composeEnvFileProject has them, read within
+// left (done false when the time ran out). set is whether one sets it, or
+// may: a file Compose fails on leaves it set to a value the shim cannot
+// know (""), as does one that sets it to such a value.
+func composeEnvFileValue(c shim.Call, lookupEnv func(string) (string, bool), key, cwd string, dirs []string, left time.Duration) (value string, set, done bool) {
 	getenv := getenvOf(lookupEnv)
 	files := c.ComposeEnvFiles
 	if len(files) == 0 {
@@ -637,34 +744,38 @@ func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), c
 			pre = nil
 		}
 	} else if off, _ := strconv.ParseBool(getenv("COMPOSE_DISABLE_ENV_FILE")); off {
-		return "", false
+		return "", false, true
 	}
-	found, done := within(left, func() (name string) {
+	type setting struct {
+		value string
+		set   bool
+	}
+	found, done := within(left, func() (got setting) {
 		// The --env-files: the last that sets it, pre's beating files'.
 		preSet := false
 		for i, f := range slices.Concat(pre, files) {
-			v, set, err := envFileValue(f, "COMPOSE_PROJECT_NAME")
+			v, set, err := envFileValue(f, key)
 			if err != nil {
-				return ""
+				return setting{"", true}
 			}
 			if set && (i < len(pre) || !preSet) {
-				name, preSet = v, i < len(pre)
+				got, preSet = setting{v, true}, i < len(pre)
 			}
 		}
 		// The .env files: the first that sets it.
 		for _, d := range dirs {
-			v, set, err := envFileValue(filepath.Join(d, ".env"), "COMPOSE_PROJECT_NAME")
+			v, set, err := envFileValue(filepath.Join(d, ".env"), key)
 			switch {
 			case errors.Is(err, errEnvNoFile):
 			case err != nil:
-				return ""
+				return setting{"", true}
 			case set:
-				return v
+				return setting{v, true}
 			}
 		}
-		return name
+		return got
 	})
-	return found, done && found != ""
+	return found.value, found.set, done
 }
 
 // envFileMax is the most of an env file the shim reads (#85): a .env is a

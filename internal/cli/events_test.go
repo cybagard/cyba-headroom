@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -68,13 +69,13 @@ func followThrough(t *testing.T, streams []fakeStream) {
 	ctx, cancel := context.WithCancel(context.Background())
 	waited := 0
 	var got []string
-	followEvents(ctx, &fakeEvents{streams: streams, cancel: cancel}, func(action, id, name string, _ map[string]string) {
+	followEvents(ctx, &fakeEvents{streams: streams, cancel: cancel}, func(_ time.Time, action, id, name string, _ map[string]string) {
 		got = append(got, action+" "+id)
 		if id == "x1" {
 			now = now.Add(time.Second)
 			book.ContainerEvent(action, id, name, nil)
 		}
-	}, func(context.Context, time.Duration) {
+	}, time.Now, discardLog(), func(context.Context, time.Duration) {
 		now = now.Add(time.Second)
 		if waited++; waited == 1 {
 			book.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start x", CostBytes: 1 << 30, Target: "x"}, snap(t0, false), cfg)
@@ -199,7 +200,9 @@ func TestFollowEventsTellsContainersApartAtOneNanosecond(t *testing.T) {
 // context ends.
 type storm struct{ n int }
 
-func (s storm) Events(ctx context.Context, _ int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
+func (storm) Clock(context.Context) (int64, error) { return 0, errors.New("no clock") }
+
+func (s storm) Events(ctx context.Context, _, _ int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
 	attrs := map[string]string{"name": "x"}
 	ids := make([]string, 1000)
 	for i := range ids {
@@ -220,11 +223,11 @@ func BenchmarkFollowEventsStorm(b *testing.B) {
 			ctx, cancel := context.WithCancel(context.Background())
 			k := 0
 			b.ResetTimer()
-			followEvents(ctx, storm{n}, func(_, _, _ string, _ map[string]string) {
+			followEvents(ctx, storm{n}, func(_ time.Time, _, _, _ string, _ map[string]string) {
 				if k++; k == b.N {
 					cancel()
 				}
-			}, func(context.Context, time.Duration) {})
+			}, time.Now, discardLog(), func(context.Context, time.Duration) {})
 		})
 	}
 }

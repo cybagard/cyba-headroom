@@ -287,7 +287,7 @@ func runDaemon(e Env) int {
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
-	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEvent, sleepCtx) })
+	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEventAt, time.Now, log, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()

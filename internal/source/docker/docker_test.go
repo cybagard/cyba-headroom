@@ -333,7 +333,7 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 `,
 	})
 	var got []string
-	err := docker.New(sock, nil).Events(context.Background(), 0, func(action, id string, timeNano int64, attrs map[string]string) {
+	err := docker.New(sock, nil).Events(context.Background(), 0, 0, func(action, id string, timeNano int64, attrs map[string]string) {
 		got = append(got, fmt.Sprint(action, " ", id, " ", attrs["name"], " ", attrs["dev.headroom.lease"], " ", timeNano))
 	})
 	// A first stream asks for no since; an event's time is its timeNano,
@@ -355,7 +355,7 @@ func TestEventsAskForThoseSinceATime(t *testing.T) {
 `,
 	})
 	var got []string
-	_ = docker.New(sock, nil).Events(context.Background(), 1700000000050000007, func(action, id string, _ int64, _ map[string]string) {
+	_ = docker.New(sock, nil).Events(context.Background(), 1700000000050000007, 0, func(action, id string, _ int64, _ map[string]string) {
 		got = append(got, action+" "+id)
 	})
 	if fmt.Sprint(got) != "[start abc]" {
@@ -372,11 +372,39 @@ func TestEventsSinceRefusedIsErrBadSince(t *testing.T) {
 	})
 	src := docker.New(sock, nil)
 	noop := func(string, string, int64, map[string]string) {}
-	if err := src.Events(context.Background(), 1700000000000000000, noop); !errors.Is(err, docker.ErrBadSince) {
+	if err := src.Events(context.Background(), 1700000000000000000, 0, noop); !errors.Is(err, docker.ErrBadSince) {
 		t.Fatalf("err = %v, want ErrBadSince", err)
 	}
-	if err := src.Events(context.Background(), 0, noop); err == nil || errors.Is(err, docker.ErrBadSince) {
+	if err := src.Events(context.Background(), 0, 0, noop); err == nil || errors.Is(err, docker.ErrBadSince) {
 		t.Fatalf("err = %v, want an error that is not ErrBadSince", err)
+	}
+}
+
+// A replay bounded by until asks for it as Docker reads it, and ends,
+// with no error, once Docker has sent the events up to it (#170).
+func TestEventsUntilEndsWithTheReplay(t *testing.T) {
+	sock, _ := engine(t, map[string]string{
+		docker.EventsPath + "&since=1700000000.050000007&until=1700000002.000000009": `{"Type":"container","Action":"die","Actor":{"ID":"abc"},"timeNano":1700000001000000000}
+`,
+	})
+	var got []string
+	err := docker.New(sock, nil).Events(context.Background(), 1700000000050000007, 1700000002000000009, func(action, id string, _ int64, _ map[string]string) {
+		got = append(got, action+" "+id)
+	})
+	if fmt.Sprint(got) != "[die abc]" || err != nil {
+		t.Fatalf("events = %q, err = %v: want the replay to 1700000002.000000009, then nil", got, err)
+	}
+}
+
+// The Docker VM's clock is /info's SystemTime, to the nanosecond (#170).
+func TestClockReadsSystemTime(t *testing.T) {
+	sock, _ := engine(t, map[string]string{"/info": `{"SystemTime":"2026-10-10T19:35:00.141843009Z"}`})
+	got, err := docker.New(sock, nil).Clock(context.Background())
+	if want := time.Date(2026, 10, 10, 19, 35, 0, 141843009, time.UTC).UnixNano(); got != want || err != nil {
+		t.Fatalf("Clock = %d, %v, want %d", got, err, want)
+	}
+	if _, err := docker.New(filepath.Join(shortDir(t), "none.sock"), nil).Clock(context.Background()); err == nil {
+		t.Fatal("no engine: want an error")
 	}
 }
 

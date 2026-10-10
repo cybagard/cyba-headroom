@@ -268,6 +268,37 @@ func TestADieNewerThanTheReadingBindsNoNewRunNeverRead(t *testing.T) {
 	if strings.Contains(log.String(), "ungated") {
 		t.Fatalf("the run's own one-off was warned ungated: %s", log)
 	}
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib-gib/4 {
+		t.Fatalf("leases = %+v, want the next run's, bound to r2", ls)
+	}
+}
+
+// w1 and w2 each run a one-off of project p, so its start event is a
+// tie and the reading binds it. A one-off the reading lists that exits
+// (--rm) after the reading began ends w1's lease at once, not at its
+// timeout with "never appeared".
+func TestATiedOneoffThatDiesDuringTheReadingEndsItsLease(t *testing.T) {
+	b, c, log := book(t)
+	lab := map[string]string{"com.docker.compose.project": "p", "com.docker.compose.oneoff": "True"}
+	b.Observe(read(snap(), t0))
+	b.Check(run("w1", "p"), snap(), cfg)
+	b.Check(run("w2", "p"), snap(), cfg)
+	c.t = t0.Add(2 * time.Second)
+	b.ContainerEvent("start", "r1", "r1", lab) // a tie: not bound
+	c.t = t0.Add(6 * time.Second)
+	b.ContainerEvent("die", "r1", "r1", lab)
+	c.t = t0.Add(7 * time.Second)
+	b.Observe(read(oneoff("r1", "p", "w1")(snap()), t0.Add(3*time.Second))) // began before r1's die
+	for _, l := range b.List() {
+		if l.Worktree == "w1" {
+			t.Errorf("w1's lease still holds %d MiB after its one-off ran and exited", l.Bytes>>20)
+		}
+	}
+	c.t = t0.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t.Add(-time.Second)))
+	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "worktree=w1") {
+		t.Errorf("w1's run warned never appeared: %s", log)
+	}
 }
 
 // The same for a compose up checked after a service died: the up that

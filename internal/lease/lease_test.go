@@ -1330,6 +1330,208 @@ func TestAContainerBackAfterACrashBindsNoLeaseOfAnotherWorktree(t *testing.T) {
 	}
 }
 
+// shortBook is a book whose leases last 30 s: shorter than a restart
+// policy's backoff, which Docker caps at a minute (#134).
+func shortBook(t *testing.T) (*lease.Book, *clock, *bytes.Buffer) {
+	t.Helper()
+	c := &clock{t0}
+	var log bytes.Buffer
+	return lease.New(30*time.Second, c.now, slog.New(slog.NewTextHandler(&log, nil))), c, &log
+}
+
+// As above, with a lease timeout shorter than the backoff: the restart
+// comes 45 s after the crash, and still binds nothing of w2's, by its
+// start event or by the reading that shows it (#134).
+func TestARestartAfterACrashPastTheLeaseTimeoutBindsNoLeaseOfAnotherWorktree(t *testing.T) {
+	for _, event := range []bool{true, false} {
+		t.Run(fmt.Sprintf("event=%v", event), func(t *testing.T) {
+			b, c, _ := shortBook(t)
+			b.Observe(read(snap(), c.t))
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+			c.t = c.t.Add(time.Second)
+			b.ContainerEvent("die", "a1", "a1", lab) // a crash: no stop
+			for range 9 {
+				c.t = c.t.Add(5 * time.Second)
+				b.Observe(read(snap(), c.t)) // the restart policy's backoff
+			}
+			b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			if event {
+				c.t = c.t.Add(time.Second)
+				b.ContainerEvent("start", "a1", "a1", lab)
+			}
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			if got := reserved(b); got != 2*gib {
+				t.Fatalf("reserved = %d MiB, want w2's 2048 MiB: %+v", got>>20, b.List())
+			}
+			if got := ungatedKeys(b); len(got) != 0 {
+				t.Fatalf("ungated = %v", got)
+			}
+		})
+	}
+}
+
+// The mirror: a restart 45 s after the crash, past the lease timeout,
+// binds its own worktree's up, by its start event or by the reading.
+func TestARestartAfterACrashPastTheLeaseTimeoutBindsALeaseOfItsOwnWorktree(t *testing.T) {
+	for _, event := range []bool{true, false} {
+		t.Run(fmt.Sprintf("event=%v", event), func(t *testing.T) {
+			b, c, log := shortBook(t)
+			b.Observe(read(snap(), c.t))
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+			c.t = c.t.Add(time.Second)
+			b.ContainerEvent("die", "a1", "a1", lab)
+			for range 9 {
+				c.t = c.t.Add(5 * time.Second)
+				b.Observe(read(snap(), c.t))
+			}
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			if event {
+				c.t = c.t.Add(time.Second)
+				b.ContainerEvent("start", "a1", "a1", lab)
+			}
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
+				t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+			}
+		})
+	}
+}
+
+// A crashed container's verdict outlasts a short lease timeout until
+// crashKept (2 min) after the die, with no event since; a stopped one's
+// lasts the lease timeout (#134).
+func TestACrashedContainersVerdictIsKeptForCrashKept(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stopped bool
+		kept    []time.Duration // absent, still kept
+		gone    time.Duration   // absent, gone
+	}{
+		{"crashed", false, []time.Duration{45 * time.Second, 115 * time.Second}, 2 * time.Minute},
+		{"stopped", true, []time.Duration{25 * time.Second}, 30 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c, _ := shortBook(t)
+			b.Observe(read(snap(), c.t))
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+			c.t = c.t.Add(time.Second)
+			die := c.t
+			if tc.stopped {
+				b.ContainerEvent("stop", "a1", "a1", lab)
+			}
+			b.ContainerEvent("die", "a1", "a1", lab)
+			for _, at := range tc.kept {
+				c.t = die.Add(at)
+				b.Observe(read(snap(), c.t))
+				if !lease.HasVerdict(b, "container:a1") {
+					t.Fatalf("verdict gone %v after the die", at)
+				}
+			}
+			c.t = die.Add(tc.gone)
+			b.Observe(read(snap(), c.t))
+			if lease.HasVerdict(b, "container:a1") {
+				t.Fatalf("verdict kept %v after the die", tc.gone)
+			}
+		})
+	}
+}
+
+// With a lease timeout longer than crashKept, a crashed container's verdict
+// lasts the lease timeout, as a stopped one's does (#134).
+func TestACrashedContainersVerdictIsKeptForALongerLeaseTimeout(t *testing.T) {
+	c := &clock{t0}
+	var log bytes.Buffer
+	b := lease.New(5*time.Minute, c.now, slog.New(slog.NewTextHandler(&log, nil)))
+	b.Observe(read(snap(), c.t))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+	c.t = c.t.Add(time.Second)
+	die := c.t
+	b.ContainerEvent("die", "a1", "a1", map[string]string{protocol.ComposeProjectLabel: "app"})
+	for _, at := range []time.Duration{3 * time.Minute, 4*time.Minute + 55*time.Second} {
+		c.t = die.Add(at)
+		b.Observe(read(snap(), c.t))
+		if !lease.HasVerdict(b, "container:a1") {
+			t.Fatalf("verdict gone %v after the die, within the 5 min lease timeout", at)
+		}
+	}
+	c.t = die.Add(5 * time.Minute)
+	b.Observe(read(snap(), c.t))
+	if lease.HasVerdict(b, "container:a1") {
+		t.Fatalf("verdict kept 5 min after the die")
+	}
+}
+
+// A crash loop of lives too short for any reading to list: Docker's backoff
+// doubles from 100 ms while each run lasts under 10 s, so the 10th restart
+// comes ~102 s after the first crash, and each later one 60 s on (its cap).
+// The restart that comes after w2 checks an up of the same project binds
+// nothing of w2's, whatever the lease timeout (#134).
+func TestARestartInACrashLoopBindsNoLeaseOfAnotherWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		last    time.Duration // from the 10th restart to the one after w2's check
+	}{
+		{30 * time.Second, time.Minute},     // ~162 s after the first crash
+		{2 * time.Minute, time.Minute},      // the default timeout
+		{30 * time.Second, 5 * time.Second}, // ~107 s
+	} {
+		t.Run(fmt.Sprintf("timeout=%v/last=%v", tc.timeout, tc.last), func(t *testing.T) {
+			c := &clock{t0}
+			var log bytes.Buffer
+			b := lease.New(tc.timeout, c.now, slog.New(slog.NewTextHandler(&log, nil)))
+			b.Observe(read(snap(), c.t))
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 4 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+			c.t = c.t.Add(time.Second)
+			die := c.t
+			b.ContainerEvent("die", "a1", "a1", lab)
+			var at []time.Duration // the restarts, from the first crash
+			sum, d := time.Duration(0), 100*time.Millisecond
+			for range 10 {
+				sum += d
+				at = append(at, sum)
+				d *= 2
+			}
+			at = append(at, sum+tc.last)
+			next := 0
+			for x := time.Duration(0); x <= at[len(at)-1]+time.Second; x += 500 * time.Millisecond {
+				c.t = die.Add(x)
+				if x%(5*time.Second) == 0 {
+					b.Observe(read(snap(), c.t)) // each life is gone before it
+				}
+				if next < len(at) && x >= at[next] {
+					if next == len(at)-1 {
+						b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+					}
+					b.ContainerEvent("start", "a1", "a1", lab)
+					if next < len(at)-1 {
+						b.ContainerEvent("die", "a1", "a1", lab)
+					}
+					next++
+				}
+			}
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(withComposeContainer(snap(), "a1", "w1", 4*gib), c.t))
+			if got := reserved(b); got != 2*gib {
+				t.Fatalf("reserved = %d MiB, want w2's 2048 MiB: %+v", got>>20, b.List())
+			}
+		})
+	}
+}
+
 // A container back after a crash and readings, after its own worktree
 // checked an up of its project, binds that up's lease.
 func TestAContainerBackAfterACrashBindsALeaseOfItsOwnWorktree(t *testing.T) {

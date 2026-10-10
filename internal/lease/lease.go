@@ -97,8 +97,9 @@ type Book struct {
 	// began: when it died, for Book.markDead.
 	missed      map[string]int
 	missedSince map[string]time.Time
-	// verdicts say, for each resource seen within the lease timeout, how it
-	// started (#33). A container keeps its verdict when it comes back after
+	// verdicts say, for each resource seen within the lease timeout (a
+	// crashed container's within crashKept, if longer), how it started
+	// (#33). A container keeps its verdict when it comes back after
 	// a tick or two away: its stats failed, a restart policy restarted it,
 	// or Docker itself restarted.
 	verdicts map[string]*verdict
@@ -212,9 +213,12 @@ type verdict struct {
 	lease string // the worktree of the lease it last bound
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
-	// list it still. Until then its restart binds as bindsAfterCrash says.
+	// list it still. Until then its restart binds as bindsAfterCrash says,
+	// and the verdict is kept for crashKept if that outlasts the lease
+	// timeout: a restart policy's restart may come later than the timeout.
 	crashed bool
 	last    time.Time // last in a reading
+	event   time.Time // its last start or die event
 	present bool      // in the latest reading (or a failed read kept it)
 }
 
@@ -233,6 +237,13 @@ func New(timeout time.Duration, now func() time.Time, log *slog.Logger) *Book {
 // dockerSettle is how long after the Docker engine comes back its
 // restart-policy containers count as a baseline.
 const dockerSettle = 30 * time.Second
+
+// crashKept is how long a crashed container's verdict lasts at least,
+// counted from the later of the last reading that listed it and its last
+// start or die event: the engine's restart backoff (Docker caps each delay
+// at a minute; Podman restarts at once) plus a reading and the start. Each
+// death in a crash loop starts it again (#134).
+const crashKept = 2 * time.Minute
 
 // stale is how much newer the daemon's snapshot must be than the one leases
 // were settled on before checks use it instead: derive (which settles them)
@@ -894,7 +905,16 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		v.crashed = v.crashed && b.seen[r.key].at.After(began) // see verdict.crashed
 	}
 	for k, v := range b.verdicts {
-		if !v.present && now.Sub(v.last) >= b.timeout {
+		keep, since := b.timeout, v.last
+		if v.crashed {
+			// A crash loop's lives may be too short for any reading to list:
+			// it is absent only once its events stop too.
+			keep = max(keep, crashKept)
+			if v.event.After(since) {
+				since = v.event
+			}
+		}
+		if !v.present && now.Sub(since) >= keep {
 			delete(b.verdicts, k)
 		}
 	}
@@ -1094,6 +1114,9 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 			b.seen[r.key] = v
 		}
 	case "start":
+		if v := b.verdicts[r.key]; v != nil {
+			v.event = now
+		}
 		last := b.seen[r.key]
 		stopped := last.stopped
 		b.seen[r.key] = seen{at: now}
@@ -1149,6 +1172,7 @@ func (b *Book) ContainerEvent(action, id, name string, labels map[string]string)
 		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound && !last.died, died: true}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
+			v.event = now
 		}
 		b.missed[r.key] = goneAfter(r.key) // gone at once
 		b.release(r.key)

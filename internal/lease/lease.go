@@ -156,8 +156,10 @@ type entry struct {
 	dir string
 	// unnamed is set for a compose lease whose project name the shim could
 	// not know (policy.Request.Unnamed, #122): its dir is its key, whatever
-	// the project of a container Compose labelled with it (key). A later
-	// unnamed up in that dir and worktree takes it over (composeTakes).
+	// the project of a container Compose labelled with it (key), though a
+	// lease of that container's project wins it (keyed). It takes no project
+	// from what it binds (bind), so only a later unnamed up in that dir and
+	// worktree takes it over (composeTakes).
 	unnamed bool
 	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
 	macOS bool
@@ -297,9 +299,10 @@ func composeTakes(r policy.Request, o *entry) bool {
 }
 
 // unnamed reports whether r is a compose call whose project name the shim
-// could not know, keyed by its dir (#122).
+// could not know, keyed by its dir (#122). Check ignores its Target, the
+// dir's name, which the shim sends for an older daemon (#122 B2).
 func unnamed(r policy.Request) bool {
-	return r.Kind == "compose" && r.Unnamed && r.Target == "" && r.ComposeDir != ""
+	return r.Kind == "compose" && r.Unnamed && r.ComposeDir != ""
 }
 
 // ofStack reports whether a compose container of project, labelled with
@@ -430,6 +433,9 @@ func takesCreate(r policy.Request, o *entry) bool {
 // the book's lock: concurrent checks run one after another, and the second
 // sees the first's lease.
 func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Config) protocol.Decision {
+	if unnamed(r) {
+		r.Target = "" // its dir is its key (unnamed)
+	}
 	starts := r.Others
 	if r.ContainerID != "" {
 		starts = append([]policy.Start{{ID: r.ContainerID, TakesOver: r.TakesOver, Running: r.Running}}, r.Others...)
@@ -1648,6 +1654,11 @@ func keyed(es []*entry, r resource, based, open bool) *entry {
 		if rank(e, r) != rank(best, r) {
 			return rank(e, r) < rank(best, r)
 		}
+		// A lease of r's project before an unnamed one, which keys every
+		// project in its dir (entry.unnamed).
+		if pe, pb := !e.unnamed && e.project == r.project, !best.unnamed && best.project == r.project; (e.unnamed || best.unnamed) && pe != pb {
+			return pe
+		}
 		if open && e.inDir(r) != best.inDir(r) {
 			return e.inDir(r)
 		}
@@ -1826,7 +1837,7 @@ func (e *entry) bind(r resource) {
 	if r.oneoff {
 		e.hasOneoff = true
 	}
-	if e.Kind == "compose" && e.project == "" {
+	if e.Kind == "compose" && e.project == "" && !e.unnamed {
 		e.project = r.project
 	}
 }

@@ -119,7 +119,7 @@ type Request struct {
 	// project with, or "" when the shim cannot be sure of it (#158).
 	ComposeDir string
 	// Unnamed is set for a compose call whose project name the shim cannot
-	// know: ComposeDir keys its lease instead of Target (#122).
+	// know: ComposeDir keys its lease, and Target is ignored (#122).
 	Unnamed bool
 }
 

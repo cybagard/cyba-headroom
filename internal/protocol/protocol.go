@@ -87,8 +87,9 @@ type CheckRequest struct {
 	// (#158). An older daemon ignores it; an older shim sends none.
 	ComposeDir string `json:"compose_dir,omitempty"`
 	// Unnamed is set for a compose call whose project name the shim cannot
-	// know (a file on stdin, #122): Target is empty, and ComposeDir, which
-	// is then set, keys its lease. An older daemon sees no key.
+	// know (a file on stdin, #122): ComposeDir, which is then set, keys its
+	// lease, and Target, the dir's name, is ignored. An older daemon keys it
+	// by Target, as before.
 	Unnamed bool `json:"unnamed,omitempty"`
 }
 

@@ -1985,8 +1985,9 @@ func TestTheComposeDirIsSent(t *testing.T) {
 }
 
 // A stdin up whose env file sets COMPOSE_PROJECT_NAME to a value the shim
-// cannot know (#122) sends no name, marked unnamed, and the dir Compose
-// labels its stack with, which keys its lease: never the dir's name. A
+// cannot know (#122) is sent marked unnamed, with the dir Compose labels
+// its stack with, which keys its lease, and the dir's name as its Target
+// for an older daemon, which a newer one ignores (#122 B2). A
 // known name, one Compose does not take from the file, and an unknown one
 // with no dir to send are as before.
 func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
@@ -2002,18 +2003,19 @@ func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
 	for _, tc := range []struct {
 		name, env string
 		call      []string
-		target    string // "": unnamed
+		target    string
+		unnamed   bool
 		dir       string
 	}{
-		{"a $", "COMPOSE_PROJECT_NAME=$X\n", nil, "", proj},
-		{"a backslash in double quotes", "COMPOSE_PROJECT_NAME=\"a\\tb\"\n", nil, "", proj},
-		{"a .env past the limit", "COMPOSE_PROJECT_NAME=early\n" + pad, nil, "", proj},
-		{"a known name", "COMPOSE_PROJECT_NAME=Named\n", nil, "named", proj},
-		{"an empty name: the dir's", "COMPOSE_PROJECT_NAME=\n", nil, "proj", proj},
+		{"a $", "COMPOSE_PROJECT_NAME=$X\n", nil, "proj", true, proj},
+		{"a backslash in double quotes", "COMPOSE_PROJECT_NAME=\"a\\tb\"\n", nil, "proj", true, proj},
+		{"a .env past the limit", "COMPOSE_PROJECT_NAME=early\n" + pad, nil, "proj", true, proj},
+		{"a known name", "COMPOSE_PROJECT_NAME=Named\n", nil, "named", false, proj},
+		{"an empty name: the dir's", "COMPOSE_PROJECT_NAME=\n", nil, "proj", false, proj},
 		{"a missing --env-file, which Compose fails on: the dir's", "COMPOSE_PROJECT_NAME=$X\n",
-			[]string{"docker", "compose", "--project-directory", proj, "--env-file", "missing.env", "-f", "-", "up", "-d"}, "proj", proj},
+			[]string{"docker", "compose", "--project-directory", proj, "--env-file", "missing.env", "-f", "-", "up", "-d"}, "proj", false, proj},
 		{"no dir to send: the dir's", "COMPOSE_PROJECT_NAME=$X\n",
-			[]string{"docker", "compose", "--workdir", "/srv/api", "-f", "-", "up", "-d"}, "proj", ""},
+			[]string{"docker", "compose", "--workdir", "/srv/api", "-f", "-", "up", "-d"}, "proj", false, ""},
 	} {
 		if err := os.WriteFile(filepath.Join(proj, ".env"), []byte(tc.env), 0o644); err != nil {
 			t.Fatal(err)
@@ -2024,8 +2026,8 @@ func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
 		}
 		r.asked = nil
 		r.run(call...)
-		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Unnamed != (tc.target == "") || r.asked[0].ComposeDir != tc.dir {
-			t.Errorf("%s: asked %+v, want target %q (unnamed if none), dir %q", tc.name, r.asked, tc.target, tc.dir)
+		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Unnamed != tc.unnamed || r.asked[0].ComposeDir != tc.dir {
+			t.Errorf("%s: asked %+v, want target %q, unnamed %v, dir %q", tc.name, r.asked, tc.target, tc.unnamed, tc.dir)
 		}
 	}
 }

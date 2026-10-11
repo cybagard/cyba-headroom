@@ -187,8 +187,9 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.ComposeDir = composeDir(e.Args[1:], c, lookupEnv, h.getwd, asked.Add(composeTimeout).Sub(h.now()), h.stat)
 		if unnamed && req.ComposeDir != "" {
 			// Its name is one the shim cannot know: the dir keys its
-			// lease, not the dir's name (#122).
-			req.Target, req.Unnamed = "", true
+			// lease (#122). Target stays the dir's name, an older
+			// daemon's key, which a newer one ignores.
+			req.Unnamed = true
 		}
 		if getenv("HEADROOM_SHIM_DEBUG") != "" {
 			fmt.Fprintf(e.Stderr, "headroom: compose project %q in %q\n", req.Target, req.ComposeDir)

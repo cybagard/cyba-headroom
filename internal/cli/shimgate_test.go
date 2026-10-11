@@ -2144,3 +2144,74 @@ func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
 		}
 	}
 }
+
+// A pod start names its pods, and a kube play the pods its kube files
+// define (each Pod's metadata.name), read from the files: its lease binds
+// their containers. Files the shim cannot read for sure (stdin, a URL,
+// another workload kind, which Podman names itself) leave it no pod: it
+// holds its cost. Neither is labelled (#230).
+func TestShimGatePodStartAndKubePlay(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "HEADROOM_WORKTREE=w")
+	r.getwd = func() (string, error) { return r.dir, nil }
+	r.ask = allow
+	write := func(name, yaml string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("web.yml", `# two pods and a claim
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: web
+  name: "web"  # the pod
+spec:
+  containers:
+  - name: app
+    image: alpine
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+---
+kind: Pod
+apiVersion: v1
+metadata:
+    name: db
+spec:
+  containers:
+  - name: db
+    image: postgres
+`)
+	write("deploy.yml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n")
+	write("flow.yml", "kind: Pod\nmetadata: {name: web}\n")
+	for _, c := range []struct {
+		argv    []string
+		target  string
+		targets []string
+	}{
+		{[]string{"podman", "pod", "start", "web"}, "web", nil},
+		{[]string{"podman", "pod", "start", "web", "db"}, "web", []string{"web", "db"}},
+		{[]string{"podman", "kube", "play", "--replace", "web.yml"}, "web", []string{"web", "db"}},
+		{[]string{"podman", "play", "kube", filepath.Join(r.dir, "web.yml")}, "web", []string{"web", "db"}},
+		{[]string{"podman", "kube", "play", "-"}, "", nil},
+		{[]string{"podman", "kube", "play", "https://example.com/web.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "deploy.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "flow.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "web.yml", "missing.yml"}, "", nil},
+	} {
+		r.asked = nil
+		code, stderr := r.run(c.argv...)
+		if code != 0 || !slices.Equal(r.execArgv, c.argv) || len(r.asked) != 1 {
+			t.Fatalf("%q: exit %d, exec %q, asked %d, stderr %q", c.argv, code, r.execArgv, len(r.asked), stderr)
+		}
+		a := r.asked[0]
+		if a.Kind != "pod" || a.CostBytes != 0 || a.Target != c.target || !slices.Equal(a.Targets, c.targets) || a.MultiTarget != (c.targets != nil) || a.Labelled {
+			t.Errorf("%q: asked %+v, want target %q, targets %q", c.argv, a, c.target, c.targets)
+		}
+	}
+}

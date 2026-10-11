@@ -8,7 +8,9 @@
 // the lease's ID as a label; a start names its container's ID, which the
 // daemon asks Docker for; a compose call names its project, or its project
 // directory, which Compose labels each container with; a tart run names its
-// VM. A new resource binds the lease whose key it matches, and no other: the
+// VM, and a podman machine start its machine, whose VM the Podman source
+// lists; a podman pod start or kube play names its pods, which the Podman
+// engine says each container is in (#230). A new resource binds the lease whose key it matches, and no other: the
 // book never guesses. A bound lease keeps reserving what its resources
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
@@ -216,6 +218,9 @@ type entry struct {
 	containerIDs     []string
 	name             string
 	target           string
+	// pods are a pod start's or kube play's pods, by name or ID as given:
+	// it binds each of their containers while it is open (#230).
+	pods []string
 }
 
 // How a resource started (#33).
@@ -569,6 +574,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			r.CostBytes = uint64(max(n, 1))*est + surplus
 		}
 	}
+	if r.Kind == "machine" && s != nil && s.Podman != nil &&
+		slices.ContainsFunc(s.Podman.VMs, func(vm protocol.PodmanVM) bool { return vm.Machine == r.Target }) {
+		// Its VM runs: podman says so and starts nothing, and the VM
+		// already counts. Allowed, and no lease.
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
+	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
 	if !d.Allow {
@@ -674,6 +685,21 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// open lease holds it (docker start a b: the lease is for b).
 		e.target = ""
 	}
+	if r.Kind == "pod" {
+		// Its key is its pods. Those of their containers that run already
+		// are its own, held (entry.held): a start of a pod that runs
+		// starts nothing new, and never logs "never appeared".
+		e.target, e.pods = "", slices.DeleteFunc(slices.Clone(r.Pods), func(p string) bool { return p == "" })
+		if s != nil && len(e.pods) > 0 {
+			for _, x := range resources(s) {
+				if x.kind == "container" && e.inPods(x) && !b.boundAnywhere(x.key) {
+					e.bind(x)
+					e.held[x.key], e.found = true, true
+					b.boundBy(x, e)
+				}
+			}
+		}
+	}
 	for _, t := range starts {
 		if t.TakesOver == "" {
 			continue
@@ -708,7 +734,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 
 // resource is a container or VM in a snapshot.
 type resource struct {
-	key   string // "container:<id>" or "vm:<name>"
+	key   string // "container:<id>", "vm:<name>" (Tart) or "machine:<name>" (Podman)
 	name  string
 	id    string // a container's ID
 	lease string // the lease ID its LeaseLabel carries
@@ -724,6 +750,8 @@ type resource struct {
 	service  string // its compose service
 	oneoff   bool   // a compose run's one-off container
 	worktree string // "" when unattributed
+	pod      string // the Podman pod a container is in, and its ID
+	podID    string
 	os       string // a VM's OS
 	runPID   int    // a VM's tart run process
 	runPIDs  []int  // every tart run of the VM: none in an old or fake reading
@@ -763,8 +791,15 @@ func resources(s *protocol.Snapshot) []resource {
 	var out []resource
 	for _, c := range s.Containers() {
 		r := containerResource(c.ID, c.Name, c.Labels)
-		r.worktree, r.bytes = owner[r.key], c.MemoryBytes
+		r.worktree, r.bytes, r.pod, r.podID = owner[r.key], c.MemoryBytes, c.Pod, c.PodID
 		out = append(out, r)
+	}
+	if s.Podman != nil {
+		// A Podman machine's VM costs what it holds now: its footprint, as
+		// the budget counts it.
+		for _, vm := range s.Podman.VMs {
+			out = append(out, resource{key: "machine:" + vm.Machine, name: vm.Machine, kind: "machine", bytes: vm.FootprintBytes})
+		}
 	}
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
@@ -786,12 +821,15 @@ func containerResource(id, name string, labels map[string]string) resource {
 	return r
 }
 
-// waitsFor is the resource kind a lease binds: a VM for tart, a compose
-// container for compose, a plain container otherwise.
+// waitsFor is the resource kind a lease binds: a VM for tart, a Podman
+// machine's VM for machine, a compose container for compose, a plain
+// container otherwise.
 func (e *entry) waitsFor() string {
 	switch e.Kind {
 	case "tart":
 		return "vm"
+	case "machine":
+		return "machine"
 	case "compose":
 		return "compose"
 	}
@@ -811,8 +849,11 @@ func (e *entry) takes(r resource) bool {
 // resources of kind: absence from a failed read means nothing.
 func readable(s *protocol.Snapshot, kind string) bool {
 	src := "docker"
-	if source(kind) == "vm" {
+	switch source(kind) {
+	case "vm":
 		src = "tart"
+	case "machine":
+		src = "podman"
 	}
 	return !s.Sources[src].Stale
 }
@@ -997,10 +1038,10 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	for _, r := range unbound {
 		v := b.verdicts[r.key]
 		switch {
-		case v != nil && r.kind != "vm":
+		case v != nil && !isVM(r.kind):
 			// A container back after a tick or two away keeps its verdict.
 			// A VM run again is a new run.
-		case !b.based[source(r.kind)] || dockerSettling && r.kind != "vm":
+		case !b.based[source(r.kind)] || dockerSettling && !isVM(r.kind):
 			b.judge(r, baseline, now) // it may have been there before
 		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r, now):
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
@@ -1414,21 +1455,33 @@ func (b *Book) markBased(s *protocol.Snapshot) {
 	if s.Tart != nil && readable(s, "vm") {
 		b.based["vm"] = true
 	}
+	// The podman section is absent while no machine runs: the source's
+	// status says whether it was read.
+	if (s.Podman != nil || !s.Sources["podman"].At.IsZero()) && readable(s, "machine") {
+		b.based["machine"] = true
+	}
 }
 
-// source is the source a resource kind comes from: vm (Tart) or
-// container (Docker, compose included).
+// source is the source a resource kind comes from: vm (Tart), machine
+// (Podman's VMs) or container (the engines, compose included).
 func source(kind string) string {
-	if kind == "vm" {
-		return "vm"
+	if isVM(kind) {
+		return kind
 	}
 	return "container"
 }
 
+// isVM reports whether resource kind is a VM's: Tart's or a Podman
+// machine's.
+func isVM(kind string) bool { return kind == "vm" || kind == "machine" }
+
 // kindOf is the resource kind a key names, for readable.
 func kindOf(key string) string {
-	if strings.HasPrefix(key, "vm:") {
+	switch {
+	case strings.HasPrefix(key, "vm:"):
 		return "vm"
+	case strings.HasPrefix(key, "machine:"):
+		return "machine"
 	}
 	return "container"
 }
@@ -1480,7 +1533,7 @@ func (b *Book) gone(k string) bool { return b.missed[k] >= goneAfter(k) }
 // be gone: two for a container, one for a VM, as before (#87's causes,
 // failed stats and a restart backoff, are Docker's).
 func goneAfter(k string) int {
-	if kindOf(k) == "vm" {
+	if isVM(kindOf(k)) {
 		return 1
 	}
 	return 2
@@ -1509,7 +1562,8 @@ func (b *Book) owner(r resource) string {
 // its project, or a tart run's process or VM name (#74). A start by ID
 // names the container, not whose it is (#89).
 func (b *Book) boundBy(r resource, e *entry) {
-	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "tart" || e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
+	if v := b.verdicts[r.key]; v != nil && (e.labelled || e.Kind == "tart" || e.Kind == "machine" || e.Kind == "pod" ||
+		e.Kind == "compose" && !slices.Contains(e.containerIDs, r.id)) {
 		v.lease = e.Worktree
 	}
 }
@@ -1734,6 +1788,13 @@ func (e *entry) key(r resource, based bool) bool {
 			return false
 		}
 		return e.pid > 0 && e.pid == r.runPID || based && e.takes(r) && e.target != "" && e.target == r.name
+	case r.kind == "machine":
+		// A podman machine start's VM: its machine's, by name.
+		return e.Kind == "machine" && based && e.takes(r) && e.target != "" && e.target == r.name
+	case e.Kind == "pod":
+		// A pod start's or kube play's: each container of its pods, as
+		// the Podman engine names them (#230).
+		return based && r.kind == "container" && !e.bound[r.key] && e.inPods(r)
 	case e.labelled:
 		// A run's or create's container carries its lease's ID; Compose may
 		// have labelled it a project's too (a --label on run).
@@ -1781,7 +1842,16 @@ func (e *entry) key(r resource, based bool) bool {
 
 // hasKey reports whether e has anything a resource could match.
 func (e *entry) hasKey() bool {
-	return e.labelled || len(e.containerIDs) > 0 || e.name != "" || e.target != "" || e.project != "" || e.unnamed || e.pid > 0
+	return e.labelled || len(e.containerIDs) > 0 || e.name != "" || e.target != "" || e.project != "" || e.unnamed || e.pid > 0 ||
+		len(e.pods) > 0
+}
+
+// inPods reports whether container r is in one of e's pods: by its name,
+// or by its ID or a prefix of it, as podman takes one.
+func (e *entry) inPods(r resource) bool {
+	return r.pod != "" && slices.ContainsFunc(e.pods, func(p string) bool {
+		return p == r.pod || p != "" && strings.HasPrefix(r.podID, p)
+	})
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and
@@ -1835,7 +1905,7 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 func (b *Book) judge(r resource, how int, now time.Time) *verdict {
 	v := &verdict{how: how, project: r.project, dir: r.dir, service: r.service, oneoff: r.oneoff, last: now, present: true,
 		u: protocol.Ungated{Key: r.key, Name: r.name, Kind: r.kind, Worktree: r.worktree, Since: now}, runPIDs: r.runs()}
-	if old := b.verdicts[r.key]; old != nil && r.kind != "vm" {
+	if old := b.verdicts[r.key]; old != nil && !isVM(r.kind) {
 		// An event's r is unattributed. A VM run again is a new run.
 		v.owner, v.lease = old.owner, old.lease
 	}

@@ -686,6 +686,14 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
 		}
+		if r.Kind == "pod" {
+			// Its pods key its lease: the Podman engine names each
+			// container's (#230).
+			req.Pods = r.Targets
+			if len(req.Pods) == 0 && r.Target != "" {
+				req.Pods = []string{r.Target}
+			}
+		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by
 		return d

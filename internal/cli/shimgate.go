@@ -213,6 +213,16 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	// A run or create carries its lease as a label: runShim adds it the
 	// same way, so the two agree.
 	_, req.Labelled = shim.Labelled(name, e.Args[1:], protocol.LeaseLabel, "")
+	if c.Kind == "pod" && c.Op == "play" {
+		// The pods its kube files define key its lease; none when the
+		// shim cannot be sure of them (#230).
+		if pods, ok := kubePods(c.KubeFiles, h.getwd); ok && len(pods) > 0 {
+			req.Target, req.Targets, req.MultiTarget = pods[0], nil, len(pods) > 1
+			if req.MultiTarget {
+				req.Targets = pods
+			}
+		}
+	}
 	if c.Kind == "tart" {
 		// The VM's own memory, and whether it takes a macOS slot (R6).
 		if macOS, mem, ok := shim.TartVM(c.Target, getenv); ok {
@@ -309,6 +319,149 @@ func machineOf(bin, name string, ask func(bin string, args []string) ([]byte, er
 		return "", 0, errors.New("no machine's name and memory in its output")
 	}
 	return machines[0].Name, machines[0].Resources.Memory << 20, nil
+}
+
+// kubeFileMax is the most of a kube file the shim reads: one that never
+// ends must not cost the shim memory in its own gate.
+const kubeFileMax = 1 << 20
+
+// kubePods are the pods a kube play of files makes: each Pod's
+// metadata.name, read within composeTimeout. ok is false when the shim
+// cannot be sure of them: a file on stdin or at a URL, one it cannot read
+// or that is longer than kubeFileMax, and any document of another workload
+// kind (a Deployment's pod Podman names itself) or that it cannot read for
+// sure (kubeDocPod). Relative paths are in the working directory (getwd).
+func kubePods(files []string, getwd func() (string, error)) (pods []string, ok bool) {
+	if len(files) == 0 {
+		return nil, false
+	}
+	type found struct {
+		pods []string
+		ok   bool
+	}
+	f, done := within(composeTimeout, func() found {
+		var out []string
+		for _, name := range files {
+			if name == "-" || strings.Contains(name, "://") {
+				return found{}
+			}
+			if !filepath.IsAbs(name) {
+				cwd, err := getwd()
+				if err != nil {
+					return found{}
+				}
+				name = filepath.Join(cwd, name)
+			}
+			b, err := readUpTo(name, kubeFileMax)
+			if err != nil {
+				return found{}
+			}
+			for doc := range strings.SplitSeq(string(b), "\n---") {
+				pod, isPod, sure := kubeDocPod(doc)
+				if !sure {
+					return found{}
+				}
+				if isPod {
+					out = append(out, pod)
+				}
+			}
+		}
+		return found{out, true}
+	})
+	return f.pods, done && f.ok
+}
+
+// readUpTo reads the regular file path, failing when it is longer than max.
+func readUpTo(path string, limit int64) ([]byte, error) {
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err == nil && int64(len(b)) > limit {
+		err = errors.New("too long")
+	}
+	return b, err
+}
+
+// kubeDocPod reads one YAML document of a kube file in block style: its
+// top-level kind and, for a Pod, the name under its top-level metadata.
+// sure is false for a workload of another kind (Podman names its pod),
+// and for anything not written that plainly: no kind, a Pod without a
+// plain name, a flow mapping, JSON. A document of no workload (a claim, a
+// config map, a secret, comments only) makes no pod, for sure.
+func kubeDocPod(doc string) (pod string, isPod, sure bool) {
+	kind, name := "", ""
+	inMeta, metaIndent, empty := false, -1, true
+	for line := range strings.Lines(doc) {
+		line = strings.TrimRight(line, " \t\r\n")
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || line == "---" || strings.HasPrefix(line, "--- ") || line == "-" {
+			continue
+		}
+		empty = false
+		indent := len(line) - len(trimmed)
+		key, value, isKey := strings.Cut(trimmed, ":")
+		value = yamlScalar(value)
+		if indent == 0 {
+			inMeta = false
+			if !isKey {
+				return "", false, false
+			}
+			switch key {
+			case "kind":
+				kind = value
+			case "metadata":
+				if value != "" {
+					return "", false, false // metadata: {name: x}
+				}
+				inMeta, metaIndent = true, -1
+			}
+			continue
+		}
+		if inMeta {
+			if metaIndent < 0 {
+				metaIndent = indent
+			}
+			if indent == metaIndent && isKey && key == "name" {
+				name = value
+			}
+		}
+	}
+	switch kind {
+	case "Pod":
+		return name, true, name != ""
+	case "PersistentVolumeClaim", "ConfigMap", "Secret":
+		return "", false, true
+	case "":
+		return "", false, empty
+	}
+	return "", false, false
+}
+
+// yamlScalar is a plain or quoted YAML scalar, without a trailing comment;
+// "" for anything else (a flow mapping or sequence, an anchor, a block
+// scalar), which kubeDocPod then cannot be sure of.
+func yamlScalar(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			if rest := strings.TrimSpace(v[end+2:]); rest == "" || strings.HasPrefix(rest, "#") {
+				return v[1 : end+1]
+			}
+		}
+		return ""
+	}
+	v, _, _ = strings.Cut(v, " #")
+	v = strings.TrimSpace(v)
+	if strings.ContainsAny(v, "{}[]&*|>!%@`\"'") {
+		return ""
+	}
+	return v
 }
 
 // interrupted is a wait ended by sig: exit as the shell reports it.

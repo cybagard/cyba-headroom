@@ -61,7 +61,7 @@ type Config struct {
 type Request struct {
 	// Worktree is the Orca worktree ID; empty for a manual call.
 	Worktree string
-	// Kind is container, compose or tart.
+	// Kind is container, compose, tart, pod or machine.
 	Kind string
 	// Command is what was run, for messages.
 	Command string
@@ -121,6 +121,9 @@ type Request struct {
 	// Unnamed is set for a compose call whose project name the shim cannot
 	// know: ComposeDir keys its lease, and Target is ignored (#122).
 	Unnamed bool
+	// Pods are the Podman pods a pod start or kube play starts, by name or
+	// ID as given: its lease binds their containers (#230).
+	Pods []string
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

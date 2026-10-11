@@ -1654,18 +1654,18 @@ func keyed(es []*entry, r resource, based, open bool) *entry {
 		if rank(e, r) != rank(best, r) {
 			return rank(e, r) < rank(best, r)
 		}
-		// A lease of r's project before an unnamed one, which keys every
-		// project in its dir (entry.unnamed).
-		if pe, pb := !e.unnamed && e.project == r.project, !best.unnamed && best.project == r.project; (e.unnamed || best.unnamed) && pe != pb {
-			return pe
-		}
 		if open && e.inDir(r) != best.inDir(r) {
 			return e.inDir(r)
 		}
+		if r.worktree != "" && (e.Worktree == r.worktree) != (best.Worktree == r.worktree) {
+			return e.Worktree == r.worktree
+		}
+		// Tied so far: a lease of r's project before an unnamed one, which
+		// keys every project in its dir (entry.unnamed).
+		if pe, pb := !e.unnamed && e.project == r.project, !best.unnamed && best.project == r.project; (e.unnamed || best.unnamed) && pe != pb {
+			return pe
+		}
 		if r.worktree != "" {
-			if (e.Worktree == r.worktree) != (best.Worktree == r.worktree) {
-				return e.Worktree == r.worktree
-			}
 			return !e.guessed && best.guessed
 		}
 		// Unattributed: a worktree's lease, which reserves, before a

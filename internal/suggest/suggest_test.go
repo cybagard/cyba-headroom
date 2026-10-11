@@ -147,10 +147,9 @@ func TestStaleOllamaIsLeftOut(t *testing.T) {
 
 func TestDockerOverhead(t *testing.T) {
 	ss := threeDays(func(s *samples.Sample, i int) {
-		s.Docker = &samples.Docker{VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: 4 * gib}
-		s.Containers = []samples.Container{{Name: "db", MemoryBytes: 2*gib + gib/2}}
+		s.Engines = desktopVM(31*gib, 4*gib, samples.Container{Name: "db", MemoryBytes: 2*gib + gib/2})
 		if i%50 == 0 { // image pull: page cache spikes
-			s.Docker.VMFootprintBytes = 6 * gib
+			s.Engines[0].VMFootprintBytes = 6 * gib
 		}
 	})
 	v := value(t, aggregate(ss), "docker_overhead_gb")
@@ -161,7 +160,7 @@ func TestDockerOverhead(t *testing.T) {
 	// Under an hour of the VM running is not enough.
 	short := threeDays(func(s *samples.Sample, i int) {
 		if i < 200 { // 3 × 200 samples = 50 min
-			s.Docker = &samples.Docker{VMRunning: true, VMFootprintBytes: 4 * gib}
+			s.Engines = desktopVM(0, 4*gib)
 		}
 	})
 	if v := value(t, aggregate(short), "docker_overhead_gb"); v.OK || !strings.Contains(v.Why, "not enough data") {
@@ -199,10 +198,10 @@ func TestPerWorktreeCap(t *testing.T) {
 		if i == 1439 {
 			mem = (2 + d) * gib
 		}
-		s.Containers = []samples.Container{
-			{Name: "db", MemoryBytes: mem, Mounts: []string{"/Users/dev/w/project-a/data"}},
-			{Name: "stray", MemoryBytes: 30 * gib}, // unattributed: not a worktree's
-		}
+		s.Engines = desktopVM(0, 0,
+			samples.Container{Name: "db", MemoryBytes: mem, Mounts: []string{"/Users/dev/w/project-a/data"}},
+			samples.Container{Name: "stray", MemoryBytes: 30 * gib}, // unattributed: not a worktree's
+		)
 		s.TartVMs = []samples.TartVM{{Name: "ci", MemoryBytes: 8 * gib, LaunchCwd: "/Users/dev/w/project-b"}}
 	})
 	v := value(t, aggregate(ss), "per_worktree_cap_gb")
@@ -224,7 +223,7 @@ func advice(r suggest.Result) string { return strings.Join(r.Advice, "\n") }
 func TestDockerLimitAdvice(t *testing.T) {
 	withVM := func(limit uint64) []samples.Sample {
 		return threeDays(func(s *samples.Sample, _ int) {
-			s.Docker = &samples.Docker{VMRunning: true, VMLimitBytes: limit, VMFootprintBytes: 4 * gib}
+			s.Engines = desktopVM(limit, 4*gib)
 		})
 	}
 	if a := advice(aggregate(withVM(31 * gib))); !strings.Contains(a, "Docker Desktop's memory limit is 31 GB") || !strings.Contains(a, "lowering it to 6 GB") {
@@ -272,7 +271,7 @@ func TestConcurrencyAdvice(t *testing.T) {
 func TestValuesHaveNoFloatNoise(t *testing.T) {
 	// 1.63 GiB of overhead rounds up to 1.7, which 17 × 0.1 gets wrong.
 	ss := threeDays(func(s *samples.Sample, _ int) {
-		s.Docker = &samples.Docker{VMRunning: true, VMFootprintBytes: gib * 163 / 100}
+		s.Engines = desktopVM(0, gib*163/100)
 	})
 	if v := value(t, aggregate(ss), "docker_overhead_gb"); v.GB != 1.7 || fmt.Sprint(v.GB) != "1.7" {
 		t.Fatalf("docker overhead = %v", v.GB)
@@ -281,7 +280,7 @@ func TestValuesHaveNoFloatNoise(t *testing.T) {
 
 func TestNoAdviceToLowerDockerToWhatItIs(t *testing.T) {
 	ss := threeDays(func(s *samples.Sample, _ int) {
-		s.Docker = &samples.Docker{VMRunning: true, VMLimitBytes: 2 * gib, VMFootprintBytes: gib * 9 / 10}
+		s.Engines = desktopVM(2*gib, gib*9/10)
 	})
 	if a := advice(aggregate(ss)); strings.Contains(a, "Docker Desktop") {
 		t.Fatalf("advice = %s", a)
@@ -482,7 +481,7 @@ func TestPolicyValueAboveTheConfigLimitIsNotUsable(t *testing.T) {
 	var big []samples.Sample // five days of one worktree's absurd container
 	for d := 0; d < 5; d++ {
 		for _, s := range workingHours(d, 2, 5*gib) {
-			s.Containers = []samples.Container{{Name: "db", MemoryBytes: absurd, Mounts: []string{"/Users/dev/w/project-a/data"}}}
+			s.Engines = desktopVM(0, 0, samples.Container{Name: "db", MemoryBytes: absurd, Mounts: []string{"/Users/dev/w/project-a/data"}})
 			big = append(big, s)
 		}
 	}

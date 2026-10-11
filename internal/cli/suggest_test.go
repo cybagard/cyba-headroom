@@ -72,6 +72,22 @@ func TestSuggestWithTooLittleData(t *testing.T) {
 	}
 }
 
+// Samples of schema v1 are skipped, and suggest says how many; with no
+// others, it says so instead of asking whether the daemon records (#229).
+func TestSuggestCountsV1Samples(t *testing.T) {
+	dir, env := suggestEnv(t)
+	writeSamples(t, dir, []int{2}, 1, func(s *samples.Sample) { s.V = 1 })
+	_, out, _ := run(t, env, "headroom", "suggest")
+	if !strings.Contains(out, "only v1 samples") || strings.Contains(out, "Is the daemon recording") {
+		t.Fatalf("v1 only, out:\n%s", out)
+	}
+	writeSamples(t, dir, []int{1}, 2)
+	_, out, _ = run(t, env, "headroom", "suggest")
+	if !strings.Contains(out, "read 1440 samples") || !strings.Contains(out, "720 v1 samples skipped") {
+		t.Fatalf("v1 and v2, out:\n%s", out)
+	}
+}
+
 func TestSuggestAndWrite(t *testing.T) {
 	dir, env := suggestEnv(t)
 	writeSamples(t, dir, []int{3, 2, 1}, 2)
@@ -180,7 +196,8 @@ func TestWriteLeavesOutAPolicyValueAboveTheLimit(t *testing.T) {
 		if s.T.Minute()%10 == 0 {
 			s.Host.Pressure = "warn"
 		}
-		s.Containers = []samples.Container{{Name: "db", MemoryBytes: 1 << 40, Mounts: []string{"/Users/dev/w/a/data"}}}
+		s.Engines = []samples.Engine{{Kind: protocol.EngineDockerDesktop, Running: true,
+			Containers: []samples.Container{{Name: "db", MemoryBytes: 1 << 40, Mounts: []string{"/Users/dev/w/a/data"}}}}}
 	})
 	code, out, stderr := run(t, env, "headroom", "suggest", "--write")
 	if code != 0 || !strings.Contains(out, "# min_headroom_gb: not usable") || !strings.Contains(out, "# per_worktree_cap_gb: not usable") {

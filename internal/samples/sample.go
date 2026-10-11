@@ -3,8 +3,8 @@
 // from weeks of real use.
 //
 // A sample is a purpose-built record, not the snapshot: it leaves out
-// container labels, process IDs and anything else that could carry secrets,
-// and keeps the attribution keys (paths) that let samples be attributed to
+// container labels, agents' processes and anything else that could carry
+// secrets (it keeps the PIDs of VM processes, which name no one), and keeps the attribution keys (paths) that let samples be attributed to
 // worktrees after the fact (#20).
 package samples
 
@@ -15,8 +15,9 @@ import (
 )
 
 // Version is the sample schema version. Bump it when a field changes meaning;
-// readers skip versions they do not know.
-const Version = 1
+// readers skip versions they do not know. Version 2 records every engine and
+// the VMs beside them in place of version 1's one Docker (#229).
+const Version = 2
 
 // Sample is one tick's record.
 type Sample struct {
@@ -28,10 +29,14 @@ type Sample struct {
 	// Stale lists sources whose latest read failed; absent ones were fresh.
 	Stale map[string]bool `json:"stale,omitempty"`
 
-	Docker     *Docker     `json:"docker,omitempty"`
-	Containers []Container `json:"containers,omitempty"`
-	TartVMs    []TartVM    `json:"tart_vms,omitempty"`
-	LMStudio   *LMStudio   `json:"lmstudio,omitempty"`
+	// Engines are the snapshot's engines, in its order, running or not.
+	Engines []Engine `json:"engines,omitempty"`
+	// Podman is the running Podman machines' VMs; OtherVMs the VMs no known
+	// owner claims.
+	Podman   []PodmanVM `json:"podman,omitempty"`
+	OtherVMs []OtherVM  `json:"other_vms,omitempty"`
+	TartVMs  []TartVM   `json:"tart_vms,omitempty"`
+	LMStudio *LMStudio  `json:"lmstudio,omitempty"`
 	// Ollama is absent when it was not running. Added to schema v1 later.
 	Ollama *Ollama `json:"ollama,omitempty"`
 
@@ -56,14 +61,34 @@ type Host struct {
 	SwapoutsPerSec  *float64 `json:"swapouts_per_sec,omitempty"`
 }
 
-// Docker is the Docker VM's state.
-type Docker struct {
+// Engine is one container engine's state and its containers.
+type Engine struct {
+	Kind   string `json:"kind,omitempty"`
+	Socket string `json:"socket"`
+	// Machine is the Podman machine whose VM the engine runs in.
+	Machine          string `json:"machine,omitempty"`
+	Running          bool   `json:"running"`
 	VMRunning        bool   `json:"vm_running"`
 	VMLimitBytes     uint64 `json:"vm_limit_bytes"`
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
 	// VMUnknown means the VM process could not be read: VMRunning and the
-	// footprint are unknown, not zero. Added to schema v1 later.
-	VMUnknown bool `json:"vm_unknown,omitempty"`
+	// footprint are unknown, not zero.
+	VMUnknown  bool        `json:"vm_unknown,omitempty"`
+	Containers []Container `json:"containers,omitempty"`
+}
+
+// PodmanVM is one running Podman machine's VM.
+type PodmanVM struct {
+	Machine        string `json:"machine"`
+	PID            int    `json:"pid"`
+	FootprintBytes uint64 `json:"footprint_bytes"`
+}
+
+// OtherVM is one VM process no known owner claims.
+type OtherVM struct {
+	PID            int    `json:"pid"`
+	Name           string `json:"name"`
+	FootprintBytes uint64 `json:"footprint_bytes"`
 }
 
 // Container is one running container and its attribution keys.
@@ -161,15 +186,25 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 			SwapinsPerSec: h.SwapinsPerSec, SwapoutsPerSec: h.SwapoutsPerSec,
 		}
 	}
-	// Docker Desktop's engine alone: samples v1 has one Docker (#229).
-	if d := desktop(s.Engines); d != nil && d.Running {
-		out.Docker = &Docker{VMRunning: d.VMRunning, VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes,
-			VMUnknown: d.VMError != ""}
-		for _, c := range d.Containers {
-			out.Containers = append(out.Containers, Container{
+	for _, e := range s.Engines {
+		se := Engine{Kind: e.Kind, Socket: e.Socket, Machine: e.Machine, Running: e.Running, VMRunning: e.VMRunning,
+			VMLimitBytes: e.VMLimitBytes, VMFootprintBytes: e.VMFootprintBytes, VMUnknown: e.VMError != ""}
+		for _, c := range e.Containers {
+			se.Containers = append(se.Containers, Container{
 				Name: c.Name, Image: c.Image, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
 				ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts,
 			})
+		}
+		out.Engines = append(out.Engines, se)
+	}
+	if p := s.Podman; p != nil {
+		for _, vm := range p.VMs {
+			out.Podman = append(out.Podman, PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes})
+		}
+	}
+	if v := s.VMs; v != nil {
+		for _, vm := range v.Other {
+			out.OtherVMs = append(out.OtherVMs, OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes})
 		}
 	}
 	if t := s.Tart; t != nil {
@@ -219,14 +254,4 @@ func clone[T any](p *T) *T {
 	}
 	v := *p
 	return &v
-}
-
-// desktop returns the first Docker Desktop engine, or nil.
-func desktop(engines []protocol.Engine) *protocol.Engine {
-	for i := range engines {
-		if engines[i].Kind == protocol.EngineDockerDesktop {
-			return &engines[i]
-		}
-	}
-	return nil
 }

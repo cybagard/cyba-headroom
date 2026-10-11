@@ -27,18 +27,39 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 		}
 	}
 	if known("docker") {
-		// A sample records Docker Desktop's engine alone (#229).
 		out.Engines = []protocol.Engine{}
-		if d := s.Docker; d != nil {
-			e := protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: d.VMRunning,
-				VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes}
-			if d.VMUnknown {
+		for _, se := range s.Engines {
+			e := protocol.Engine{Kind: se.Kind, Socket: se.Socket, Machine: se.Machine, Running: se.Running, VMRunning: se.VMRunning,
+				VMLimitBytes: se.VMLimitBytes, VMFootprintBytes: se.VMFootprintBytes}
+			if se.VMUnknown {
 				e.VMError = "unknown when recorded"
 			}
-			for _, c := range s.Containers {
+			for _, c := range se.Containers {
 				e.Containers = append(e.Containers, protocol.Container{Name: c.Name, MemoryBytes: c.MemoryBytes})
 			}
 			out.Engines = append(out.Engines, e)
+		}
+	}
+	// The podman and vms sections are absent while none runs, so, as in
+	// budget.Compute, only a source never read makes them unknown.
+	for _, name := range []string{"podman", "vms"} {
+		if !known(name) {
+			if out.Sources == nil {
+				out.Sources = map[string]protocol.SourceStatus{}
+			}
+			out.Sources[name] = protocol.SourceStatus{}
+		}
+	}
+	if len(s.Podman) > 0 {
+		out.Podman = &protocol.Podman{}
+		for _, vm := range s.Podman {
+			out.Podman.VMs = append(out.Podman.VMs, protocol.PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes})
+		}
+	}
+	if len(s.OtherVMs) > 0 {
+		out.VMs = &protocol.VMs{}
+		for _, vm := range s.OtherVMs {
+			out.VMs.Other = append(out.VMs.Other, protocol.OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes})
 		}
 	}
 	if known("tart") {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -173,8 +174,8 @@ func TestModelIdlenessSurvivesWriteAndRead(t *testing.T) {
 	}
 }
 
-// A worktree's project survives a write and a read, and a sample written
-// before samples had one still loads, with no project (#102).
+// A worktree's project survives a write and a read, and a sample with none
+// loads with no project (#102).
 func TestWorktreeProjectSurvivesWriteAndRead(t *testing.T) {
 	w, dir, _ := newTestWriter(t)
 	s := snapAt(day1)
@@ -186,7 +187,7 @@ func TestWorktreeProjectSurvivesWriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = f.WriteString(`{"v":1,"t":"2026-10-07T13:00:00Z","worktrees":[{"id":"w2","path":"/Users/dev/src/project-b","name":"main","memory_bytes":0,"cpu_percent":0}]}` + "\n")
+	_, _ = f.WriteString(`{"v":2,"t":"2026-10-07T13:00:00Z","worktrees":[{"id":"w2","path":"/Users/dev/src/project-b","name":"main","memory_bytes":0,"cpu_percent":0}]}` + "\n")
 	_ = f.Close()
 	var got []Worktree
 	if _, err := Read(dir, time.Time{}, day1.AddDate(0, 0, 1), func(s Sample) error {
@@ -197,5 +198,67 @@ func TestWorktreeProjectSurvivesWriteAndRead(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].ID != "w1" || got[0].Project != "project-a" || got[1].ID != "w2" || got[1].Project != "" || got[1].Name != "main" {
 		t.Fatalf("read back %+v", got)
+	}
+}
+
+// A sample with two engines, a Podman VM and an unknown VM survives a write
+// and a read (#229).
+func TestEnginesAndVMsSurviveWriteAndRead(t *testing.T) {
+	w, dir, _ := newTestWriter(t)
+	s := snapAt(day1)
+	s.Engines = []protocol.Engine{
+		{Kind: protocol.EngineDockerDesktop, Socket: "/Users/dev/.docker/run/docker.sock", ID: "AAAA", Running: true,
+			VMRunning: true, VMLimitBytes: 8 << 30, VMFootprintBytes: 4 << 30,
+			Containers: []protocol.Container{{ID: "c1", Name: "db", Image: "postgres:17", MemoryBytes: 1 << 30,
+				Labels: map[string]string{protocol.ComposeWorkingDirLabel: "/Users/dev/project-a"}, Mounts: []string{"/Users/dev/project-a/data"}}}},
+		{Kind: protocol.EnginePodman, Socket: "/Users/dev/.local/share/podman.sock", ID: "podman:dev", Machine: "dev", Running: true,
+			VMError: "no VM process", VMLimitBytes: 2 << 30,
+			Containers: []protocol.Container{{ID: "c2", Name: "cache", Image: "redis:7", MemoryBytes: 1 << 20}}},
+	}
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "dev", PID: 300, FootprintBytes: 3 << 30}}}
+	s.VMs = &protocol.VMs{Other: []protocol.OtherVM{{PID: 400, Name: "qemu-system-aarch64", FootprintBytes: 5 << 30}}}
+	w.write(s)
+	w.close()
+	var got []Sample
+	st, err := Read(dir, time.Time{}, day1.AddDate(0, 0, 1), func(s Sample) error {
+		got = append(got, s)
+		return nil
+	})
+	if err != nil || st.Samples != 1 || len(got) != 1 {
+		t.Fatalf("read %d samples, stats %+v, err %v", len(got), st, err)
+	}
+	want := Sample{
+		Engines: []Engine{
+			{Kind: "docker-desktop", Socket: "/Users/dev/.docker/run/docker.sock", Running: true,
+				VMRunning: true, VMLimitBytes: 8 << 30, VMFootprintBytes: 4 << 30,
+				Containers: []Container{{Name: "db", Image: "postgres:17", MemoryBytes: 1 << 30,
+					ComposeDir: "/Users/dev/project-a", Mounts: []string{"/Users/dev/project-a/data"}}}},
+			{Kind: "podman", Socket: "/Users/dev/.local/share/podman.sock", Machine: "dev", Running: true,
+				VMUnknown: true, VMLimitBytes: 2 << 30,
+				Containers: []Container{{Name: "cache", Image: "redis:7", MemoryBytes: 1 << 20}}},
+		},
+		Podman:   []PodmanVM{{Machine: "dev", PID: 300, FootprintBytes: 3 << 30}},
+		OtherVMs: []OtherVM{{PID: 400, Name: "qemu-system-aarch64", FootprintBytes: 5 << 30}},
+	}
+	g := got[0]
+	if g.V != 2 || !reflect.DeepEqual(g.Engines, want.Engines) || !reflect.DeepEqual(g.Podman, want.Podman) ||
+		!reflect.DeepEqual(g.OtherVMs, want.OtherVMs) {
+		t.Fatalf("read back v%d\nengines %+v\npodman %+v\nother_vms %+v\nwant\n%+v", g.V, g.Engines, g.Podman, g.OtherVMs, want)
+	}
+}
+
+// A sample of schema v1 is skipped and counted as outdated, not an error and
+// not damage (#229).
+func TestReadSkipsV1SamplesWithANote(t *testing.T) {
+	dir := threeDays(t)
+	f, err := os.OpenFile(filepath.Join(dir, "2026-10-08.jsonl"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"v":1,"t":"2026-10-08T14:00:00Z","docker":{"vm_running":true,"vm_limit_bytes":8589934592,"vm_footprint_bytes":4294967296}}` + "\n")
+	_ = f.Close()
+	got, st := readAll(t, dir, time.Time{}, day1.AddDate(1, 0, 0))
+	if len(got) != 6 || st.Outdated != 1 || st.Skipped != 0 {
+		t.Fatalf("got %d samples, stats %+v; want 6 read and 1 outdated", len(got), st)
 	}
 }

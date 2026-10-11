@@ -18,6 +18,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/config"
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/samples"
 )
 
@@ -143,7 +144,7 @@ func New(o Options) *Aggregator {
 
 // budgetSources are the inputs to the budget; a stale one makes a sample
 // unfit for budget maths.
-var budgetSources = []string{"host", "docker", "tart", "lmstudio", "ollama"}
+var budgetSources = []string{"host", "docker", "tart", "podman", "vms", "lmstudio", "ollama"}
 
 // Add takes one sample.
 func (a *Aggregator) Add(s samples.Sample) {
@@ -209,12 +210,12 @@ func (a *Aggregator) Add(s samples.Sample) {
 			}
 		}
 	}
-	if d := s.Docker; d != nil && d.VMRunning {
+	if d := desktop(s.Engines); d != nil && d.Running && d.VMRunning {
 		a.dockerFootprint = append(a.dockerFootprint, float64(d.VMFootprintBytes))
 		a.dockerSpan += dt
 		a.dockerLimit = max(a.dockerLimit, d.VMLimitBytes)
 		var payload uint64
-		for _, c := range s.Containers {
+		for _, c := range d.Containers {
 			payload += c.MemoryBytes
 		}
 		a.dockerExtra = append(a.dockerExtra, max(float64(d.VMFootprintBytes)-float64(payload), 0))
@@ -237,6 +238,17 @@ func (a *Aggregator) Add(s samples.Sample) {
 			a.unaccounted = append(a.unaccounted, float64(*s.Budget.UnaccountedBytes))
 		}
 	}
+}
+
+// desktop returns s's first Docker Desktop engine, or nil: the Docker
+// overhead and limit advice are about Docker Desktop's VM.
+func desktop(engines []samples.Engine) *samples.Engine {
+	for i := range engines {
+		if engines[i].Kind == protocol.EngineDockerDesktop {
+			return &engines[i]
+		}
+	}
+	return nil
 }
 
 // onset reports whether pressure rose with s: "warn" when it left normal,
@@ -481,9 +493,11 @@ func (a *Aggregator) addWorktreeUse(s samples.Sample, date string) {
 	}
 	m := a.matcher(s.Worktrees)
 	use := map[string]uint64{}
-	for _, c := range s.Containers {
-		if r := m.Match(attribution.Keys{ComposeDir: c.ComposeDir, Mounts: c.Mounts}); r.WorktreeID != "" {
-			use[r.WorktreeID] += c.MemoryBytes
+	for _, e := range s.Engines {
+		for _, c := range e.Containers {
+			if r := m.Match(attribution.Keys{ComposeDir: c.ComposeDir, Mounts: c.Mounts}); r.WorktreeID != "" {
+				use[r.WorktreeID] += c.MemoryBytes
+			}
 		}
 	}
 	for _, vm := range s.TartVMs {

@@ -24,6 +24,9 @@ type Stats struct {
 	// Skipped lines: truncated by a crash, malformed, or of an unknown
 	// schema version.
 	Skipped int
+	// Outdated samples are of an older schema version, skipped: version 1
+	// lacks the engines and VMs a replay needs (#229).
+	Outdated int
 	// Duplicates were samples seen before for the same day and time: left by
 	// a crash mid-gzip, or seen in both files while the daemon gzips a day.
 	Duplicates int
@@ -153,8 +156,12 @@ func (r *dayReader) read(f dayFile) error {
 // sample decodes one line and hands it to fn if it is new and in range.
 func (r *dayReader) sample(line []byte) error {
 	var s Sample
-	if err := json.Unmarshal(line, &s); err != nil || s.V != Version {
+	if err := json.Unmarshal(line, &s); err != nil || s.V > Version || s.V < 1 {
 		r.st.Skipped++
+		return nil
+	}
+	if s.V < Version {
+		r.st.Outdated++
 		return nil
 	}
 	if s.T.Before(r.from) || !s.T.Before(r.to) {

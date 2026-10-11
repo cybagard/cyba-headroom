@@ -83,6 +83,10 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 	log.Info("shims linked", "dir", dir, "to", start)
 }
 
+// removeLink removes a shim link; a test replaces it to remove the link
+// under unlinkShims (#193).
+var removeLink = os.Remove
+
 // unlinkShims removes the shim links in dir that lead to a headroom binary,
 // and, if removeDir (dir is headroom's own), dir itself once it is empty.
 // With onlyBin, it removes only the links to bin itself and keeps those to
@@ -99,7 +103,7 @@ func unlinkShims(dir, bin string, removeDir, onlyBin bool) (removed, kept []stri
 			kept = append(kept, n)
 			continue
 		}
-		if err := os.Remove(p); err != nil {
+		if err := removeLink(p); err != nil {
 			return removed, kept, err
 		}
 		removed = append(removed, n)

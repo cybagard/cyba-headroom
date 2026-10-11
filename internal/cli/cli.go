@@ -264,8 +264,9 @@ func runDaemon(e Env) int {
 	podmanSocket := docker.NewPodman(podmanCLI, time.Now, log)
 	// Every engine is found afresh each tick (#227); a start is looked up
 	// on the configured one.
+	contexts := docker.NewDiscovery(log)
 	dockerSrc := docker.Discover(func() []docker.Candidate {
-		return docker.Candidates(cfg.Docker.Socket, e.Getenv, log, podmanSocket.Candidates()...)
+		return contexts.Candidates(cfg.Docker.Socket, e.Getenv, podmanSocket.Candidates()...)
 	}, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),

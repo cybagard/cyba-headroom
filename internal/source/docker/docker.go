@@ -71,7 +71,8 @@ func Discover(candidates func() []Candidate, vms vmproc.Lister) *Source {
 // they must not hold up the reading.
 const untrustedBudget = time.Second
 
-// client returns Collect's HTTP client for socket, made once.
+// client returns Collect's HTTP client for socket, made once and kept
+// while socket is a candidate (prune).
 func (s *Source) client(socket string) *http.Client {
 	h, ok := s.clients[socket]
 	if !ok {
@@ -79,6 +80,17 @@ func (s *Source) client(socket string) *http.Client {
 		s.clients[socket] = h
 	}
 	return h
+}
+
+// prune drops the client of each socket not among cands, and closes its
+// idle connections: a context may name a new socket each tick (#236).
+func (s *Source) prune(cands []Candidate) {
+	for socket, h := range s.clients {
+		if !slices.ContainsFunc(cands, func(c Candidate) bool { return c.Socket == socket }) {
+			h.CloseIdleConnections()
+			delete(s.clients, socket)
+		}
+	}
 }
 
 // dial returns an HTTP client for the engine at socket.
@@ -106,8 +118,10 @@ var errSeen = errors.New("docker: engine seen already")
 // are read after, all at once, within untrustedBudget; one that fails in
 // any way, or is not done by then, is an engine not running, with its
 // error, so it cannot hide or hold up the others (amendments 3 and 4).
+// Then the clients of sockets no longer candidates are dropped (prune).
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	cands := s.candidates()
+	defer s.prune(cands)
 	type result struct {
 		e        protocol.Engine
 		counters map[string]cpuCounters

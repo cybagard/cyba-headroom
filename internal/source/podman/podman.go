@@ -55,11 +55,11 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	}
 	// Logged once each time it starts or ends, not every tick.
 	if both != s.both {
-		if both {
-			s.log.Warn(bothRunning)
-		} else {
-			s.log.Info("Docker Desktop's and Podman's VMs are no longer both running")
+		msg := bothRunning
+		if !both {
+			msg = "Docker Desktop's and Podman's VMs are no longer both running"
 		}
+		s.log.Warn(msg)
 		s.both = both
 	}
 	if len(p.VMs) == 0 {

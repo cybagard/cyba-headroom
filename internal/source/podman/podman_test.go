@@ -90,12 +90,12 @@ func TestBothVMsWarnInTheSnapshotAndOncePerChangeInTheLog(t *testing.T) {
 	vms.vms = []vmproc.VM{dockerVM} // Podman stopped
 	collect(t, s)
 	collect(t, s)
-	if !strings.Contains(log.String(), "no longer both running") || strings.Count(log.String(), "no longer both running") != 1 {
+	if warns() != 2 || strings.Count(log.String(), "no longer both running") != 1 {
 		t.Fatalf("log after Podman stopped:\n%s\nwant the end logged once", log.String())
 	}
 	vms.vms = []vmproc.VM{dockerVM, podmanVM}
 	collect(t, s)
-	if warns() != 2 {
+	if warns() != 3 {
 		t.Fatalf("log after both again:\n%s\nwant a second warning", log.String())
 	}
 }

@@ -271,10 +271,11 @@ func runDaemon(e Env) int {
 	ln, err := daemon.Listen(cfg.Socket)
 	// --wait: under brew services beside a plain install, wait for the
 	// other daemon to stop rather than fail and be restarted (#192).
-	for logged := false; wait && errors.Is(err, daemon.ErrLocked); ln, err = daemon.Listen(cfg.Socket) {
-		if !logged {
+	waited := false
+	for ; wait && errors.Is(err, daemon.ErrLocked); ln, err = daemon.Listen(cfg.Socket) {
+		if !waited {
 			log.Info("another daemon is running; waiting for it to stop", "socket", cfg.Socket)
-			logged = true
+			waited = true
 		}
 		sleep(ctx, waitEvery)
 		if ctx.Err() != nil {
@@ -292,6 +293,18 @@ func runDaemon(e Env) int {
 	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration, "samples", cfg.Samples.Enabled)
 
 	var wg sync.WaitGroup
+	// Uninstall of the other daemon may remove the shims just linked; check
+	// them once more, and never again (#193).
+	if link && waited {
+		wg.Go(func() {
+			sleep(ctx, recheckAfter)
+			if ctx.Err() != nil {
+				return
+			}
+			log.Info("checking the shims again", "dir", cfg.ShimDir)
+			linkOwnShims(e.Args[0], cfg.ShimDir, log)
+		})
+	}
 	if cfg.Samples.Enabled {
 		w := samples.NewWriter(cfg.SamplesDir(), cfg.Samples.Retention.Duration, log)
 		d.OnPublish(w.Offer)

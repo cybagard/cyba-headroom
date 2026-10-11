@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,5 +301,67 @@ func TestAFailedContextCarriesItsError(t *testing.T) {
 	got = engines(t, fakeVMs{}, filepath.Join(shortDir(t), "none.sock"))
 	if len(got) != 1 || got[0].Running || got[0].Error != "" {
 		t.Fatalf("engines = %+v, want one not running, with no error", got)
+	}
+}
+
+// A client is cached only while its socket is a candidate: one a context
+// named once, and no more, is dropped after the reading and its idle
+// connection closed. An agent can rotate a context's socket name each
+// tick (a new hard link to one socket), which would else leak a client
+// and a connection per tick for the daemon's lifetime (#236).
+func TestADroppedCandidatesClientIsClosed(t *testing.T) {
+	dir := shortDir(t)
+	sock := filepath.Join(dir, "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := map[string]string{
+		"/info":            `{"ID":"00000000-0000-4000-8000-000000000001","MemTotal":2037100544}`,
+		"/version":         `{"Platform":{"Name":"Docker Engine - Community"}}`,
+		"/containers/json": `[]`,
+	}
+	var open atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(routes[r.URL.Path]))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		switch s {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	var tick int
+	src := docker.Discover(func() []docker.Candidate {
+		name := filepath.Join(dir, fmt.Sprintf("%02d.sock", tick))
+		if err := os.Link(sock, name); err != nil {
+			t.Fatal(err)
+		}
+		return []docker.Candidate{{Socket: name}}
+	}, fakeVMs{})
+	for tick = range 50 {
+		r, err := src.Collect(context.Background())
+		if err != nil {
+			t.Fatalf("tick %d: Collect: %v", tick, err)
+		}
+		var snap protocol.Snapshot
+		r.Apply(&snap)
+		if len(snap.Engines) != 1 || !snap.Engines[0].Running {
+			t.Fatalf("tick %d: engines = %+v, want the one running", tick, snap.Engines)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for open.Load() > 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := open.Load(); n > 1 {
+		t.Fatalf("%d connections open after 50 readings of a new name each, want at most 1: the current candidate's", n)
 	}
 }

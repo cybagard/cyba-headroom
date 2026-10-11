@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -29,14 +30,47 @@ type Candidate struct {
 // exist is left out without dialing, and a socket named twice, directly or
 // through a link, comes once, by its first name; it is trusted if any name
 // of it is, and of the machine any name of it is. A context skipped is
-// logged to log at debug.
+// logged to log at debug, and the contexts over maxContexts at warn: a
+// Discovery warns of those only when their count changes.
 func Candidates(config string, getenv func(string) string, log *slog.Logger, more ...Candidate) []Candidate {
+	return NewDiscovery(log).Candidates(config, getenv, more...)
+}
+
+// Discovery finds the candidates tick after tick, as Candidates does, and
+// warns of the contexts over maxContexts once, then again only when their
+// count changes (#236).
+type Discovery struct {
+	log     *slog.Logger
+	mu      sync.Mutex
+	skipped int
+}
+
+// NewDiscovery returns a Discovery that logs to log.
+func NewDiscovery(log *slog.Logger) *Discovery { return &Discovery{log: log} }
+
+// Candidates returns the candidates, as the package's Candidates does.
+func (d *Discovery) Candidates(config string, getenv func(string) string, more ...Candidate) []Candidate {
+	out, skipped := candidates(config, getenv, d.log, more)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if skipped > 0 && skipped != d.skipped {
+		d.log.Warn("docker contexts skipped: over the limit read per tick", "skipped", skipped, "limit", maxContexts)
+	}
+	d.skipped = skipped
+	return out
+}
+
+// candidates returns Candidates, and the count of contexts not read.
+func candidates(config string, getenv func(string) string, log *slog.Logger, more []Candidate) ([]Candidate, int) {
+	skipped := 0
 	paths := []Candidate{{Socket: config, Trusted: true}}
 	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok {
 		paths = append(paths, Candidate{Socket: p, Trusted: true})
 	}
 	if home := getenv("HOME"); home != "" {
-		for _, p := range contextSockets(filepath.Join(home, ".docker"), log) {
+		var sockets []string
+		sockets, skipped = contextSockets(filepath.Join(home, ".docker"), log)
+		for _, p := range sockets {
 			paths = append(paths, Candidate{Socket: p})
 		}
 		paths = append(paths, Candidate{Socket: filepath.Join(home, ".docker", "run", "docker.sock"), Trusted: true})
@@ -60,20 +94,29 @@ func Candidates(config string, getenv func(string) string, log *slog.Logger, mor
 		at[resolved] = len(out)
 		out = append(out, c)
 	}
-	return out
+	return out, skipped
 }
 
 // maxMeta bounds the read of a context's meta.json: the docker CLI's are
 // a few hundred bytes.
 const maxMeta = 64 << 10
 
+// maxContexts bounds the Docker contexts read per tick: each read is
+// bounded, but 20,000 of them took 2 s of the source's 3 (#236).
+const maxContexts = 32
+
 // contextSockets returns the unix endpoint of each Docker context in dir,
 // as the docker CLI stores them: contexts/meta/<sha256 of name>/meta.json.
-// One that cannot be read is skipped.
-func contextSockets(dir string, log *slog.Logger) []string {
-	metas, _ := filepath.Glob(filepath.Join(dir, "contexts", "meta", "*", "meta.json"))
+// Only the first maxContexts by that name are read, so the choice is
+// stable; it returns the count of the others. One that cannot be read is
+// skipped.
+func contextSockets(dir string, log *slog.Logger) ([]string, int) {
+	meta := filepath.Join(dir, "contexts", "meta")
+	entries, _ := os.ReadDir(meta) // sorted by name
+	skipped := max(0, len(entries)-maxContexts)
 	var out []string
-	for _, m := range metas {
+	for _, e := range entries[:len(entries)-skipped] {
+		m := filepath.Join(meta, e.Name(), "meta.json")
 		b, err := readMeta(m)
 		if err != nil {
 			log.Debug("docker context skipped", "meta", m, "err", err)
@@ -90,7 +133,7 @@ func contextSockets(dir string, log *slog.Logger) []string {
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, skipped
 }
 
 // readMeta reads a context's meta.json, a file anything may write (#227,

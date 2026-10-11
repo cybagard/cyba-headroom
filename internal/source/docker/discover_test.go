@@ -1,6 +1,7 @@
 package docker_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -184,3 +187,97 @@ func TestAContextFileIsReadWithABound(t *testing.T) {
 
 // quiet is a logger that drops what it is given.
 var quiet = slog.New(slog.DiscardHandler)
+
+// warns records the warnings a logger is given.
+type warns struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (w *warns) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelWarn }
+func (w *warns) Handle(_ context.Context, r slog.Record) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.recs = append(w.recs, r)
+	return nil
+}
+func (w *warns) WithAttrs([]slog.Attr) slog.Handler { return w }
+func (w *warns) WithGroup(string) slog.Handler      { return w }
+
+// skipped returns the skipped count of each warning so far.
+func (w *warns) skipped() []int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []int64
+	for _, r := range w.recs {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "skipped" {
+				out = append(out, a.Value.Int64())
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// At most 32 Docker contexts are read per tick, the first by their
+// directory's name, so the choice is stable: 20,000 of them took 2 s to
+// read (#236). The skip is warned of once, and again only when the count
+// of those skipped changes.
+func TestAtMost32ContextsAreRead(t *testing.T) {
+	home := shortDir(t)
+	dirs := map[string]string{} // context dir name to its socket
+	for i := range 40 {
+		sock := listen(t, filepath.Join(home, fmt.Sprintf("%02d.sock", i)))
+		name := fmt.Sprintf("context-%02d", i)
+		dockerContext(t, home, name, "unix://"+sock)
+		sum := sha256.Sum256([]byte(name))
+		dirs[hex.EncodeToString(sum[:])] = sock
+	}
+	first := func() []docker.Candidate {
+		names := slices.Sorted(func(yield func(string) bool) {
+			for n := range dirs {
+				if !yield(n) {
+					return
+				}
+			}
+		})
+		var want []docker.Candidate
+		for _, n := range names[:min(32, len(names))] {
+			want = append(want, docker.Candidate{Socket: dirs[n]})
+		}
+		return want
+	}
+	w := &warns{}
+	d := docker.NewDiscovery(slog.New(w))
+	getenv := env(map[string]string{"HOME": home})
+	for range 3 {
+		if got, want := d.Candidates("", getenv), first(); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("candidates = %v, want the first 32 by name: %v", got, want)
+		}
+	}
+	if got := w.skipped(); fmt.Sprint(got) != "[8]" {
+		t.Fatalf("warnings of skipped contexts = %v over 3 ticks, want one, of 8", got)
+	}
+
+	// Four fewer: warned of again, once.
+	n := 0
+	for name := range dirs {
+		if n == 4 {
+			break
+		}
+		if err := os.RemoveAll(filepath.Join(home, ".docker", "contexts", "meta", name)); err != nil {
+			t.Fatal(err)
+		}
+		delete(dirs, name)
+		n++
+	}
+	for range 3 {
+		if got, want := d.Candidates("", getenv), first(); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("candidates = %v, want the first 32 by name: %v", got, want)
+		}
+	}
+	if got := w.skipped(); fmt.Sprint(got) != "[8 4]" {
+		t.Fatalf("warnings of skipped contexts = %v, want one of 8, then one of 4", got)
+	}
+}

@@ -125,6 +125,7 @@ func TestParse(t *testing.T) {
 		{"podman machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start"}},
 		{"podman machine start -q dev", Call{Kind: "machine", Op: "start", Command: "podman machine start dev", Target: "dev"}},
 		{"podman --connection remote machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start", Context: "remote"}},
+		{"podman machine start --log-level debug big", Call{Kind: "machine", Op: "start", Command: "podman machine start", Guessed: true}},
 		// Creating starts nothing: pod create has no --start (podman 6.1),
 		// and kube play --start=false only creates. --down tears down.
 		{"podman pod create --name web", Call{}},

@@ -482,9 +482,18 @@ func TestShimGatePodmanMachineStart(t *testing.T) {
 		!slices.Equal(inspected[1], []string{"machine", "inspect", "podman-machine-default"}) {
 		t.Fatalf("exit %d, asked %d, inspected %q", code, len(r.asked), inspected)
 	}
+	// Past a flag the parser does not know, the machine is a guess: not
+	// gated, rather than sized and keyed as the default machine (plan
+	// amendment 4).
+	r.execed = ""
+	code, stderr := r.run("podman", "machine", "start", "--log-level", "debug", "big")
+	if code != 0 || r.execed == "" || len(r.asked) != 2 || len(inspected) != 2 ||
+		!strings.Contains(stderr, "headroom: not gated (podman machine start: an option the shim does not know); running `podman machine start` anyway") {
+		t.Fatalf("guessed: exit %d, exec %q, asked %d, inspected %q, stderr %q", code, r.execed, len(r.asked), inspected, stderr)
+	}
 	r.machineAsk = func(string, []string) ([]byte, error) { return nil, errors.New("exit status 125") }
 	r.execed = ""
-	code, stderr := r.run("podman", "machine", "start", "gone")
+	code, stderr = r.run("podman", "machine", "start", "gone")
 	if code != 0 || r.execed == "" || len(r.asked) != 2 || !strings.Contains(stderr, "headroom: not gated (podman machine inspect: exit status 125); running `podman machine start gone` anyway") {
 		t.Fatalf("inspect failed: exit %d, exec %q, asked %d, stderr %q", code, r.execed, len(r.asked), stderr)
 	}

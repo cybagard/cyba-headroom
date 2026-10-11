@@ -232,3 +232,53 @@ func TestAPodStartOfRunningPodsTakesNoLease(t *testing.T) {
 		t.Fatalf("a start of a stopped pod took no lease: %+v", d)
 	}
 }
+
+// A pod start names a pod as Podman takes it: its name, else its full ID,
+// else an ID prefix of at least 12 hex characters that is no pod's name
+// (#230, plan amendment 4).
+func TestAPodStartByIDBindsItsPod(t *testing.T) {
+	const id = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+	for _, c := range []struct {
+		ref   string
+		binds bool
+	}{
+		{id, true},
+		{id[:12], true},
+		{id[:11], false},
+	} {
+		b, _, _ := book(t)
+		b.Observe(podmanSnap())
+		b.Check(podStart("w1", c.ref), podmanSnap(), cfg)
+		s := withPodContainer(podmanSnap(), "web-app", "web", id, gib/4)
+		b.Observe(s)
+		if ls := b.List(); len(ls) != 1 || (ls[0].Bytes == gib*3/4) != c.binds {
+			t.Errorf("pod start %s (%d chars): leases %+v, want bound %v", c.ref, len(c.ref), ls, c.binds)
+		}
+		// Running now, it is that pod: a start of it again takes no lease.
+		if d := b.Check(podStart("w1", c.ref), s, cfg); c.binds && d.LeaseID != "" {
+			t.Errorf("pod start %s of the running pod took a lease", c.ref)
+		}
+	}
+	// A 12-character prefix that is also a pod's name is that pod.
+	b, _, _ := book(t)
+	b.Observe(podmanSnap())
+	b.Check(podStart("w1", id[:12]), podmanSnap(), cfg)
+	s := withPodContainer(podmanSnap(), "web-app", "web", id, gib/4)
+	s = withPodContainer(s, "named-app", id[:12], "ffff", gib/2)
+	b.Observe(s)
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib/2 {
+		t.Fatalf("leases %+v, want the pod named %s bound", ls, id[:12])
+	}
+}
+
+// A kube play of a pod that runs is no no-op (--replace recreates it): it
+// takes a lease as any kube play does (#230, plan amendment 4).
+func TestAKubePlayOfARunningPodTakesALease(t *testing.T) {
+	b, _, _ := book(t)
+	s := withPodContainer(podmanSnap(), "web-app", "web", "a1b2c3", gib/4)
+	b.Observe(s)
+	r := policy.Request{Worktree: "w1", Kind: "pod", Op: "play", Command: "podman kube play", Target: "web", Pods: []string{"web"}}
+	if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID == "" {
+		t.Fatalf("check = %+v", d)
+	}
+}

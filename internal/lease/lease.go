@@ -580,7 +580,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already counts. Allowed, and no lease.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
-	if r.Kind == "pod" && s != nil && podsRun(s, r.Pods) {
+	if r.Kind == "pod" && r.Op == "start" && s != nil && podsRun(s, r.Pods) {
 		// Each of its pods runs: podman starts nothing, and their
 		// containers already count. Allowed, and no lease (#230, plan
 		// amendment 3).
@@ -738,14 +738,27 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	return d
 }
 
-// podsRun reports whether s shows a running container of each of pods,
-// by name; false for none.
+// podsRun reports whether s shows a running container of each of pods
+// (podIs); false for none.
 func podsRun(s *protocol.Snapshot, pods []string) bool {
-	running := map[string]bool{}
-	for _, c := range s.Containers() {
-		running[c.Pod] = c.Pod != ""
+	res := resources(s)
+	return len(pods) > 0 && !slices.ContainsFunc(pods, func(p string) bool {
+		return !slices.ContainsFunc(res, func(r resource) bool { return podIs(p, r) })
+	})
+}
+
+// podIs reports whether pod ref p, as a pod start names it, is container
+// r's pod, as Podman resolves one: its name, else its full ID, else a
+// prefix of its ID of at least 12 hex characters that is no pod's name in
+// the reading (#230, plan amendment 4).
+func podIs(p string, r resource) bool {
+	switch {
+	case r.pod == "" || p == "":
+		return false
+	case p == r.pod || p == r.podID:
+		return true
 	}
-	return len(pods) > 0 && !slices.ContainsFunc(pods, func(p string) bool { return !running[p] })
+	return len(p) >= 12 && strings.Trim(p, "0123456789abcdef") == "" && strings.HasPrefix(r.podID, p) && !r.podNames[p]
 }
 
 // resource is a container or VM in a snapshot.
@@ -768,9 +781,10 @@ type resource struct {
 	worktree string // "" when unattributed
 	pod      string // the Podman pod a container is in, and its ID
 	podID    string
-	os       string // a VM's OS
-	runPID   int    // a VM's tart run process
-	runPIDs  []int  // every tart run of the VM: none in an old or fake reading
+	podNames map[string]bool // every pod's name in the reading, for podIs
+	os       string          // a VM's OS
+	runPID   int             // a VM's tart run process
+	runPIDs  []int           // every tart run of the VM: none in an old or fake reading
 	// bytes is what the budget counts for it: a container's memory, a VM's
 	// configured memory.
 	bytes uint64
@@ -805,9 +819,13 @@ func resources(s *protocol.Snapshot) []resource {
 		}
 	}
 	var out []resource
+	podNames := map[string]bool{}
+	for _, c := range s.Containers() {
+		podNames[c.Pod] = c.Pod != ""
+	}
 	for _, c := range s.Containers() {
 		r := containerResource(c.ID, c.Name, c.Labels)
-		r.worktree, r.bytes, r.pod, r.podID = owner[r.key], c.MemoryBytes, c.Pod, c.PodID
+		r.worktree, r.bytes, r.pod, r.podID, r.podNames = owner[r.key], c.MemoryBytes, c.Pod, c.PodID, podNames
 		out = append(out, r)
 	}
 	if s.Podman != nil {
@@ -1870,11 +1888,9 @@ func (e *entry) hasKey() bool {
 		len(e.pods) > 0
 }
 
-// inPods reports whether container r is in one of e's pods, by its name
-// exactly: pod IDs are hex, so a name may be a prefix of another pod's ID
-// (#230, plan amendment 3).
+// inPods reports whether container r is in one of e's pods (podIs).
 func (e *entry) inPods(r resource) bool {
-	return r.pod != "" && slices.Contains(e.pods, r.pod)
+	return slices.ContainsFunc(e.pods, func(p string) bool { return podIs(p, r) })
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and

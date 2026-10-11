@@ -32,6 +32,9 @@ type Call struct {
 	Targets []string
 	// KubeFiles are a kube play's files, as given: "-" is stdin.
 	KubeFiles []string
+	// Guessed is set for a machine start past an option the parser does
+	// not know: which machine it starts is a guess (#230).
+	Guessed bool
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
@@ -202,6 +205,7 @@ func parsePodman(engine Call, args []string) Call {
 	}
 	words := []string{"podman", args[0], args[1]}
 	if guessed {
+		c.Guessed = c.Kind == "machine"
 		return c.named(words) // past a guess, a positional may be a flag's value
 	}
 	if c.Op == "play" {

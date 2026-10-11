@@ -150,6 +150,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		return gated{proceed: true}
 	}
 	h := e.withDefaults()
+	if c.Kind == "machine" && c.Guessed {
+		// Which machine it starts is a guess: not the default's to size
+		// or key (R7, #230 plan amendment 4).
+		notGated(e, "podman machine start: an option the shim does not know", c.Command)
+		return gated{proceed: true}
+	}
 	if c.Kind == "machine" {
 		// The machine's own memory, and its name: the default machine's
 		// when the call names none (#230).

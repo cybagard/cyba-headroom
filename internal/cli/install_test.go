@@ -1010,8 +1010,8 @@ func TestUninstallKeepsAConfigDirWithAConfig(t *testing.T) {
 	}
 }
 
-// In the both state, Homebrew's daemon holds the lock: it stays, and so
-// does the config dir that holds it (#194).
+// A daemon outside launchd (`headroom daemon` in a terminal) holds the
+// lock: it stays, and so does the config dir that holds it (#194).
 func TestUninstallKeepsALockAnotherDaemonHolds(t *testing.T) {
 	f := newInstallFixture(t)
 	if err := os.Remove(filepath.Join(f.cfg, "config.toml")); err != nil {
@@ -1020,8 +1020,7 @@ func TestUninstallKeepsALockAnotherDaemonHolds(t *testing.T) {
 	if code := f.in.install(context.Background()); code != 0 {
 		t.Fatalf("install: exit %d: %s", code, f.errb.String())
 	}
-	f.writeBrewPlist(t, "sh.brew.headroom.plist")
-	ln, err := daemon.Listen(f.in.socket) // Homebrew's daemon
+	ln, err := daemon.Listen(f.in.socket) // the terminal daemon
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -160,11 +160,11 @@ func (r *dayReader) sample(line []byte) error {
 		r.st.Skipped++
 		return nil
 	}
-	if s.V < Version {
-		r.st.Outdated++
+	if s.T.Before(r.from) || !s.T.Before(r.to) {
 		return nil
 	}
-	if s.T.Before(r.from) || !s.T.Before(r.to) {
+	if s.V < Version {
+		r.st.Outdated++
 		return nil
 	}
 	key := s.T.UnixNano()

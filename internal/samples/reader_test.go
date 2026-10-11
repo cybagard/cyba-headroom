@@ -261,4 +261,9 @@ func TestReadSkipsV1SamplesWithANote(t *testing.T) {
 	if len(got) != 6 || st.Outdated != 1 || st.Skipped != 0 {
 		t.Fatalf("got %d samples, stats %+v; want 6 read and 1 outdated", len(got), st)
 	}
+	// One outside the range is not counted: its day file is read only
+	// because it may overlap.
+	if _, st = readAll(t, dir, day1.Add(24*time.Hour), day1.Add(25*time.Hour+time.Minute)); st.Outdated != 0 {
+		t.Fatalf("stats %+v; want no outdated sample in range", st)
+	}
 }

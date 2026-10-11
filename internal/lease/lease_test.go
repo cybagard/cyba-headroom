@@ -3439,3 +3439,112 @@ func TestANamedUpWithNoDirInAnUnnamedUpsDirBindsItsOwnStack(t *testing.T) {
 		t.Fatalf("q's lease warned: %s", log)
 	}
 }
+
+// w1's unnamed up in /src/a, and w1's named up of project q whose shim sent
+// the wrong dir (#208): q's container, labelled with /src/a, starts. Its
+// start event, unattributed, cannot bind q's lease, and leaves it to the
+// reading rather than to the unnamed lease: q's lease binds it, the
+// unnamed one does not, and q's lease never warns "never appeared" (#232
+// F1).
+func TestAStartEventLeavesANamedLeasesContainerToTheReading(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	q := qUp()
+	q.ComposeDir = "/src/b"
+	n := b.Check(q, snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "q1", "q1", l)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	if got, ub := lease.Bound(b, n.LeaseID), lease.Bound(b, u.LeaseID); !slices.Equal(got, []string{"container:q1"}) || len(ub) != 0 {
+		t.Fatalf("q's lease bound %v, the unnamed one %v, want q's q1", got, ub)
+	}
+	for range 4 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	}
+	if strings.Contains(log.String(), "lease="+n.LeaseID+" ") && strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("q's lease warned: %s", log)
+	}
+}
+
+// q's stack runs in /src/a once q's lease ended; then w1's unnamed up in
+// /src/a holds it, and a repeat -p q up takes it from that hold, as its
+// own stack's: it never warns "never appeared" (#232 F3).
+func TestARepeatNamedUpTakesItsRunningStackFromAnUnnamedUpsHold(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(qUp(), snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	running := func() *protocol.Snapshot {
+		s := read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: 2 * gib, Labels: l}, "w1"), c.t)
+		s.CollectedAt = c.t
+		return s
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(running()) // it uses the lease's cost: the lease ends
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want q's first ended", l)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	u := b.Check(unnamedUp("w1", "/src/a"), running(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	q := b.Check(qUp(), running(), cfg)
+	if got, ub := lease.Bound(b, q.LeaseID), lease.Bound(b, u.LeaseID); !slices.Equal(got, []string{"container:q1"}) || len(ub) != 0 {
+		t.Fatalf("q's lease bound %v, the unnamed one %v, want q's q1", got, ub)
+	}
+	for range 4 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(running())
+	}
+	if strings.Contains(log.String(), "lease="+q.LeaseID+" ") && strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("q's lease warned: %s", log)
+	}
+}
+
+// A container of project q that w1's unnamed up started, no named lease
+// keying it, stays the unnamed lease's: a later -p q up takes only what an
+// unnamed lease holds, not what it started (#232 F3, plan amendment 1).
+func TestANamedUpDoesNotTakeWhatAnUnnamedUpStarted(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	running := read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib / 2, Labels: l}, "w1"), c.t)
+	c.t = c.t.Add(5 * time.Second)
+	running.CollectedAt = c.t
+	b.Observe(running)
+	q := b.Check(qUp(), running, cfg)
+	if got, ub := lease.Bound(b, q.LeaseID), lease.Bound(b, u.LeaseID); len(got) != 0 || !slices.Equal(ub, []string{"container:q1"}) {
+		t.Fatalf("q's lease bound %v, the unnamed one %v, want the unnamed one's q1", got, ub)
+	}
+}
+
+// w1's -p q up in /src/a lapses before q's container comes (a slow pull);
+// then w1's unnamed up in /src/a does not hold it: the lapsed lease of its
+// project keys it (#232 F3).
+func TestAnUnnamedUpDoesNotHoldWhatALapsedNamedLeaseKeys(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(qUp(), snap(), cfg)
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(read(snap(), c.t)) // it lapses
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	running := func() *protocol.Snapshot {
+		s := read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t)
+		s.CollectedAt = c.t
+		return s
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(running())
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want q's lapsed", l)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	u := b.Check(unnamedUp("w1", "/src/a"), running(), cfg)
+	if got := lease.Bound(b, u.LeaseID); len(got) != 0 {
+		t.Fatalf("the unnamed lease bound %v, want none", got)
+	}
+}

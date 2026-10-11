@@ -321,6 +321,16 @@ func ofStack(r policy.Request, project, dir string) bool {
 	return project == r.Target
 }
 
+// namedKeys reports whether an open or lapsed compose lease of worktree wt
+// that is not unnamed keys x: x is its project's, which an unnamed up in
+// x's dir does not hold (#232).
+func (b *Book) namedKeys(wt string, x resource) bool {
+	named := func(o *entry) bool {
+		return o.Kind == "compose" && !o.unnamed && o.Worktree == wt && o.key(x, b.based[source(x.kind)])
+	}
+	return slices.ContainsFunc(b.open, named) || slices.ContainsFunc(b.lapsed, named)
+}
+
 // downServices are the services of r's stack (ofStack) in r.Worktree,
 // one-offs aside, whose containers the book last saw stop, die or go, and
 // that none of its containers runs: an up starts them again (#112).
@@ -507,7 +517,8 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.Kind == "compose" && r.Op != "run" && (r.Target != "" || unnamed(r)) && !r.Guessed && r.Worktree != "" && r.OnEngine && s != nil {
 		for _, x := range resources(s) {
 			// Not one Docker's events said exited since (compose stop).
-			if x.kind == "compose" && !x.oneoff && ofStack(r, x.project, x.dir) && x.worktree == r.Worktree && !b.seen[x.key].gone {
+			if x.kind == "compose" && !x.oneoff && ofStack(r, x.project, x.dir) && x.worktree == r.Worktree && !b.seen[x.key].gone &&
+				(!unnamed(r) || !b.namedKeys(r.Worktree, x)) {
 				stack = append(stack, x)
 			}
 		}
@@ -678,8 +689,18 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// compose up -d of a stack that already runs, once its lease
 		// ended: its running containers are this lease's, so it never logs
 		// "never appeared" when the up starts nothing new. They are held
-		// (entry.held). Only those held by no lease.
+		// (entry.held). Only those held by no lease, or, for a named call,
+		// only held by an unnamed lease of its worktree, which keys every
+		// project in its dir (#232).
 		for _, x := range stack {
+			if !e.bound[x.key] && !unnamed(r) {
+				for _, o := range b.open {
+					if o.unnamed && o.Worktree == e.Worktree && o.held[x.key] {
+						delete(o.bound, x.key)
+						delete(o.held, x.key)
+					}
+				}
+			}
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
 				e.held[x.key], e.found = true, true
@@ -1399,8 +1420,9 @@ func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels ma
 		case e.oneoff && !r.oneoff && b.verdicts[r.key] != nil:
 			return // a crash-looping service is no new dependency of a compose run
 		case tied(b.open, r, e):
-			// Two worktrees' leases match it equally, and an event says
-			// nothing of whose it is: the reading's attribution decides.
+			// Two worktrees' leases match it equally, or an unnamed one and
+			// one of its project that only the reading binds, and an event
+			// says nothing of whose it is: the reading decides.
 			return
 		}
 		if from != nil {
@@ -1714,8 +1736,16 @@ func rank(e *entry, r resource) int {
 // tied reports whether another worktree's lease in es keys r as surely as
 // e does, open: only r's attribution can tell them apart. The dir breaks
 // the tie only for e (keyed): when o's dir is r's, o may be a guess, which
-// keyed cannot pick at an event (#109).
+// keyed cannot pick at an event (#109). So does, when e is unnamed, a lease
+// of r's project in e's worktree that keys r but cannot bind it at the
+// event (a dir the shim got wrong, #208): the reading picks it (keyed,
+// #232).
 func tied(es []*entry, r resource, e *entry) bool {
+	if e.unnamed && slices.ContainsFunc(es, func(o *entry) bool {
+		return o.Kind == "compose" && !o.unnamed && o.Worktree == e.Worktree && o.project == r.project && o.key(r, true) && !o.binds(r, true, true)
+	}) {
+		return true
+	}
 	return slices.ContainsFunc(es, func(o *entry) bool {
 		// A manual call's lease reserves nothing: the worktree's wins, as
 		// in keyed. A guess keys only its worktree's (entry.guessed), and

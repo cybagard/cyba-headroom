@@ -72,6 +72,9 @@ type mcont struct {
 	// not absent for the timeout since; owned goes with it.
 	owned, pending, verdict bool
 	verdictAt               time.Time
+	// undecided is set while the last reading, with no attribution, left it
+	// new (undecides).
+	undecided bool
 	// guess is the guessed up that started it as its own stack's (a hit),
 	// until its first reading, which decides whether the guess binds it, or
 	// another call's start, whose lease it is then (lease.go keyed).
@@ -722,7 +725,8 @@ func (m *model) tick() {
 	m.ticks++
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
 	for _, x := range m.conts {
-		if x.running && !x.missing {
+		x.undecided = m.undecides(x)
+		if x.running && !x.missing && !x.undecided {
 			// A hit's container the last reading before its start showed is
 			// not new to its first (shown): back after missing it, it is
 			// back as any other (#168 F4).
@@ -778,7 +782,7 @@ func (m *model) judge() {
 	}
 	for _, x := range m.conts {
 		switch {
-		case !x.miss || !shows(x) || x.judged != unjudged:
+		case !x.miss || !shows(x) || x.judged != unjudged || x.undecided:
 		case !x.unbound:
 			x.judged = judgedBaseline
 		case slices.ContainsFunc(m.of(x.project, x.wt), func(y *mcont) bool { return y != x && gated[y] }):
@@ -786,7 +790,7 @@ func (m *model) judge() {
 		default:
 			x.judged = judgedUngated
 		}
-		if shows(x) {
+		if shows(x) && !x.undecided {
 			x.unbound = false
 		}
 	}
@@ -902,6 +906,26 @@ func (m *model) binder(x *mcont) string {
 	}
 	if g := m.guessOf(x); g != "" && !m.flick {
 		return g
+	}
+	return ""
+}
+
+// undecides reports whether this reading, which lost its attribution,
+// leaves x new (lease.go undecides): x, of a project, is new to it, with no
+// verdict, and binds no lease, but another worktree's open up of its
+// project keys it but for its dir. The next reading with attribution reads
+// it as new.
+func (m *model) undecides(x *mcont) bool {
+	return m.flick && x.running && !x.missing && x.project != "" && x.read <= x.began && !x.shown && !x.verdict &&
+		!m.bound(x) && m.binder(x) == "" && m.upElsewhere(x) != ""
+}
+
+// upElsewhere is the oldest open up of x's project in another worktree.
+func (m *model) upElsewhere(x *mcont) string {
+	for _, l := range m.b.List() {
+		if l.Worktree != x.wt && m.leases[l.ID] == upCommand(x.project) {
+			return l.ID
+		}
 	}
 	return ""
 }
@@ -1933,26 +1957,64 @@ func TestTheLeaseModelOnAnotherWorktreesUpAtAReading(t *testing.T) {
 // containers, while only another worktree's up of their project is open,
 // bind nothing of that up, which knows another dir (lease.go entry.binds,
 // #208): not at their start event, nor at a first reading with no
-// attribution, and the guess keys only what a reading attributes (lease.go
-// keyed). w1's up of app starts c1 and c2; w2's guessed hit of app starts
-// c3 and c4; a flicker.
+// attribution, which leaves them new (lease.go undecides), as the guess
+// keys only what a reading attributes (lease.go keyed). The next reading
+// binds them to the guess. w1's up of app starts c1 and c2; w2's guessed
+// hit of app starts c3 and c4; a flicker; a tick.
 func TestTheLeaseModelOnATiedHitThenAFlicker(t *testing.T) {
 	m := newModel(t)
+	m.diff = true
 	m.runOK(op{0, 2, 0}) // w1: compose up app starts c1 and c2
 	m.runOK(op{2, 3, 1}) // w2: a guessed hit of app starts c3 and c4
-	unbound := func(when string) {
+	ls := m.b.List()
+	guess := ls[len(ls)-1].ID
+	bound := func(when, want string) {
 		for _, x := range m.of("app", "w2") {
-			if m.bound(x) {
-				t.Errorf("%s, %s bound by %q, want by nothing, as in the book", when, x.id, x.boundBy)
+			if x.boundBy != want || x.heldBy != "" {
+				t.Errorf("%s, %s bound by %q (held by %q), want by %q, as in the book", when, x.id, x.boundBy, x.heldBy, want)
 			}
 		}
 	}
-	unbound("at its start")
+	bound("at its start", "")
 	m.runOK(op{10, 1, 0}) // tick: a flicker ((1 + 7) % 8)
 	if !m.flick {
 		t.Fatal("the reading had attribution, want a flicker")
 	}
-	unbound("after the flicker")
+	bound("after the flicker", "")
+	m.runOK(op{10, 0, 0}) // tick
+	if m.flick {
+		t.Fatal("the reading was a flicker, want attribution")
+	}
+	bound("after the next reading", guess)
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAnUndecidedContainerMissingAReading plays seed 7897,
+// shrunk: a guessed hit's container that a flicker left new (lease.go
+// undecides) is missing from the next reading and back in the one after.
+// It is still new then, so it binds the guess as the call's, not held as
+// one back after a reading it was missing from. w1's up of app starts c1
+// and c2; w2's guessed hit of app starts c3 and c4; a flicker; c3 missing
+// from a reading; a tick.
+func TestTheLeaseModelOnAnUndecidedContainerMissingAReading(t *testing.T) {
+	m := newModel(t)
+	m.diff = true
+	m.runOK(
+		op{0, 2, 0}, // w1: compose up app starts c1 and c2
+		op{2, 3, 1}, // w2: a guessed hit of app starts c3 and c4
+	)
+	ls := m.b.List()
+	guess := ls[len(ls)-1].ID
+	m.runOK(
+		op{10, 1, 0}, // tick: a flicker ((1 + 7) % 8)
+		op{16, 0, 2}, // c3 missing from a reading ((0 + 14) % 8: attributed)
+		op{10, 0, 0}, // tick: c3 is back
+	)
+	if c3 := m.conts[2]; c3.boundBy != guess || c3.heldBy != "" {
+		t.Errorf("%s bound by %q (held by %q), want by the guess %s, as in the book", c3.id, c3.boundBy, c3.heldBy, guess)
+	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))
 	}

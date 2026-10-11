@@ -2990,6 +2990,35 @@ func TestAHandLabelledContainerBindsNoComposeLease(t *testing.T) {
 	}
 }
 
+// A docker run labelled by hand with w1's project name, no working dir,
+// its own lease over, missing from two readings and back, whatever the
+// reading attributes it to, w1 included: it binds nothing of w1's up, which
+// knows its dir, and whose reservation stands (#109, #208 review B2).
+func TestAHandLabelledContainerInAnyWorktreeBindsNoComposeLease(t *testing.T) {
+	for _, wt := range []string{"", "w1", "w2"} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker run -l com.docker.compose.project=app img",
+			CostBytes: gib, Labelled: true}, snap(), cfg)
+		dressed := func() *protocol.Snapshot {
+			return addContainer(snap(), protocol.Container{ID: "x1", Name: "x1", MemoryBytes: gib,
+				Labels: map[string]string{protocol.ComposeProjectLabel: "app", protocol.LeaseLabel: d.LeaseID}}, wt)
+		}
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(dressed(), c.t)) // it uses its lease's cost: the lease ends
+		b.Check(upIn("w1", "/src/a"), snap(), cfg)
+		for range 2 { // missing: gone
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(snap(), c.t))
+		}
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(dressed(), c.t))
+		if got := reserved(b); got != 2*gib {
+			t.Errorf("attributed %q: reserved = %d MiB, want w1's up's 2048 MiB: %+v", wt, got>>20, b.List())
+		}
+	}
+}
+
 // An up whose Compose file lies outside its worktree binds its stack, the
 // only match, at its start event and at a reading (#109); one whose shim
 // sent a dir Compose did not label its stack with binds it at a reading
@@ -3014,6 +3043,33 @@ func TestAComposeLeaseBindsItsStackOutsideItsDir(t *testing.T) {
 			if strings.Contains(log.String(), "never appeared") || len(b.Ungated()) > 0 {
 				t.Errorf("%s (event %v): its stack bound nothing: ungated %+v\n%s", tc.name, event, b.Ungated(), log)
 			}
+		}
+	}
+}
+
+// An up whose shim sent a dir Compose did not label its stack with (#109),
+// whose stack's first reading has no attribution (a flicker): that reading
+// leaves it new, and the next, which attributes it to the up's worktree,
+// binds it, with or without a start event before (#208).
+func TestAWrongDirUpBindsItsStackAfterAnUnattributedFirstReading(t *testing.T) {
+	for _, event := range []bool{true, false} {
+		b, c, log := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(upIn("w1", "/src/a/compose.yaml;b"), snap(), cfg)
+		c.t = c.t.Add(time.Second)
+		if event {
+			b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+		}
+		for i := range 25 { // past the timeout
+			c.t = c.t.Add(5 * time.Second)
+			wt := "w1"
+			if i == 0 {
+				wt = "" // a flicker
+			}
+			b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, wt), c.t))
+		}
+		if strings.Contains(log.String(), "never appeared") || len(b.Ungated()) > 0 {
+			t.Errorf("event %v: its stack bound nothing: ungated %+v\n%s", event, b.Ungated(), log)
 		}
 	}
 }

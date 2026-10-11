@@ -7,16 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
-// engines collects once from a source that finds the given sockets.
+// engines collects once from a source that finds the given trusted sockets.
 func engines(t *testing.T, vms vmproc.Lister, sockets ...string) []protocol.Engine {
 	t.Helper()
-	src := docker.Discover(func() []string { return sockets }, vms)
+	var cands []docker.Candidate
+	for _, s := range sockets {
+		cands = append(cands, docker.Candidate{Socket: s, Trusted: true})
+	}
+	return found(t, vms, cands...)
+}
+
+// found collects once from a source that finds the given candidates.
+func found(t *testing.T, vms vmproc.Lister, cands ...docker.Candidate) []protocol.Engine {
+	t.Helper()
+	src := docker.Discover(func() []docker.Candidate { return cands }, vms)
 	r, err := src.Collect(context.Background())
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -131,7 +142,9 @@ func TestCPUPerEngine(t *testing.T) {
 	}
 	a, setA := engine(t, route("00000000-0000-4000-8000-000000000001"))
 	b, _ := engine(t, route("00000000-0000-4000-8000-000000000002"))
-	src := docker.Discover(func() []string { return []string{a, b} }, fakeVMs{})
+	src := docker.Discover(func() []docker.Candidate {
+		return []docker.Candidate{{Socket: a, Trusted: true}, {Socket: b, Trusted: true}}
+	}, fakeVMs{})
 	collectOnce := func() []protocol.Engine {
 		r, err := src.Collect(context.Background())
 		if err != nil {
@@ -147,5 +160,66 @@ func TestCPUPerEngine(t *testing.T) {
 	pa, pb := got[0].Containers[0].CPUPercent, got[1].Containers[0].CPUPercent
 	if pa == nil || *pa != 400 || pb == nil || *pb != 0 {
 		t.Fatalf("cpu = %v, %v, want 400 and 0", fmt.Sprint(pa), fmt.Sprint(pb))
+	}
+}
+
+// collectWithin collects once from cands, as the daemon does, bounded by
+// its default source timeout.
+func collectWithin(t *testing.T, cands ...docker.Candidate) ([]protocol.Engine, time.Duration, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	r, err := docker.Discover(func() []docker.Candidate { return cands }, fakeVMs{}).Collect(ctx)
+	took := time.Since(start)
+	if err != nil {
+		return nil, took, err
+	}
+	var s protocol.Snapshot
+	r.Apply(&s)
+	return s.Engines, took, nil
+}
+
+// A context's socket that answers, but not as Docker does, is an engine not
+// running; the engines after it are read as ever (#227, amendment 3).
+func TestAContextThatIsNotDockerIsNotRunning(t *testing.T) {
+	other, _ := engine(t, map[string]string{"/info": `{"hello":"world"}`})
+	got, _, err := collectWithin(t, docker.Candidate{Socket: other}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
+	if err != nil {
+		t.Fatalf("Collect: %v, want a reading", err)
+	}
+	if len(got) != 2 || got[0].Socket != other || got[0].Running || !got[1].Running || len(got[1].Containers) != 1 {
+		t.Fatalf("engines = %+v, want the context's not running, then the engine with its container", got)
+	}
+}
+
+// A context's socket that accepts and never answers holds the reading up
+// for a second at most, well within the source timeout.
+func TestAContextThatNeverAnswersIsNotRunning(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "mute.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		var held []net.Conn
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				for _, c := range held {
+					_ = c.Close()
+				}
+				return
+			}
+			held = append(held, c) // read nothing, answer nothing
+		}
+	}()
+	got, took, err := collectWithin(t, docker.Candidate{Socket: sock}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
+	if err != nil {
+		t.Fatalf("Collect: %v after %v, want a reading", err, took)
+	}
+	if took > 2*time.Second || len(got) != 2 || got[0].Running || !got[1].Running {
+		t.Fatalf("engines = %+v after %v, want the context's not running, quickly", got, took)
 	}
 }

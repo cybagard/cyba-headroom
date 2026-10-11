@@ -3,6 +3,7 @@
 package docker_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,5 +39,35 @@ func TestRealDockerDesktop(t *testing.T) {
 	}
 	if len(want) > 0 && (!d.VMRunning || d.VMFootprintBytes == 0) {
 		t.Fatalf("containers running but VM running=%v footprint=%d", d.VMRunning, d.VMFootprintBytes)
+	}
+}
+
+// A context naming a file that is no socket (ENOTSOCK on macOS) is an
+// engine not running, and the engine after it is read as ever (#227,
+// amendment 3).
+func TestAContextNamingAFileIsNotRunning(t *testing.T) {
+	file := filepath.Join(shortDir(t), "hosts")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := collectWithin(t, docker.Candidate{Socket: file}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
+	if err != nil {
+		t.Fatalf("Collect: %v, want a reading", err)
+	}
+	if len(got) != 2 || got[0].Socket != file || got[0].Running || !got[1].Running || len(got[1].Containers) != 1 {
+		t.Fatalf("engines = %+v, want the file's not running, then the engine with its container", got)
+	}
+}
+
+// A trusted socket that fails other than by being absent or refusing still
+// fails the reading: the last good one stands.
+func TestATrustedNonSocketFailsTheReading(t *testing.T) {
+	file := filepath.Join(shortDir(t), "docker.sock")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := docker.Discover(func() []docker.Candidate { return []docker.Candidate{{Socket: file, Trusted: true}} }, fakeVMs{})
+	if _, err := src.Collect(context.Background()); err == nil {
+		t.Fatal("Collect: want an error for a configured socket that is no socket")
 	}
 }

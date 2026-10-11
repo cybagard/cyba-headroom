@@ -37,7 +37,7 @@ type Source struct {
 	// New's. They may run concurrently with each other and with Collect.
 	socket     string
 	one        *http.Client
-	candidates func() []string
+	candidates func() []Candidate
 	vms        vmproc.Lister
 	clients    map[string]*http.Client
 
@@ -51,25 +51,33 @@ type cpuCounters struct{ container, system uint64 }
 
 // New returns a source for the Engine API at socket alone.
 func New(socket string, vms vmproc.Lister) *Source {
-	s := Discover(func() []string { return Candidates(socket, func(string) string { return "" }) }, vms)
+	s := Discover(func() []Candidate { return Candidates(socket, func(string) string { return "" }) }, vms)
 	s.socket, s.one = socket, dial(socket)
 	return s
 }
 
 // Discover returns a source for the engines on the sockets candidates
 // returns, asked afresh each tick: Candidates, for the daemon.
-func Discover(candidates func() []string, vms vmproc.Lister) *Source {
+func Discover(candidates func() []Candidate, vms vmproc.Lister) *Source {
 	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prevCPU: map[string]map[string]cpuCounters{}}
 }
 
-// client returns Collect's HTTP client for socket, made once.
-func (s *Source) client(socket string) *http.Client {
-	c, ok := s.clients[socket]
+// untrustedLimit bounds each call to an untrusted candidate (#227,
+// amendment 3): one that never answers must not hold up the reading.
+const untrustedLimit = time.Second
+
+// client returns Collect's HTTP client for a candidate, made once.
+func (s *Source) client(c Candidate) *http.Client {
+	key := fmt.Sprint(c.Trusted, " ", c.Socket)
+	h, ok := s.clients[key]
 	if !ok {
-		c = dial(socket)
-		s.clients[socket] = c
+		h = dial(c.Socket)
+		if !c.Trusted {
+			h.Timeout = untrustedLimit
+		}
+		s.clients[key] = h
 	}
-	return c
+	return h
 }
 
 // dial returns an HTTP client for the engine at socket.
@@ -85,41 +93,31 @@ func dial(socket string) *http.Client {
 // Name implements daemon.Source.
 func (s *Source) Name() string { return "docker" }
 
+// errSeen is a candidate whose engine an earlier candidate reached.
+var errSeen = errors.New("docker: engine seen already")
+
 // Collect implements daemon.Source. Each candidate socket answers /info;
 // those that answer with one ID are one engine, by the first of them. A
-// socket that refuses is an engine that is not running. Any other failure
-// fails the reading: the last good one stands, rather than one missing an
-// engine's containers.
+// socket that is missing or refuses is an engine that is not running, and
+// so is an untrusted one (a context's) that fails in any way: a file
+// anything may write must not hide the other engines (amendment 3). Any
+// other failure of a trusted one fails the reading: the last good one
+// stands, rather than one missing an engine's containers.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	engines := []protocol.Engine{}
 	seen := map[string]bool{}
 	cpu := map[string]map[string]cpuCounters{}
-	for _, sock := range s.candidates() {
-		c := s.client(sock)
-		var info struct {
-			ID       string
-			MemTotal uint64
-		}
-		if err := get(ctx, c, "/info", &info); err != nil {
-			if notRunning(err) {
-				engines = append(engines, protocol.Engine{Socket: sock, Containers: []protocol.Container{}})
-				continue
-			}
-			return nil, err
-		}
-		id := cmp.Or(info.ID, sock)
-		if seen[id] {
+	for _, cand := range s.candidates() {
+		e, counters, err := s.read(ctx, cand, seen)
+		switch {
+		case errors.Is(err, errSeen):
 			continue
-		}
-		seen[id] = true
-		var version apiVersion
-		if err := get(ctx, c, "/version", &version); err != nil {
-			return nil, err
-		}
-		e := protocol.Engine{Kind: version.kind(), Socket: sock, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
-		var err error
-		e.Containers, cpu[id], err = containers(ctx, c, s.prevCPU[id])
-		if err != nil {
+		case err == nil:
+			id := cmp.Or(e.ID, e.Socket)
+			seen[id], cpu[id] = true, counters
+		case notRunning(err) || !cand.Trusted:
+			e = protocol.Engine{Socket: cand.Socket, Containers: []protocol.Container{}}
+		default:
 			return nil, err
 		}
 		engines = append(engines, e)
@@ -127,6 +125,31 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	s.prevCPU = cpu // engines and containers that are gone drop out
 	s.vmCost(ctx, engines)
 	return reading{engines}, nil
+}
+
+// read reads the engine at cand, unless an engine in seen answers there.
+func (s *Source) read(ctx context.Context, cand Candidate, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
+	c := s.client(cand)
+	var info struct {
+		ID       string
+		MemTotal uint64
+	}
+	if err := get(ctx, c, "/info", &info); err != nil {
+		return protocol.Engine{}, nil, err
+	}
+	id := cmp.Or(info.ID, cand.Socket)
+	if seen[id] {
+		return protocol.Engine{}, nil, errSeen
+	}
+	var version apiVersion
+	if err := get(ctx, c, "/version", &version); err != nil {
+		return protocol.Engine{}, nil, err
+	}
+	e := protocol.Engine{Kind: version.kind(), Socket: cand.Socket, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
+	var counters map[string]cpuCounters
+	var err error
+	e.Containers, counters, err = containers(ctx, c, s.prevCPU[id])
+	return e, counters, err
 }
 
 // vmCost fills in each running engine's VM. Docker Desktop's VM process

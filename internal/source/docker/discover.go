@@ -7,36 +7,47 @@ import (
 	"strings"
 )
 
+// Candidate is a socket an engine may answer on. Trusted is false for one
+// only a Docker context names: a file anything may write (#227).
+type Candidate struct {
+	Socket  string
+	Trusted bool
+}
+
 // Candidates returns the Unix sockets an engine may answer on, in order
 // (#227): the configured socket, a unix:// DOCKER_HOST, the unix endpoint of
 // every Docker context, and Docker Desktop's per-user socket. A TCP endpoint
 // is a remote engine whose memory is not this Mac's. A path that does not
 // exist is left out without dialing, and a socket named twice, directly or
-// through a link, comes once, by its first name.
-func Candidates(config string, getenv func(string) string) []string {
-	paths := []string{config}
+// through a link, comes once, by its first name; it is trusted if any name
+// of it is.
+func Candidates(config string, getenv func(string) string) []Candidate {
+	paths := []Candidate{{config, true}}
 	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok {
-		paths = append(paths, p)
+		paths = append(paths, Candidate{p, true})
 	}
 	if home := getenv("HOME"); home != "" {
-		paths = append(paths, contextSockets(filepath.Join(home, ".docker"))...)
-		paths = append(paths, filepath.Join(home, ".docker", "run", "docker.sock"))
+		for _, p := range contextSockets(filepath.Join(home, ".docker")) {
+			paths = append(paths, Candidate{p, false})
+		}
+		paths = append(paths, Candidate{filepath.Join(home, ".docker", "run", "docker.sock"), true})
 	}
-	var out []string
-	seen := map[string]bool{}
-	for _, p := range paths {
-		if p == "" {
+	var out []Candidate
+	at := map[string]int{}
+	for _, c := range paths {
+		if c.Socket == "" {
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(p)
+		resolved, err := filepath.EvalSymlinks(c.Socket)
 		if err != nil {
 			continue // missing
 		}
-		if seen[resolved] {
+		if i, ok := at[resolved]; ok {
+			out[i].Trusted = out[i].Trusted || c.Trusted
 			continue
 		}
-		seen[resolved] = true
-		out = append(out, p)
+		at[resolved] = len(out)
+		out = append(out, c)
 	}
 	return out
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -310,5 +311,26 @@ func TestCheckWithoutAChecker(t *testing.T) {
 	_, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck, Check: &protocol.CheckRequest{}})
 	if err == nil || !strings.Contains(err.Error(), "check") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The daemon that takes the lock writes its PID into the lock file,
+// replacing what an earlier holder wrote, so a daemon refused can name the
+// holder (#194).
+func TestListenRecordsTheHoldersPID(t *testing.T) {
+	path := sockPath(t)
+	if err := os.WriteFile(path+".lock", []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := daemon.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if b, err := os.ReadFile(path + ".lock"); err != nil || string(b) != strconv.Itoa(os.Getpid())+"\n" {
+		t.Fatalf("lock holds %q, %v; want this PID", b, err)
+	}
+	if pid, err := daemon.LockHolder(path); err != nil || pid != os.Getpid() {
+		t.Fatalf("LockHolder = %d, %v; want %d", pid, err, os.Getpid())
 	}
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -448,5 +449,80 @@ func TestADaemonThatDidNotWaitLinksItsShimsOnce(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "shims", "docker")); !os.IsNotExist(err) {
 		t.Errorf("docker was relinked: %v", err)
+	}
+}
+
+// A daemon without --wait refused by the lock under launchd, as ours is
+// beside Homebrew's, warns once per lock holder, naming doctor, in its log
+// and in the crash log (stderr); later restarts against that holder write
+// nothing. A new holder is warned of again (#194).
+func TestALockedDaemonWarnsOncePerHolder(t *testing.T) {
+	dir := daemonDir(t)
+	env := map[string]string{"HEADROOM_CONFIG_DIR": dir}
+	first := filepath.Join(dir, "first.log")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(Env{Args: []string{"headroom", "daemon", "--log", first},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: func(k string) string { return env[k] }, Context: ctx})
+	}()
+	waitFor(t, func() bool { b, _ := os.ReadFile(first); return strings.Contains(string(b), "daemon started") })
+	t.Cleanup(func() { cancel(); <-done })
+
+	logPath := filepath.Join(dir, "second.log")
+	restart := func() string {
+		var errb syncBuffer
+		if code := Run(Env{Args: []string{"headroom", "daemon", "--log", logPath},
+			Stdout: &errb, Stderr: &errb, Getenv: func(k string) string { return env[k] }, Context: ctx}); code == 0 {
+			t.Fatalf("a refused daemon exited 0: %s", errb.String())
+		}
+		return errb.String()
+	}
+	warning := func(pid int) string {
+		return fmt.Sprintf("level=WARN msg=\"another daemon is running (pid %d); see `headroom doctor`\"", pid)
+	}
+	count := func(s string) int { b, _ := os.ReadFile(logPath); return strings.Count(string(b), s) }
+
+	if stderr := restart(); !strings.Contains(stderr, "another daemon is already running") {
+		t.Errorf("first refusal: stderr %q", stderr)
+	}
+	if stderr := restart(); stderr != "" {
+		t.Errorf("second refusal, same holder: stderr %q", stderr)
+	}
+	if n := count(warning(os.Getpid())); n != 1 {
+		t.Errorf("%d warnings for one holder, want 1", n)
+	}
+	if n := count("level=ERROR"); n != 0 {
+		t.Errorf("%d errors logged for a lock refusal", n)
+	}
+	// Another daemon took the lock since.
+	if err := os.WriteFile(filepath.Join(dir, "d.sock.lock"), []byte("4242\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stderr := restart(); !strings.Contains(stderr, "another daemon is already running") {
+		t.Errorf("new holder: stderr %q", stderr)
+	}
+	if n := count(warning(4242)); n != 1 {
+		t.Errorf("%d warnings for the new holder, want 1", n)
+	}
+}
+
+// Any other start failure logs an error on every start (#194).
+func TestOtherStartFailuresLogEveryTime(t *testing.T) {
+	dir := daemonDir(t)
+	env := map[string]string{"HEADROOM_CONFIG_DIR": dir}
+	if err := os.WriteFile(filepath.Join(dir, "d.sock"), nil, 0o600); err != nil { // not a socket
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "daemon.log")
+	for range 2 {
+		if code := Run(Env{Args: []string{"headroom", "daemon", "--log", logPath},
+			Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: func(k string) string { return env[k] }}); code == 0 {
+			t.Fatal("exited 0")
+		}
+	}
+	if b, _ := os.ReadFile(logPath); strings.Count(string(b), "level=ERROR msg=\"daemon failed to start\"") != 2 {
+		t.Errorf("want two errors:\n%s", b)
 	}
 }

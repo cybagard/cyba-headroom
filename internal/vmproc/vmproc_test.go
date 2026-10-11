@@ -259,3 +259,56 @@ func TestTartVMUnderASymlinkedTartHomeIsTart(t *testing.T) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
 }
+
+func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{4444}
+	// lsof-tart-oci.txt is the recorded lsof-tart.txt capture with the Tart
+	// VM's files moved into the OCI cache, at the digest folder a tag's
+	// symlink resolves to.
+	sys.files["lsof 4444"] = "lsof-tart-oci.txt"
+	sys.files["footprint 4444"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome("/Users/dev/.tart").List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its name in tart list is not derived: Tart is enough to keep it out of
+	// other_vms.
+	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Tart, FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestTartVMUnderASymlinkedDefaultTartHomeIsTart(t *testing.T) {
+	// ~/.tart moved to another disk and linked back; TART_HOME unset.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ext", "tart")
+	if err := os.MkdirAll(filepath.Join(target, "vms", "vm-a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".tart")); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.outputs = map[string][]byte{"lsof 4343": bytes.ReplaceAll(capture, []byte("/Users/dev/tart-home"), []byte(resolved))}
+	sys.files["footprint 4343"] = "footprint.txt"
+	getenv := func(k string) string { return map[string]string{"HOME": dir}[k] }
+	got, err := vmproc.New(sys).WithTartHome(vmproc.TartHome(getenv)).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}

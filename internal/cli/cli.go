@@ -231,7 +231,7 @@ func runDaemon(e Env) int {
 	}
 	// Collectors register here as they land (#49). Docker, Tart, Podman
 	// and the VMs no owner claims share one VM process listing per tick.
-	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}).WithTartHome(e.Getenv("TART_HOME")), time.Second, time.Now)
+	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}).WithTartHome(vmproc.TartHome(e.Getenv)), time.Second, time.Now)
 	var tartCLI tart.CLI
 	if p := tart.Locate(cfg.Tart.Path, e.Getenv); p != "" {
 		tartCLI = tart.Exec{Path: p}

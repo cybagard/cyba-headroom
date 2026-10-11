@@ -1625,10 +1625,14 @@ func keyed(es []*entry, r resource, based, open bool) *entry {
 }
 
 // binds reports whether e, open or (open false) lapsed, keys r. Compose
-// labels every container of a project with its dir: one with none was
-// labelled by hand, and binds no open lease that knows its dir (#109).
+// labels every container of a project with its dir, so an open lease that
+// knows its dir binds a container labelled with it: one with none was
+// labelled by hand (#109), one with another dir is another stack of the
+// project's name, another worktree's (#208). Or one a reading attributes
+// to e's worktree, so a dir the shim got wrong costs e only its stack's
+// start events, as in lapsedFor.
 func (e *entry) binds(r resource, based, open bool) bool {
-	return e.key(r, based) && (!open || e.Kind != "compose" || e.dir == "" || r.dir != "")
+	return e.key(r, based) && (!open || e.Kind != "compose" || e.dir == "" || e.inDir(r) || e.Worktree != "" && r.worktree == e.Worktree)
 }
 
 // inDir reports whether e is a compose lease whose dir is the one Compose

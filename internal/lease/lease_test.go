@@ -2937,6 +2937,30 @@ func TestAnUnattributedReadingBindsTheLeaseOfTheContainersDir(t *testing.T) {
 	}
 }
 
+// A container of app that w1's reading attributes, new while only w2's
+// up of app is open, binds that up only if Compose labelled it with the
+// up's dir: w1's own stack does not spend w2's reservation, and a compose
+// file of w2's dir run from w1 still binds w2's up (#158, #208).
+func TestAnOpenComposeLeaseBindsOnlyItsDirsContainers(t *testing.T) {
+	for _, tc := range []struct {
+		dir  string
+		want uint64 // what w2's up holds after the reading
+	}{
+		{"/src/a", 2 * gib},
+		{"/src/b", 2*gib - gib/2},
+	} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(upIn("w2", "/src/b"), snap(), cfg)
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels(tc.dir)}, "w1"), c.t))
+		l := b.List()
+		if len(l) != 1 || l[0].Bytes != tc.want {
+			t.Errorf("labelled %s: leases %+v, want w2's up holding %d MiB", tc.dir, l, tc.want>>20)
+		}
+	}
+}
+
 // A docker run in w2 labelled by hand with w1's project name, no working
 // dir, its own lease over, missing from two readings and back (model seed
 // 9887, #109): it binds nothing of w1's up, whose reservation stands.
@@ -2966,10 +2990,10 @@ func TestAHandLabelledContainerBindsNoComposeLease(t *testing.T) {
 	}
 }
 
-// The dir only breaks a tie (#109): an up whose Compose file lies outside
-// its worktree, or whose shim sent a dir Compose did not label its stack
-// with, still binds its stack, the only match, at its start event and at
-// a reading.
+// An up whose Compose file lies outside its worktree binds its stack, the
+// only match, at its start event and at a reading (#109); one whose shim
+// sent a dir Compose did not label its stack with binds it at a reading
+// that attributes it to the up's worktree (#208).
 func TestAComposeLeaseBindsItsStackOutsideItsDir(t *testing.T) {
 	for _, tc := range []struct{ name, sent, labelled, wt string }{
 		{"a file outside the worktree", "/src/shared", "/src/shared", ""},

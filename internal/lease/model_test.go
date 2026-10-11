@@ -888,10 +888,11 @@ func (m *model) confirmed(id string) bool {
 
 // binder is the open lease a reading binds x, a new container of a compose
 // project, to (lease.go keyed): an up of the project in x's worktree (its
-// dir), then, if the reading attributes x, a guess of the project there,
-// then an up of the project in another worktree; the oldest of equals.
-// Back after a crash its verdict kept (vcrashed), only a lease of the
-// worktree the book knows it in binds it (lease.go binder, bindsAfterCrash).
+// dir), then, if the reading attributes x, a guess of the project there;
+// the oldest of equals. An up in another worktree knows its dir, not x's,
+// so binds nothing of x (lease.go entry.binds, #208). Back after a crash
+// its verdict kept (vcrashed), only a lease of the worktree the book knows
+// it in binds it (lease.go binder, bindsAfterCrash).
 func (m *model) binder(x *mcont) string {
 	if x.vcrashed && m.flick && !x.owned {
 		return "" // the book knows no worktree of it
@@ -902,37 +903,18 @@ func (m *model) binder(x *mcont) string {
 	if g := m.guessOf(x); g != "" && !m.flick {
 		return g
 	}
-	if x.vcrashed {
-		return ""
-	}
-	return m.upElsewhere(x)
+	return ""
 }
 
 // eventBinder is the open lease x's start event binds it to (lease.go
-// keyed, tied): an up of its project in its worktree, else one in another
-// worktree, unless a guess of the project in x's worktree, which may be
-// x's, ties with it.
-func (m *model) eventBinder(x *mcont) string {
-	if up := m.upOf(x.project, x.wt); up != "" || m.guessOf(x) != "" {
-		return up
-	}
-	return m.upElsewhere(x)
-}
+// keyed): an up of its project in its worktree. An up in another worktree
+// knows another dir (#208), and a guess keys no event.
+func (m *model) eventBinder(x *mcont) string { return m.upOf(x.project, x.wt) }
 
 // guessOf is the oldest open guess in x's worktree that names its project.
 func (m *model) guessOf(x *mcont) string {
 	for _, l := range m.b.List() {
 		if g := m.guesses[l.ID]; l.Worktree == x.wt && g != nil && g.name == x.project {
-			return l.ID
-		}
-	}
-	return ""
-}
-
-// upElsewhere is the oldest open up of x's project in another worktree.
-func (m *model) upElsewhere(x *mcont) string {
-	for _, l := range m.b.List() {
-		if l.Worktree != x.wt && x.project != "" && m.leases[l.ID] == upCommand(x.project) {
 			return l.ID
 		}
 	}
@@ -1374,6 +1356,29 @@ func TestTheLeaseModelOn190Missed(t *testing.T) {
 	}
 	if f := play(t, ops); f != nil {
 		t.Errorf("#190, missed readings:\n%s", f.msg)
+	}
+}
+
+// TestTheLeaseModelOn208 plays seed 10236, shrunk: w1's container of app,
+// gone after two missing readings, is back while only w2's up of app is
+// open. Compose labelled it with w1's dir, so it binds nothing of w2's up,
+// which keeps the reservation of the container it started.
+func TestTheLeaseModelOn208(t *testing.T) {
+	ops := []op{
+		{2, 679, 676},  // w2: compose up app starts c1 and c2
+		{6, 180, 785},  // stop c2
+		{12, 826, 157}, // w2: forged compose up evil, c3
+		{0, 246, 830},  // w1: compose up app starts c4 and c5
+		{15, 314, 922}, // BUDGET_WAIT docker start c2, readings show c4
+		{7, 265, 728},  // w2: docker run c6
+		{6, 526, 817},  // stop c2
+		{16, 186, 567}, // c4 missing from the reading
+		{16, 508, 952}, // and from the next: gone
+		{5, 294, 611},  // w2: docker start c2, covered by w2's up
+		{14, 65, 123},  // headroom 1024 MiB, and a reading: c4 is back
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#208:\n%s", f.msg)
 	}
 }
 
@@ -1893,11 +1898,11 @@ func TestTheLeaseModelOnAHitRestartingACrash(t *testing.T) {
 
 // TestTheLeaseModelOnAnotherWorktreesUpAtAReading plays a row of #168's
 // differential: with no lease of its own worktree keying it, a container
-// of app back after a missing reading binds another worktree's open up of
-// app, the dir only preferring its own (lease.go keyed), and a later up
-// that takes that one over holds it (lease.go Check). A guessed hit of app
-// in w2 binds c1 and c2 and ends; c1 is missing from a reading; w1's up of
-// app starts c3 and c4; c1 is back; w1's next up of app.
+// of app back after a missing reading binds nothing of another worktree's
+// open up of app, which knows another dir (lease.go entry.binds, #208), nor
+// of a later up that takes that one over. A guessed hit of app in w2 binds
+// c1 and c2 and ends; c1 is missing from a reading; w1's up of app starts
+// c3 and c4; c1 is back; w1's next up of app.
 func TestTheLeaseModelOnAnotherWorktreesUpAtAReading(t *testing.T) {
 	m := newModel(t)
 	m.runOK(
@@ -1910,16 +1915,14 @@ func TestTheLeaseModelOnAnotherWorktreesUpAtAReading(t *testing.T) {
 	if len(ls) != 1 {
 		t.Fatalf("leases %+v, want only w1's up", ls)
 	}
-	up := ls[0].ID
 	m.runOK(op{10, 0, 0}) // tick: c1 is back
 	c1 := m.conts[0]
-	if c1.heldBy != up {
-		t.Errorf("%s held by %q, want by w1's up %s, as in the book", c1.id, c1.heldBy, up)
+	if c1.heldBy != "" {
+		t.Errorf("%s held by %q, want by nothing: w1's up knows w1's dir, as in the book", c1.id, c1.heldBy)
 	}
 	m.runOK(op{0, 2, 0}) // w1: compose up app takes the up over
-	ls = m.b.List()
-	if again := ls[len(ls)-1].ID; c1.heldBy != again || !m.held(c1) {
-		t.Errorf("%s held by %q (held %v), want by w1's later up %s, which took %s over", c1.id, c1.heldBy, m.held(c1), again, up)
+	if c1.heldBy != "" {
+		t.Errorf("%s held by %q, want by nothing: w1's later up took nothing of it over", c1.id, c1.heldBy)
 	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))
@@ -1927,31 +1930,29 @@ func TestTheLeaseModelOnAnotherWorktreesUpAtAReading(t *testing.T) {
 }
 
 // TestTheLeaseModelOnATiedHitThenAFlicker plays #168's F5: a guessed hit's
-// start event ties when only another worktree's up of its project is open
-// (the guess, of its own dir, may be its: lease.go tied), and binds
-// nothing; a first reading with no attribution then binds it to that up, a
-// guess keying only what a reading attributes (lease.go keyed). w1's up of
-// app starts c1 and c2; w2's guessed hit of app starts c3 and c4; a
-// flicker.
+// containers, while only another worktree's up of their project is open,
+// bind nothing of that up, which knows another dir (lease.go entry.binds,
+// #208): not at their start event, nor at a first reading with no
+// attribution, and the guess keys only what a reading attributes (lease.go
+// keyed). w1's up of app starts c1 and c2; w2's guessed hit of app starts
+// c3 and c4; a flicker.
 func TestTheLeaseModelOnATiedHitThenAFlicker(t *testing.T) {
 	m := newModel(t)
 	m.runOK(op{0, 2, 0}) // w1: compose up app starts c1 and c2
-	up := m.b.List()[0].ID
 	m.runOK(op{2, 3, 1}) // w2: a guessed hit of app starts c3 and c4
-	for _, x := range m.of("app", "w2") {
-		if m.bound(x) {
-			t.Errorf("at its start, %s bound by %q, want by nothing: its event ties", x.id, x.boundBy)
+	unbound := func(when string) {
+		for _, x := range m.of("app", "w2") {
+			if m.bound(x) {
+				t.Errorf("%s, %s bound by %q, want by nothing, as in the book", when, x.id, x.boundBy)
+			}
 		}
 	}
+	unbound("at its start")
 	m.runOK(op{10, 1, 0}) // tick: a flicker ((1 + 7) % 8)
 	if !m.flick {
 		t.Fatal("the reading had attribution, want a flicker")
 	}
-	for _, x := range m.of("app", "w2") {
-		if x.boundBy != up {
-			t.Errorf("after the flicker, %s boundBy = %q, want w1's up %s, as in the book", x.id, x.boundBy, up)
-		}
-	}
+	unbound("after the flicker")
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))
 	}

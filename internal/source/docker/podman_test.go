@@ -448,7 +448,7 @@ func TestPodmanEngineNamesEachContainersPod(t *testing.T) {
 			"/containers/" + infraID + "/stats?stream=false&one-shot=true":  cpuStats(1, 1),
 		}
 		if libpod {
-			r["/libpod/containers/json"] = "libpod-containers.json"
+			r["/v4.0.0/libpod/containers/json"] = "libpod-containers.json"
 		}
 		return r
 	}

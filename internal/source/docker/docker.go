@@ -207,14 +207,15 @@ func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen 
 
 // pods sets the pod each of a Podman engine's containers is in, from its
 // libpod list: Podman labels no pod's containers (#230). A list that fails
-// leaves them unknown: a pod's lease then holds its cost.
+// leaves them unknown: a pod's lease then holds its cost. The libpod API
+// answers only under a version (Podman 6.1 404s /libpod/containers/json).
 func pods(ctx context.Context, c *http.Client, cs []protocol.Container) {
 	var list []struct {
 		ID      string `json:"Id"`
 		Pod     string
 		PodName string
 	}
-	if get(ctx, c, "/libpod/containers/json", &list) != nil {
+	if get(ctx, c, "/v4.0.0/libpod/containers/json", &list) != nil {
 		return
 	}
 	for i := range cs {

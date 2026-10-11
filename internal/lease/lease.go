@@ -1010,8 +1010,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				since = v.event
 			}
 		}
-		if !v.present && now.Sub(since) >= keep {
-			delete(b.verdicts, k)
+		if !v.present && !undecided[k] && now.Sub(since) >= keep {
+			delete(b.verdicts, k) // an undecided one's waits for the reading that decides it
 		}
 	}
 	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return !now.Before(e.Expires.Add(b.timeout)) })

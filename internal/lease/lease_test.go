@@ -3114,6 +3114,41 @@ func TestAWrongDirUpBindsItsStackRunAgainAfterAnUnattributedFirstReading(t *test
 	}
 }
 
+// A container no reading places in a worktree, judged ungated, gone, and
+// started again while another dir's up of its project is open: every
+// reading leaves it undecided, its verdict kept, and once the up's lease
+// ends it is ungated still, not judged again by that lapsed lease (#208
+// review B3).
+func TestAnUndecidedContainerKeepsItsVerdict(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	a1 := func() *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, "")
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(a1(), c.t)) // no lease open: ungated
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "a1", "a1", stackLabels("/src/a"))
+	b.ContainerEvent("die", "a1", "a1", stackLabels("/src/a"))
+	for range 2 { // gone
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.Check(upIn("w2", "/src/b"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	for range 30 { // past the up's timeout
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(a1(), c.t))
+	}
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases %+v, want the up's ended", l)
+	}
+	if u := b.Ungated(); len(u) != 1 || u[0].Name != "a1" {
+		t.Errorf("ungated %+v, want a1, as before the up", u)
+	}
+}
+
 // w2's up of app is open when w1's guessed up of app starts a container in
 // w1's dir (#109 review B1): at its start event the dir does not give it to
 // w2's up, whose dir it is not, so the reading gives it to w1's guess and

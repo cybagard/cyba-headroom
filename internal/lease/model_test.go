@@ -753,8 +753,8 @@ func (m *model) tick() {
 		if x.running && !x.missing {
 			x.vcrashed = false // after the reading's bindings (lease.go Observe)
 		}
-		if x.verdict && m.c.t.Sub(x.verdictAt) >= timeout {
-			x.verdict, x.owned, x.vcrashed = false, false, false // absent for the timeout (lease.go Observe)
+		if x.verdict && !x.undecided && m.c.t.Sub(x.verdictAt) >= timeout {
+			x.verdict, x.owned, x.vcrashed = false, false, false // absent for the timeout (lease.go Observe), unless undecided
 		}
 	}
 	for _, x := range m.conts {

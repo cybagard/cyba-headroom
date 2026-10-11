@@ -166,6 +166,7 @@ func TestAKeylessPodLeaseBindsItsWorktreesNewPodContainers(t *testing.T) {
 	for _, r := range []policy.Request{
 		{Worktree: "w1", Kind: "pod", Op: "start", Command: "podman pod start"},
 		{Worktree: "w1", Kind: "pod", Op: "play", Command: "podman kube play"},
+		{Worktree: "w1", Kind: "pod", Op: "restart", Command: "podman pod restart"}, // --all (#241)
 	} {
 		b, _, _ := book(t)
 		b.Observe(podmanSnap())
@@ -280,5 +281,96 @@ func TestAKubePlayOfARunningPodTakesALease(t *testing.T) {
 	r := policy.Request{Worktree: "w1", Kind: "pod", Op: "play", Command: "podman kube play", Target: "web", Pods: []string{"web"}}
 	if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID == "" {
 		t.Fatalf("check = %+v", d)
+	}
+}
+
+// A pod restart is a pod start (#241): a restart of pods that all run
+// adds no memory, so it is allowed whatever the pressure, with no lease. A
+// restart of a stopped pod takes a lease that binds its containers.
+func TestAPodRestartOfRunningPodsTakesNoLease(t *testing.T) {
+	restart := func(pods ...string) policy.Request {
+		r := podStart("w1", pods...)
+		r.Op, r.Command = "restart", "podman pod restart "+pods[0]
+		return r
+	}
+	b, _, _ := book(t)
+	s := withPodContainer(podmanSnap(), "web-app", "web", "a1b2c3", gib/4)
+	s = withPodContainer(s, "db-app", "db", "0f0f0f", gib/4)
+	b.Observe(s)
+	r := restart("web", "db")
+	r.CostBytes = 64 * gib
+	if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("restart of running pods: check = %+v", d)
+	}
+	if d := b.Check(restart("cache"), s, cfg); !d.Allow || d.LeaseID == "" {
+		t.Fatalf("restart of a stopped pod took no lease: %+v", d)
+	}
+	b.Observe(withPodContainer(s, "cache-app", "cache", "c4c4c4", gib/4))
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib*3/4 {
+		t.Fatalf("its pod's container did not bind its lease: %+v", ls)
+	}
+	if k := ungatedKeys(b); len(k) != 0 {
+		t.Fatalf("ungated = %v", k)
+	}
+}
+
+// A pod clone --start is keyed by the new pod's name: its lease binds the
+// new pod's containers, not the pod it copies (#241).
+func TestAPodCloneLeaseBindsTheNewPodsContainers(t *testing.T) {
+	b, _, _ := book(t)
+	s := withPodContainer(podmanSnap(), "src-app", "src", "a1b2c3", gib/4)
+	b.Observe(s)
+	r := policy.Request{Worktree: "w1", Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new", Pods: []string{"new"}}
+	if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID == "" || d.CostBytes != gib {
+		t.Fatalf("check = %+v", d)
+	}
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib {
+		t.Fatalf("the source pod's container bound the lease: %+v", ls)
+	}
+	s = withPodContainer(podmanSnap(), "src-app", "src", "a1b2c3", gib/4)
+	s = withPodContainer(s, "new-infra", "new", "d4e5f6", 0)
+	b.Observe(withPodContainer(s, "new-app", "new", "d4e5f6", gib/4))
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib*3/4 {
+		t.Fatalf("the new pod's containers did not bind its lease: %+v", ls)
+	}
+	if k := ungatedKeys(b); len(k) != 0 {
+		t.Fatalf("ungated = %v", k)
+	}
+}
+
+// A container clone --run is keyed by the new container's name: its lease
+// binds that container, not the one it copies (#241).
+func TestAContainerCloneLeaseBindsTheNewContainer(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(withContainerMem(podmanSnap(), "c", "w1", gib/4))
+	r := policy.Request{Worktree: "w1", Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new"}
+	if d := b.Check(r, withContainerMem(podmanSnap(), "c", "w1", gib/4), cfg); !d.Allow || d.LeaseID == "" || d.CostBytes != gib {
+		t.Fatalf("check = %+v", d)
+	}
+	s := withContainerMem(podmanSnap(), "c", "w1", gib/4)
+	b.Observe(withContainerMem(s, "new", "w1", gib/4))
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib*3/4 {
+		t.Fatalf("the new container did not bind its lease: %+v", ls)
+	}
+	if k := ungatedKeys(b); len(k) != 0 {
+		t.Fatalf("ungated = %v", k)
+	}
+}
+
+// A machine init --now's lease binds the VM of the machine it makes, by
+// name, as a machine start's does (#241).
+func TestAMachineInitLeaseBindsItsVM(t *testing.T) {
+	b, _, _ := book(t)
+	b.Observe(podmanSnap())
+	r := policy.Request{Worktree: "w1", Kind: "machine", Op: "init", Command: "podman machine init vm-a", CostBytes: 4 * gib, Target: "vm-a"}
+	if d := b.Check(r, podmanSnap(), cfg); !d.Allow || d.LeaseID == "" {
+		t.Fatalf("check = %+v", d)
+	}
+	b.Observe(withMachine(podmanSnap(), "vm-a", gib))
+	if ls := b.List(); len(ls) != 1 || ls[0].Bytes != 3*gib {
+		t.Fatalf("the machine's VM did not bind its lease: %+v", ls)
+	}
+	if k := ungatedKeys(b); len(k) != 0 {
+		t.Fatalf("ungated = %v", k)
 	}
 }

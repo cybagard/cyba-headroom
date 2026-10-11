@@ -536,6 +536,91 @@ func TestShimGatePodmanMachineAgainstTheDaemon(t *testing.T) {
 	}
 }
 
+// podman machine init --now asks with the memory its own --memory gives
+// (MiB), or Podman's default of 2048 MiB, and names the machine it makes:
+// podman-machine-default when it names none. It asks no inspect: the
+// machine does not exist yet. Without --now it starts nothing. Past an
+// option the parser does not know, a machine init, pod restart or clone,
+// or container clone is not gated (R7) (#241).
+func TestShimGatePodmanMachineInit(t *testing.T) {
+	r := newShimRig(t)
+	r.machineAsk = func(_ string, args []string) ([]byte, error) {
+		t.Errorf("asked inspect %q", args)
+		return nil, errors.New("no machine")
+	}
+	r.env = append(r.env, "HEADROOM_WORKTREE=w")
+	r.ask = allow
+	for _, c := range []struct {
+		argv []string
+		want protocol.CheckRequest
+	}{
+		{[]string{"podman", "machine", "init", "--now", "--memory", "4096", "vm-a"},
+			protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "init", Command: "podman machine init vm-a", CostBytes: 4 << 30, Target: "vm-a"}},
+		{[]string{"podman", "machine", "init", "--now"},
+			protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "init", Command: "podman machine init", CostBytes: 2 << 30, Target: "podman-machine-default"}},
+	} {
+		r.asked = nil
+		code, stderr := r.run(c.argv...)
+		if code != 0 || !slices.Equal(r.execArgv, c.argv) {
+			t.Fatalf("%q: exit %d, exec %q, stderr %q", c.argv, code, r.execArgv, stderr)
+		}
+		if len(r.asked) != 1 || !equalRequest(r.asked[0], c.want) || r.asked[0].Op != c.want.Op || r.asked[0].Target != c.want.Target {
+			t.Fatalf("%q: asked %+v, want %+v", c.argv, r.asked, c.want)
+		}
+	}
+	r.asked, r.execed = nil, ""
+	if code, _ := r.run("podman", "machine", "init", "--memory", "4096", "vm-a"); code != 0 || r.execed == "" || len(r.asked) != 0 {
+		t.Fatalf("without --now: exit %d, exec %q, asked %+v", code, r.execed, r.asked)
+	}
+	for _, argv := range [][]string{
+		{"podman", "machine", "init", "--now", "--future", "x", "vm-a"},
+		{"podman", "pod", "restart", "--future", "web"},
+		{"podman", "pod", "clone", "--start", "--future", "x", "src", "new"},
+		{"podman", "container", "clone", "--run", "--future", "x", "c", "new"},
+	} {
+		r.execed = ""
+		code, stderr := r.run(argv...)
+		cmd := strings.Join(argv[:3], " ")
+		if code != 0 || r.execed == "" || len(r.asked) != 0 ||
+			!strings.Contains(stderr, "headroom: not gated ("+cmd+": an option the shim does not know); running `"+cmd+"` anyway") {
+			t.Fatalf("%q guessed: exit %d, exec %q, asked %+v, stderr %q", argv, code, r.execed, r.asked, stderr)
+		}
+	}
+}
+
+// End to end: podman machine init --now --memory 4096 is denied when the
+// budget cannot fit 4 GiB, and allowed when it can; the allowed init's
+// lease holds the 4 GiB (#241).
+func TestShimGatePodmanMachineInitAgainstTheDaemon(t *testing.T) {
+	cfg := config.Defaults("/x")
+	base := cfg.Budget.Params().HostBaselineBytes + cfg.PolicyConfig().MinHeadroomBytes
+	host := &sizedHost{total: base + 3<<30} // room for 3 GiB: not 4
+	envMap, d := serveDaemonFrom(t, []daemon.Source{host}, func(d *daemon.Daemon) {
+		wireGate(d, cfg, discardLog(), nil)
+	})
+	r := newShimRig(t)
+	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
+	var stderr strings.Builder
+	execed := false
+	shimEnv := Env{Args: []string{"podman", "machine", "init", "--now", "--memory", "4096", "vm-a"}, Stdout: io.Discard, Stderr: &stderr,
+		Getenv: func(string) string { return "" }, Environ: func() []string { return env },
+		exec:       func(string, []string, []string) error { execed = true; return nil },
+		machineAsk: func(string, []string) ([]byte, error) { return nil, errors.New("no machine") }}
+	if code := Run(shimEnv); code != exitDenied || execed || !strings.Contains(stderr.String(), "not starting `podman machine init vm-a`") {
+		t.Fatalf("exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	host.set(base + 5<<30)
+	d.Tick(context.Background())
+	if code := Run(shimEnv); code != 0 || !execed {
+		t.Fatalf("with room: exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	d.Tick(context.Background())
+	s := d.Snapshot()
+	if len(s.Leases) != 1 || s.Leases[0].Kind != "machine" || s.Leases[0].Bytes != 4<<30 || s.Leases[0].Command != "podman machine init" {
+		t.Fatalf("leases %+v", s.Leases)
+	}
+}
+
 // sizedHost is a host source whose total memory a test can change.
 type sizedHost struct {
 	mu    sync.Mutex

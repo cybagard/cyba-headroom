@@ -8,9 +8,10 @@
 // the lease's ID as a label; a start names its container's ID, which the
 // daemon asks Docker for; a compose call names its project, or its project
 // directory, which Compose labels each container with; a tart run names its
-// VM, and a podman machine start its machine, whose VM the Podman source
-// lists; a podman pod start or kube play names its pods, which the Podman
-// engine says each container is in (#230). A new resource binds the lease whose key it matches, and no other: the
+// VM, and a podman machine start or init its machine, whose VM the Podman
+// source lists; a podman pod start, restart, clone or kube play names its
+// pods, which the Podman engine says each container is in (#230, #241); a
+// podman container clone names its new container. A new resource binds the lease whose key it matches, and no other: the
 // book never guesses. A bound lease keeps reserving what its resources
 // have not used yet, so a container that starts small does not hand its
 // reservation back at once. A lease ends when its resources use the full
@@ -580,10 +581,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already counts. Allowed, and no lease.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
-	if r.Kind == "pod" && r.Op == "start" && s != nil && podsRun(s, r.Pods) {
-		// Each of its pods runs: podman starts nothing, and their
-		// containers already count. Allowed, and no lease (#230, plan
-		// amendment 3).
+	if r.Kind == "pod" && (r.Op == "start" || r.Op == "restart") && s != nil && podsRun(s, r.Pods) {
+		// Each of its pods runs: podman starts nothing, or restarts what
+		// already counts. Allowed, and no lease (#230, plan amendment 3;
+		// #241).
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
 	d := policy.Decide(r, s, c)

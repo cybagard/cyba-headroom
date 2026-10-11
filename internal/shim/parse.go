@@ -11,11 +11,12 @@ import (
 // Call is what a docker, podman or tart call would start (R5, #27). Only
 // calls with a Kind are gated; everything else passes straight through.
 type Call struct {
-	// Kind is container, compose, tart, pod (podman pod start, kube play)
-	// or machine (podman machine start) (protocol.CheckRequest.Kind); ""
-	// means the call starts nothing and passes through.
+	// Kind is container, compose, tart, pod (podman pod start, restart,
+	// clone --start, kube play) or machine (podman machine start, init
+	// --now) (protocol.CheckRequest.Kind); "" means the call starts nothing
+	// and passes through.
 	Kind string
-	// Op is run, create, start, restart, up, play or clone.
+	// Op is run, create, start, restart, up, play, clone or init.
 	Op string
 	// Command names the call without its flags or arguments, which may hold
 	// secrets: "docker run postgres:17", "docker compose up", "tart run ci-vm".
@@ -32,8 +33,9 @@ type Call struct {
 	Targets []string
 	// KubeFiles are a kube play's files, as given: "-" is stdin.
 	KubeFiles []string
-	// Guessed is set for a machine start past an option the parser does
-	// not know: which machine it starts is a guess (#230).
+	// Guessed is set for a podman machine start or init, pod restart or
+	// clone, or container clone past an option the parser does not know:
+	// what it starts is a guess, so it is not gated (#230, #241).
 	Guessed bool
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
@@ -113,6 +115,10 @@ func parseEngine(name string, all []string) (c Call, at int) {
 			return parsePodman(c, args), -1
 		}
 	}
+	if name == "podman" && len(words) == 2 && c.Op == "clone" {
+		// container clone: no --label to carry a lease (at -1).
+		return parsePodman(c, append([]string{"container"}, args...)), -1
+	}
 	var flags flagSet
 	switch c.Op {
 	case "run", "create":
@@ -169,10 +175,12 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	return c.named(append(words, c.Op)), at
 }
 
-// parsePodman parses the Podman calls that start a pod or a machine
-// (#230): pod start, kube play (play kube) and machine start. engine holds
-// the call's global options; args start at its first word (pod, kube,
-// play, machine). pod create starts nothing (it has no --start), nor does
+// parsePodman parses the Podman calls that start a pod, a container or a
+// machine: pod start, kube play (play kube) and machine start (#230); and,
+// each only with its start flag, machine init --now, pod clone --start,
+// pod restart and container clone --run (#241). engine holds the call's
+// global options; args start at its first word (pod, kube, play, machine,
+// container). pod create starts nothing (it has no --start), nor does
 // kube play --start=false, or --down, a teardown --help hides.
 func parsePodman(engine Call, args []string) Call {
 	if len(args) < 2 {
@@ -180,24 +188,42 @@ func parsePodman(engine Call, args []string) Call {
 	}
 	cmd := args[0] + " " + args[1]
 	c := Call{Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context, HostLast: engine.HostLast, ConfigDir: engine.ConfigDir}
+	// start is whether it starts anything: kube play does unless
+	// --start=false, the clones and init only with their start flag.
 	start, down := true, false
+	var startFlag, mem, name string
 	var table flagSet
 	switch cmd {
 	case "pod start":
 		c.Kind, c.Op, table = "pod", "start", podStart
+	case "pod restart":
+		c.Kind, c.Op, table = "pod", "restart", podRestart
+	case "pod clone":
+		c.Kind, c.Op, table, startFlag = "pod", "clone", podClone, "--start"
 	case "kube play", "play kube":
-		c.Kind, c.Op, table = "pod", "play", kubePlayAll
+		c.Kind, c.Op, table, startFlag = "pod", "play", kubePlayAll, "--start"
 	case "machine start":
 		c.Kind, c.Op, table = "machine", "start", machineStart
+	case "machine init":
+		c.Kind, c.Op, table, startFlag = "machine", "init", machineInit, "--now"
+	case "container clone":
+		c.Kind, c.Op, table, startFlag = "container", "clone", containerClone, "--run"
 	default:
 		return Call{}
 	}
+	if c.Op != "play" && startFlag != "" {
+		start = false
+	}
 	pos, res, guessed := scanAll(args[2:], table, func(f, v string) {
 		switch f {
-		case "--start":
+		case startFlag:
 			start = IsTrue(v)
 		case "--down":
 			down = IsTrue(v)
+		case "-m", "--memory":
+			mem = v
+		case "-n", "--name":
+			name = v
 		}
 	})
 	if res == askedHelp || !start || down {
@@ -205,11 +231,31 @@ func parsePodman(engine Call, args []string) Call {
 	}
 	words := []string{"podman", args[0], args[1]}
 	if guessed {
-		c.Guessed = c.Kind == "machine"
-		return c.named(words) // past a guess, a positional may be a flag's value
+		// Past a guess, a positional may be a flag's value: not gated
+		// (R7), but pod start and kube play hold their cost keyless.
+		c.Guessed = c.Kind == "machine" || c.Op == "restart" || c.Op == "clone"
+		return c.named(words)
 	}
-	if c.Op == "play" {
+	switch c.Op {
+	case "play":
 		c.KubeFiles = pos // paths: never shown
+		return c.named(words)
+	case "init":
+		// --memory is in MiB; Podman's default is 2048.
+		c.MemoryBytes = 2048 << 20
+		if n, err := strconv.ParseUint(mem, 10, 64); err == nil && n > 0 && n <= 1<<30 {
+			c.MemoryBytes = n << 20
+		}
+	case "clone":
+		// The new pod's or container's name: NAME, else --name, which
+		// NAME overrides; one Podman makes up keys nothing.
+		if len(pos) > 1 {
+			name = pos[1]
+		}
+		c.Target = name
+		if c.Kind == "container" {
+			c.Name = name
+		}
 		return c.named(words)
 	}
 	if len(pos) > 0 {
@@ -738,7 +784,24 @@ var (
 
 	podStart     = flags("--pod-id-file", "--all -a")
 	machineStart = flags("", "--no-info --quiet --update-connection -q -u")
-	kubePlay     = flags(
+	machineInit  = flags(
+		"--cpus --disk-size --ignition-path --image --memory --playbook --provider --swap --timezone --usb --username "+
+			"--volume -m -s -v",
+		"--import-native-ca --now --rootful --tls-verify --update-connection --user-mode-networking -u")
+	podClone = flags(
+		"--blkio-weight --blkio-weight-device --cgroup-parent --cpu-shares --cpus --cpuset-cpus --cpuset-mems --device "+
+			"--device-read-bps --device-write-bps --gidmap --gpus --hostname --infra-command --infra-conmon-pidfile "+
+			"--infra-name --label --label-file --memory --memory-swap --name --pid --restart --security-opt --shm-size "+
+			"--shm-size-systemd --subgidname --subuidname --sysctl --uidmap --userns --uts --volume --volumes-from "+
+			"-c -h -l -m -n -v",
+		"--destroy --help --start")
+	podRestart     = flags("", "--all -a")
+	containerClone = flags(
+		"--blkio-weight --blkio-weight-device --cpu-period --cpu-quota --cpu-rt-period --cpu-rt-runtime --cpu-shares "+
+			"--cpus --cpuset-cpus --cpuset-mems --device-read-bps --device-write-bps --memory --memory-reservation "+
+			"--memory-swap --memory-swappiness --name --pod -c -m",
+		"--destroy --force --run -f")
+	kubePlay = flags(
 		"--annotation --authfile --configmap --creds --ip --log-driver --log-opt --mac-address --network --publish --userns",
 		"--force --no-hostname --no-hosts --no-pod-prefix --publish-all --quiet --replace --start --tls-verify --wait -q -w")
 	// kube play takes --down, which its --help hides: a teardown.

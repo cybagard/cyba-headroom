@@ -1,0 +1,29 @@
+[
+  {
+    "Id": "0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c",
+    "Names": ["web-app"],
+    "Image": "docker.io/library/alpine:3",
+    "IsInfra": false,
+    "Pod": "00000000000000000000000000000000000000000000000000000000000000aa",
+    "PodName": "web",
+    "State": "running"
+  },
+  {
+    "Id": "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f",
+    "Names": ["00000000000a-infra"],
+    "Image": "",
+    "IsInfra": true,
+    "Pod": "00000000000000000000000000000000000000000000000000000000000000aa",
+    "PodName": "web",
+    "State": "running"
+  },
+  {
+    "Id": "2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a",
+    "Names": ["cache"],
+    "Image": "docker.io/library/redis:7-alpine",
+    "IsInfra": false,
+    "Pod": "",
+    "PodName": "",
+    "State": "running"
+  }
+]

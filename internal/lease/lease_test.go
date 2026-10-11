@@ -3074,6 +3074,46 @@ func TestAWrongDirUpBindsItsStackAfterAnUnattributedFirstReading(t *testing.T) {
 	}
 }
 
+// The same, when the stack ran before: a wrong-dir up's stack bound it,
+// the up ended, and the stack stopped and went, its verdict kept. A second
+// such up starts it again, and its first reading has no attribution: that
+// reading leaves it new, its verdict as it was, and the next binds it to
+// the second up (#208).
+func TestAWrongDirUpBindsItsStackRunAgainAfterAnUnattributedFirstReading(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	a1 := func(wt string) *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, wt)
+	}
+	b.Check(upIn("w1", "/src/a/compose.yaml;b"), snap(), cfg)
+	for range 25 { // past the timeout
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(a1("w1"), c.t))
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "a1", "a1", stackLabels("/src/a"))
+	b.ContainerEvent("die", "a1", "a1", stackLabels("/src/a"))
+	for range 2 { // gone
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	log.Reset()
+	b.Check(upIn("w1", "/src/a/compose.yaml;b"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	for i := range 25 { // past the timeout
+		c.t = c.t.Add(5 * time.Second)
+		wt := "w1"
+		if i == 0 {
+			wt = "" // a flicker
+		}
+		b.Observe(read(a1(wt), c.t))
+	}
+	if strings.Contains(log.String(), "never appeared") || len(b.Ungated()) > 0 {
+		t.Errorf("the second up's stack bound nothing: ungated %+v\n%s", b.Ungated(), log)
+	}
+}
+
 // w2's up of app is open when w1's guessed up of app starts a container in
 // w1's dir (#109 review B1): at its start event the dir does not give it to
 // w2's up, whose dir it is not, so the reading gives it to w1's guess and

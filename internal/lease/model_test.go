@@ -911,12 +911,12 @@ func (m *model) binder(x *mcont) string {
 }
 
 // undecides reports whether this reading, which lost its attribution,
-// leaves x new (lease.go undecides): x, of a project, is new to it, with no
-// verdict, and binds no lease, but another worktree's open up of its
-// project keys it but for its dir. The next reading with attribution reads
-// it as new.
+// leaves x new (lease.go undecides): x, of a project, is new to it, and
+// binds no lease, but another worktree's open up of its project keys it
+// but for its dir. A verdict it keeps stays as it was. The next reading
+// with attribution reads it as new.
 func (m *model) undecides(x *mcont) bool {
-	return m.flick && x.running && !x.missing && x.project != "" && x.read <= x.began && !x.shown && !x.verdict &&
+	return m.flick && x.running && !x.missing && x.project != "" && x.read <= x.began && !x.shown &&
 		!m.bound(x) && m.binder(x) == "" && m.upElsewhere(x) != ""
 }
 
@@ -2014,6 +2014,46 @@ func TestTheLeaseModelOnAnUndecidedContainerMissingAReading(t *testing.T) {
 	)
 	if c3 := m.conts[2]; c3.boundBy != guess || c3.heldBy != "" {
 		t.Errorf("%s bound by %q (held by %q), want by the guess %s, as in the book", c3.id, c3.boundBy, c3.heldBy, guess)
+	}
+	if t.Failed() {
+		t.Log(strings.Join(m.trace, "\n"))
+	}
+}
+
+// TestTheLeaseModelOnAStackRunAgainUndecided plays seed 17264's shape: a
+// stack whose verdicts the book keeps starts again by a guessed hit while
+// another worktree's up of its project is open, and its first reading is a
+// flicker. That reading leaves it new, verdicts as they were (lease.go
+// undecides), and the next binds it to the guess. w1's up of app starts c1
+// and c2; a minute on, its lease over, compose stop; two ticks; w2's up of
+// app starts c3 and c4; w1's guessed hit of app starts c1 and c2 again; a
+// flicker; a tick.
+func TestTheLeaseModelOnAStackRunAgainUndecided(t *testing.T) {
+	m := newModel(t)
+	m.diff = true
+	m.runOK(
+		op{0, 2, 0},  // w1: compose up app starts c1 and c2
+		op{9, 0, 0},  // wait 1m: they use its cost, it ends
+		op{3, 2, 0},  // compose stop app
+		op{10, 0, 0}, // tick
+		op{10, 0, 0}, // tick: they went, their verdicts kept
+		op{0, 3, 0},  // w2: compose up app starts c3 and c4
+		op{2, 2, 1},  // w1: a guessed hit of app starts c1 and c2
+	)
+	ls := m.b.List()
+	guess := ls[len(ls)-1].ID
+	m.runOK(op{10, (8 - (m.ticks+1)*7%8) % 8, 0}) // tick: a flicker
+	if !m.flick {
+		t.Fatal("the reading had attribution, want a flicker")
+	}
+	m.runOK(op{10, (8-(m.ticks+1)*7%8)%8 + 1, 0}) // tick
+	if m.flick {
+		t.Fatal("the reading was a flicker, want attribution")
+	}
+	for _, x := range m.of("app", "w1") {
+		if x.boundBy != guess {
+			t.Errorf("%s bound by %q, want by the guess %s, as in the book", x.id, x.boundBy, guess)
+		}
 	}
 	if t.Failed() {
 		t.Log(strings.Join(m.trace, "\n"))

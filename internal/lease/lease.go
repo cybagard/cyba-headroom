@@ -85,10 +85,10 @@ type Book struct {
 	// though when it is back it may bind a lease, held (Observe).
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
-	// undecided are the compose containers a reading left new, with no
-	// verdict (Book.undecides), and none has shown since: the next reading
-	// that shows one binds or judges it as new. A gone one is dropped, as
-	// from prev.
+	// undecided are the compose containers a reading left new
+	// (Book.undecides), and none has shown since: the next reading that
+	// shows one binds or judges it as new. A gone one is dropped, as from
+	// prev.
 	undecided map[string]bool
 	// based says which sources (container, vm) prev holds a fresh reading
 	// of: until then, every resource of that source may have been there
@@ -986,8 +986,8 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	for _, r := range res {
 		v := b.verdicts[r.key]
 		switch {
-		case v == nil && undecided[r.key]:
-			continue
+		case undecided[r.key]:
+			continue // a kept verdict keeps when the last reading showed it
 		case v == nil:
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
@@ -1658,14 +1658,15 @@ func (e *entry) binds(r resource, based, open bool) bool {
 		r.dir != "" && (e.inDir(r) || e.Worktree != "" && r.worktree == e.Worktree))
 }
 
-// undecides reports whether a reading leaves r, new and bound to no lease,
-// new: a compose container with no verdict and no worktree, which an open
-// compose lease that knows its dir keys but for that dir. The reading may
-// have lost its attribution (a flicker), and only one that has it says
-// whether r is that lease's worktree's (binds). Until that lease ends: a
-// reading that places r in no worktree judges it then (#208).
+// undecides reports whether a reading leaves r, bound to no lease, new: a
+// compose container new to it (or left new by the last), with no worktree,
+// which an open compose lease that knows its dir keys but for that dir. It
+// neither judges r nor touches a verdict r keeps. The reading may have
+// lost its attribution (a flicker), and only one that has it says whether
+// r is that lease's worktree's (binds). Until that lease ends: a reading
+// that places r in no worktree judges it then (#208).
 func (b *Book) undecides(r resource) bool {
-	return r.kind == "compose" && r.worktree == "" && b.verdicts[r.key] == nil &&
+	return r.kind == "compose" && r.worktree == "" && (!b.prev[r.key] || b.undecided[r.key]) &&
 		slices.ContainsFunc(b.open, func(e *entry) bool {
 			return e.Kind == "compose" && e.dir != "" && e.key(r, b.based[source(r.kind)])
 		})

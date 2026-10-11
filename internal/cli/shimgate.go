@@ -156,6 +156,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		notGated(e, c.Command+": an option the shim does not know", c.Command)
 		return gated{proceed: true}
 	}
+	if c.Kind == "container" && c.Op == "clone" && c.Name == "" {
+		// Podman names the clone itself: nothing would key its lease, which
+		// would never bind (#241 plan amendment 1).
+		notGated(e, "podman container clone: no name for the new container", c.Command)
+		return gated{proceed: true}
+	}
 	if c.Kind == "machine" && c.Op == "init" && c.Target == "" {
 		// The machine it makes, sized by its own --memory (the parser's):
 		// there is none yet to inspect (#241).

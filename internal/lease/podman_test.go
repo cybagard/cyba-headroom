@@ -166,7 +166,6 @@ func TestAKeylessPodLeaseBindsItsWorktreesNewPodContainers(t *testing.T) {
 	for _, r := range []policy.Request{
 		{Worktree: "w1", Kind: "pod", Op: "start", Command: "podman pod start"},
 		{Worktree: "w1", Kind: "pod", Op: "play", Command: "podman kube play"},
-		{Worktree: "w1", Kind: "pod", Op: "restart", Command: "podman pod restart"}, // --all (#241)
 	} {
 		b, _, _ := book(t)
 		b.Observe(podmanSnap())
@@ -311,6 +310,12 @@ func TestAPodRestartOfRunningPodsTakesNoLease(t *testing.T) {
 	}
 	if k := ungatedKeys(b); len(k) != 0 {
 		t.Fatalf("ungated = %v", k)
+	}
+	// pod restart --all restarts the pods that run: no memory to add, so
+	// no lease, whatever the pressure (#241 plan amendment 1).
+	all := policy.Request{Worktree: "w1", Kind: "pod", Op: "restart", Command: "podman pod restart", CostBytes: 64 * gib}
+	if d := b.Check(all, s, cfg); !d.Allow || d.LeaseID != "" {
+		t.Fatalf("restart --all: check = %+v", d)
 	}
 }
 

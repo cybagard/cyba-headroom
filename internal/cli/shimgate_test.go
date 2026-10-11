@@ -586,6 +586,14 @@ func TestShimGatePodmanMachineInit(t *testing.T) {
 			t.Fatalf("%q guessed: exit %d, exec %q, asked %+v, stderr %q", argv, code, r.execed, r.asked, stderr)
 		}
 	}
+	// A container clone with no new name has nothing to key its lease:
+	// not gated either (#241 plan amendment 1).
+	r.execed = ""
+	code, stderr := r.run("podman", "container", "clone", "--run", "c")
+	if code != 0 || r.execed == "" || len(r.asked) != 0 ||
+		!strings.Contains(stderr, "headroom: not gated (podman container clone: no name for the new container); running `podman container clone` anyway") {
+		t.Fatalf("nameless clone: exit %d, exec %q, asked %+v, stderr %q", code, r.execed, r.asked, stderr)
+	}
 }
 
 // End to end: podman machine init --now --memory 4096 is denied when the

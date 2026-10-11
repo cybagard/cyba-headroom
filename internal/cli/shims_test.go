@@ -155,3 +155,37 @@ func TestUnlinkKeepsAChosenDirAndSeesChainedLinks(t *testing.T) {
 		t.Fatalf("the user's dir was removed: %v", err)
 	}
 }
+
+// A shim link that someone else removes between uninstall's read and its
+// remove is already gone: no error, not listed as removed, and the next
+// shims are still removed (#193).
+func TestUnlinkShimsTakesALinkGoneUnderItAsGone(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin", "headroom")
+	dir := filepath.Join(root, "shims")
+	if _, err := linkShims(dir, bin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLink = os.Remove })
+	removeLink = func(p string) error {
+		if filepath.Base(p) == "docker" {
+			_ = os.Remove(p) // the other daemon's remove, first
+		}
+		return os.Remove(p)
+	}
+	removed, _, err := unlinkShims(dir, bin, true, false)
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Join(removed, " ") != "podman tart" {
+		t.Errorf("removed %q, want podman and tart", removed)
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if _, err := os.Lstat(filepath.Join(dir, n)); !os.IsNotExist(err) {
+			t.Errorf("%s stayed: %v", n, err)
+		}
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the empty shim dir stayed: %v", err)
+	}
+}

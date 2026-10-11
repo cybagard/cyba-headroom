@@ -85,6 +85,7 @@ type Env struct {
 	suspend    chan os.Signal                                                         // delivers Ctrl-Z (SIGTSTP)
 	stopSelf   func()                                                                 // stops the process (SIGSTOP)
 	tailed     func()                                                                 // logs -f: the tail is shown, the follow not begun
+	sleep      func(context.Context, time.Duration)                                   // the daemon's sleepCtx
 }
 
 // signalContext is e.Context (or Background) that also ends on sigs.
@@ -164,6 +165,12 @@ func runConfig(e Env) int {
 
 // waitEvery is how often a daemon started with --wait tries the lock.
 const waitEvery = 250 * time.Millisecond
+
+// recheckAfter is how long after its first link a daemon that waited
+// links its shims once more: uninstall removes its own links milliseconds
+// after the other daemon stops, and the waiter starts at most waitEvery
+// after that (#193).
+const recheckAfter = 5 * time.Second
 
 // runDaemon runs the collector daemon until SIGINT or SIGTERM.
 func runDaemon(e Env) int {
@@ -255,17 +262,22 @@ func runDaemon(e Env) int {
 		return fail(err)
 	}
 	book := wireGate(d, cfg, log, dockerSrc)
+	sleep := e.sleep
+	if sleep == nil {
+		sleep = sleepCtx
+	}
 	ctx, stop := signalContext(e, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ln, err := daemon.Listen(cfg.Socket)
 	// --wait: under brew services beside a plain install, wait for the
 	// other daemon to stop rather than fail and be restarted (#192).
-	for logged := false; wait && errors.Is(err, daemon.ErrLocked); ln, err = daemon.Listen(cfg.Socket) {
-		if !logged {
+	waited := false
+	for ; wait && errors.Is(err, daemon.ErrLocked); ln, err = daemon.Listen(cfg.Socket) {
+		if !waited {
 			log.Info("another daemon is running; waiting for it to stop", "socket", cfg.Socket)
-			logged = true
+			waited = true
 		}
-		sleepCtx(ctx, waitEvery)
+		sleep(ctx, waitEvery)
 		if ctx.Err() != nil {
 			return 0
 		}
@@ -281,6 +293,18 @@ func runDaemon(e Env) int {
 	log.Info("daemon started", "socket", cfg.Socket, "interval", cfg.Daemon.Interval.Duration, "samples", cfg.Samples.Enabled)
 
 	var wg sync.WaitGroup
+	// Uninstall of the other daemon may remove the shims just linked; check
+	// them once more, and never again (#193).
+	if link && waited {
+		wg.Go(func() {
+			sleep(ctx, recheckAfter)
+			if ctx.Err() != nil {
+				return
+			}
+			log.Info("checking the shims again", "dir", cfg.ShimDir)
+			linkOwnShims(e.Args[0], cfg.ShimDir, log)
+		})
+	}
 	if cfg.Samples.Enabled {
 		w := samples.NewWriter(cfg.SamplesDir(), cfg.Samples.Retention.Duration, log)
 		d.OnPublish(w.Offer)

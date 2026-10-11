@@ -316,3 +316,137 @@ func TestDaemonLogWithTildeNeedsHome(t *testing.T) {
 		t.Error("logged to a dir named ~")
 	}
 }
+
+// recheckSleep is a daemon sleep that waits as sleepCtx does, except for
+// the re-check's: that one it reports on rechecks, then holds until
+// release closes.
+func recheckSleep(rechecks chan<- time.Duration, release <-chan struct{}) func(context.Context, time.Duration) {
+	return func(ctx context.Context, d time.Duration) {
+		if d != recheckAfter {
+			sleepCtx(ctx, d)
+			return
+		}
+		rechecks <- d
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+}
+
+// A --link-shims daemon that waited for another to stop links its shims
+// once more, recheckAfter later: what uninstall removed after the other
+// daemon stopped is linked again, and someone else's link stays (#193).
+func TestADaemonThatWaitedLinksItsShimsAgain(t *testing.T) {
+	for name, tamper := range map[string]func(t *testing.T, shims string){
+		"a shim removed, another replaced": func(t *testing.T, shims string) {
+			if err := os.Remove(filepath.Join(shims, "docker")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(shims, "podman")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/opt/other/podman", filepath.Join(shims, "podman")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the shim folder removed": func(t *testing.T, shims string) {
+			if err := os.RemoveAll(shims); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := daemonDir(t)
+			shims := filepath.Join(dir, "shims")
+			env := func(k string) string { return map[string]string{"HEADROOM_CONFIG_DIR": dir}[k] }
+			first := selfLink(t, filepath.Join(dir, "first", "headroom"))
+			firstLog := filepath.Join(dir, "first.log")
+			ctx1, stop1 := context.WithCancel(context.Background())
+			t.Cleanup(stop1)
+			done1 := make(chan int, 1)
+			go func() {
+				done1 <- Run(Env{Args: []string{first, "daemon", "--link-shims", "--log", firstLog},
+					Stdout: &syncBuffer{}, Stderr: &syncBuffer{}, Getenv: env, Context: ctx1})
+			}()
+			waitFor(t, func() bool { b, _ := os.ReadFile(firstLog); return strings.Contains(string(b), "daemon started") })
+
+			second := selfLink(t, filepath.Join(dir, "second", "headroom"))
+			secondLog := filepath.Join(dir, "second.log")
+			read := func() string { b, _ := os.ReadFile(secondLog); return string(b) }
+			rechecks, release := make(chan time.Duration, 1), make(chan struct{})
+			ctx2, stop2 := context.WithCancel(context.Background())
+			t.Cleanup(stop2)
+			done2 := make(chan int, 1)
+			var errb syncBuffer
+			go func() {
+				done2 <- Run(Env{Args: []string{second, "daemon", "--wait", "--link-shims", "--log", secondLog},
+					Stdout: &errb, Stderr: &errb, Getenv: env, Context: ctx2, sleep: recheckSleep(rechecks, release)})
+			}()
+			waitFor(t, func() bool { return strings.Contains(read(), "waiting for it to stop") })
+			stop1()
+			<-done1
+			waitFor(t, func() bool { return strings.Contains(read(), "daemon started") })
+			select {
+			case <-rechecks:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no re-check scheduled:\n%s", read())
+			}
+			tamper(t, shims)
+			close(release)
+
+			waitFor(t, func() bool { return strings.Count(read(), "shims linked") == 2 })
+			if !strings.Contains(read(), "checking the shims again") {
+				t.Errorf("the re-check is not logged:\n%s", read())
+			}
+			for _, n := range []string{"docker", "podman", "tart"} {
+				want := second
+				if name == "a shim removed, another replaced" && n == "podman" {
+					want = "/opt/other/podman"
+				}
+				if target, err := os.Readlink(filepath.Join(shims, n)); err != nil || target != want {
+					t.Errorf("%s -> %q, %v; want %s", n, target, err, want)
+				}
+			}
+			stop2()
+			if code := <-done2; code != 0 {
+				t.Fatalf("second daemon exit %d: %s", code, errb.String())
+			}
+		})
+	}
+}
+
+// A daemon that took the lock at once links its shims only at start.
+func TestADaemonThatDidNotWaitLinksItsShimsOnce(t *testing.T) {
+	dir := daemonDir(t)
+	env := func(k string) string { return map[string]string{"HEADROOM_CONFIG_DIR": dir}[k] }
+	start := selfLink(t, filepath.Join(dir, "bin", "headroom"))
+	logPath := filepath.Join(dir, "daemon.log")
+	rechecks, release := make(chan time.Duration, 1), make(chan struct{})
+	close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan int, 1)
+	var errb syncBuffer
+	go func() {
+		done <- Run(Env{Args: []string{start, "daemon", "--wait", "--link-shims", "--log", logPath},
+			Stdout: &errb, Stderr: &errb, Getenv: env, Context: ctx, sleep: recheckSleep(rechecks, release)})
+	}()
+	read := func() string { b, _ := os.ReadFile(logPath); return string(b) }
+	waitFor(t, func() bool { return strings.Contains(read(), "daemon started") })
+	if err := os.Remove(filepath.Join(dir, "shims", "docker")); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	select {
+	case <-rechecks:
+		t.Errorf("a re-check was scheduled:\n%s", read())
+	default:
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "shims", "docker")); !os.IsNotExist(err) {
+		t.Errorf("docker was relinked: %v", err)
+	}
+}

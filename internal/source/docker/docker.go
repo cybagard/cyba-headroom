@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,7 +52,9 @@ type cpuCounters struct{ container, system uint64 }
 
 // New returns a source for the Engine API at socket alone.
 func New(socket string, vms vmproc.Lister) *Source {
-	s := Discover(func() []Candidate { return Candidates(socket, func(string) string { return "" }) }, vms)
+	s := Discover(func() []Candidate {
+		return Candidates(socket, func(string) string { return "" }, slog.New(slog.DiscardHandler))
+	}, vms)
 	s.socket, s.one = socket, dial(socket)
 	return s
 }

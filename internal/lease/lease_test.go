@@ -3385,25 +3385,57 @@ func TestAnUnnamedRequestIgnoresItsTarget(t *testing.T) {
 // by #109's dir rule and its attribution, before the named-before-unnamed
 // tie-break, which decides only a true tie; w1's lease never warns "never
 // appeared" (#122 review B3).
+// So does one the reading leaves unattributed: across worktrees the dir
+// decides, as between two named leases (#109).
 func TestAnUnnamedUpKeepsItsDirsContainerFromAnotherWorktreesNamedUp(t *testing.T) {
+	for _, wt := range []string{"w1", ""} {
+		b, c, log := book(t)
+		b.Observe(read(snap(), c.t))
+		u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
+			OnEngine: true, Target: "q"}, snap(), cfg)
+		l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("start", "q1", "q1", l)
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, wt), c.t))
+		if got := lease.Bound(b, u.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
+			t.Fatalf("attributed %q: w1's unnamed lease bound %v, want q1: %+v", wt, got, b.List())
+		}
+		for range 4 {
+			c.t = c.t.Add(time.Minute)
+			b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, wt), c.t))
+		}
+		if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "lease="+u.LeaseID+" ") {
+			t.Fatalf("attributed %q: w1's lease warned: %s", wt, log)
+		}
+	}
+}
+
+// w1's unnamed up in /src/a, then w1's named up of project q whose shim
+// found no dir (an .env that sets COMPOSE_FILE): q's container, labelled
+// with /src/a and attributed to w1, binds q's lease, whose project it is,
+// and q's lease never warns "never appeared" (#122 review B4). The dir
+// does not decide between two leases of one worktree when one is unnamed.
+func TestANamedUpWithNoDirInAnUnnamedUpsDirBindsItsOwnStack(t *testing.T) {
 	b, c, log := book(t)
 	b.Observe(read(snap(), c.t))
 	u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
-	b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
+	q := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
 		OnEngine: true, Target: "q"}, snap(), cfg)
 	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
 	c.t = c.t.Add(time.Second)
 	b.ContainerEvent("start", "q1", "q1", l)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
-	if got := lease.Bound(b, u.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
-		t.Fatalf("w1's unnamed lease bound %v, want q1: %+v", got, b.List())
+	if got := lease.Bound(b, q.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
+		t.Fatalf("q's lease bound %v, the unnamed one %v, want q's q1", got, lease.Bound(b, u.LeaseID))
 	}
 	for range 4 {
 		c.t = c.t.Add(time.Minute)
 		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
 	}
-	if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "lease="+u.LeaseID+" ") {
-		t.Fatalf("w1's lease warned: %s", log)
+	if strings.Contains(log.String(), "lease="+q.LeaseID+" ") && strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("q's lease warned: %s", log)
 	}
 }

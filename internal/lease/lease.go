@@ -1654,16 +1654,22 @@ func keyed(es []*entry, r resource, based, open bool) *entry {
 		if rank(e, r) != rank(best, r) {
 			return rank(e, r) < rank(best, r)
 		}
+		// In one worktree, a lease of r's project before an unnamed one,
+		// which keys every project in its dir (entry.unnamed): the dir
+		// cannot tell them apart. Across worktrees, the dir decides, then
+		// the attribution, as between two named leases (#109).
+		if win, ok := named(e, best, r); ok && e.Worktree == best.Worktree {
+			return win
+		}
 		if open && e.inDir(r) != best.inDir(r) {
 			return e.inDir(r)
 		}
 		if r.worktree != "" && (e.Worktree == r.worktree) != (best.Worktree == r.worktree) {
 			return e.Worktree == r.worktree
 		}
-		// Tied so far: a lease of r's project before an unnamed one, which
-		// keys every project in its dir (entry.unnamed).
-		if pe, pb := !e.unnamed && e.project == r.project, !best.unnamed && best.project == r.project; (e.unnamed || best.unnamed) && pe != pb {
-			return pe
+		// Still tied: the lease of r's project.
+		if win, ok := named(e, best, r); ok {
+			return win
 		}
 		if r.worktree != "" {
 			return !e.guessed && best.guessed
@@ -1679,6 +1685,13 @@ func keyed(es []*entry, r resource, based, open bool) *entry {
 		}
 	}
 	return best
+}
+
+// named reports, when exactly one of e and best is a lease of r's project
+// and the other is unnamed (entry.unnamed), whether e is the named one.
+func named(e, best *entry, r resource) (win, ok bool) {
+	pe, pb := !e.unnamed && e.project == r.project, !best.unnamed && best.project == r.project
+	return pe, (e.unnamed || best.unnamed) && pe != pb
 }
 
 // binds reports whether e, open or (open false) lapsed, keys r. Compose

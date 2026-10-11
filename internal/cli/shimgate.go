@@ -150,13 +150,24 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		return gated{proceed: true}
 	}
 	h := e.withDefaults()
-	if c.Kind == "machine" && c.Guessed {
-		// Which machine it starts is a guess: not the default's to size
-		// or key (R7, #230 plan amendment 4).
-		notGated(e, "podman machine start: an option the shim does not know", c.Command)
+	if c.Guessed {
+		// What it starts is a guess: which machine, pods or container, not
+		// the default's to size or key (R7, #230 plan amendment 4, #241).
+		notGated(e, c.Command+": an option the shim does not know", c.Command)
 		return gated{proceed: true}
 	}
-	if c.Kind == "machine" {
+	if c.Kind == "container" && c.Op == "clone" && c.Name == "" {
+		// Podman names the clone itself: nothing would key its lease, which
+		// would never bind (#241 plan amendment 1).
+		notGated(e, "podman container clone: no name for the new container", c.Command)
+		return gated{proceed: true}
+	}
+	if c.Kind == "machine" && c.Op == "init" && c.Target == "" {
+		// The machine it makes, sized by its own --memory (the parser's):
+		// there is none yet to inspect (#241).
+		c.Target = "podman-machine-default"
+	}
+	if c.Kind == "machine" && c.Op == "start" {
 		// The machine's own memory, and its name: the default machine's
 		// when the call names none (#230).
 		name, mem, err := machineOf(bin, c.Target, h.machineAsk)

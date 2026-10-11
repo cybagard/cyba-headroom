@@ -142,6 +142,38 @@ func TestParse(t *testing.T) {
 		{"podman kube", Call{}},
 		{"docker pod start web", Call{}},
 		{"podman container pod start web", Call{}},
+		// The rest that start something, each only with its start flag
+		// (#241): machine init --now, sized by its --memory (MiB), else
+		// Podman's 2048; pod clone --start and container clone --run, keyed
+		// by the new name (NAME, else --name); pod restart, as pod start.
+		{"podman machine init --now", Call{Kind: "machine", Op: "init", Command: "podman machine init", MemoryBytes: 2048 << 20}},
+		{"podman machine init --now --memory 4096 vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init vm-a", Target: "vm-a", MemoryBytes: 4 << 30}},
+		{"podman machine init -m=1024 -v /src:/src --now=true vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init vm-a", Target: "vm-a", MemoryBytes: 1 << 30}},
+		{"podman machine init --memory 4096 vm-a", Call{}},
+		{"podman machine init --now=false vm-a", Call{}},
+		{"podman machine init --now vm-a --help", Call{}},
+		{"podman machine init --now --future x vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init", Guessed: true}},
+		{"podman pod clone --start src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod clone -h host -m 1g --start src", Call{Kind: "pod", Op: "clone", Command: "podman pod clone"}},
+		{"podman pod clone --start -n new src", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod clone --start --name other src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod clone src new", Call{}},
+		{"podman pod clone --start src new --help", Call{}},
+		{"podman pod clone --start --future x src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone", Guessed: true}},
+		{"podman pod restart web", Call{Kind: "pod", Op: "restart", Command: "podman pod restart web", Target: "web"}},
+		{"podman pod restart web db", Call{Kind: "pod", Op: "restart", Command: "podman pod restart web", Target: "web", MultiTarget: true, Targets: []string{"web", "db"}}},
+		{"podman pod restart -a", Call{Kind: "pod", Op: "restart", Command: "podman pod restart"}},
+		{"podman pod restart web --help", Call{}},
+		{"podman pod restart --future web", Call{Kind: "pod", Op: "restart", Command: "podman pod restart", Guessed: true}},
+		{"podman container clone --run c new img", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new"}},
+		{"podman container clone -m 2g --run c", Call{Kind: "container", Op: "clone", Command: "podman container clone"}},
+		{"podman container clone --run --name new c", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new"}},
+		{"podman --connection m1 container clone --run c new", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new", Context: "m1"}},
+		{"podman container clone c new", Call{}},
+		{"podman container clone --run c new --help", Call{}},
+		{"podman container clone --run --future x c new", Call{Kind: "container", Op: "clone", Command: "podman container clone", Guessed: true}},
+		{"docker container clone --run c new", Call{}},
+		{"podman clone --run c new", Call{}},
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
 		{"tart run --no-graphics --dir src:/tmp/src ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
@@ -220,6 +252,10 @@ func TestFlagTablesMatchTheCLIs(t *testing.T) {
 		{podStart, []string{"podman-pod-start"}},
 		{kubePlay, []string{"podman-kube-play", "podman-play-kube"}},
 		{machineStart, []string{"podman-machine-start"}},
+		{machineInit, []string{"podman-machine-init"}},
+		{podClone, []string{"podman-pod-clone"}},
+		{podRestart, []string{"podman-pod-restart"}},
+		{containerClone, []string{"podman-container-clone"}},
 	} {
 		want := flagSet{}
 		for _, h := range c.help {

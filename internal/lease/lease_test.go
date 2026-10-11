@@ -3189,3 +3189,253 @@ func TestAHandLabelledContainerBindsNoComposeLeaseAtItsStart(t *testing.T) {
 		t.Fatalf("reserved = %d MiB, want w1's up's 2048 MiB: %+v", got>>20, b.List())
 	}
 }
+
+// unnamedUp is wt's stdin up in dir whose project name the shim could not
+// know (#122): its dir is its key.
+func unnamedUp(wt, dir string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose -f - up", CostBytes: 2 * gib,
+		OnEngine: true, ComposeDir: dir, Unnamed: true}
+}
+
+// pipedLabels are a container's of project piped, which Compose labelled
+// with dir ("": none, labelled by hand).
+func pipedLabels(dir string) map[string]string {
+	l := map[string]string{protocol.ComposeProjectLabel: "piped"}
+	if dir != "" {
+		l[protocol.ComposeWorkingDirLabel] = dir
+	}
+	return l
+}
+
+// An up whose name the shim could not know is keyed by its dir alone
+// (#122): a container Compose labelled with that dir binds it, whatever its
+// project, and its reservation shrinks as the stack warms.
+func TestAnUnnamedUpBindsItsDirsStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	for _, used := range []uint64{gib / 2, gib} {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: used, Labels: pipedLabels("/src/a")}, "w1"), c.t))
+		if got := reserved(b); got != 2*gib-used {
+			t.Fatalf("a1 using %d MiB: reserved = %d MiB, want %d MiB: %+v", used>>20, got>>20, (2*gib-used)>>20, b.List())
+		}
+	}
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("ungated %+v, log: %s", u, log)
+	}
+}
+
+// A container labelled with another dir, or with none, binds no unnamed up,
+// at its start event or at a reading, even one that gives it the up's
+// worktree (#122, #109): the up's reservation stands.
+func TestAnUnnamedUpBindsNoOtherDirsContainer(t *testing.T) {
+	for _, tc := range []struct{ dir, wt string }{
+		{"/src/b", ""}, {"/src/b", "w1"}, {"", ""}, {"", "w1"},
+	} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("start", "x1", "x1", pipedLabels(tc.dir))
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "x1", Name: "x1", MemoryBytes: gib, Labels: pipedLabels(tc.dir)}, tc.wt), c.t))
+		if got := reserved(b); got != 2*gib {
+			t.Errorf("labelled %q, in %q: reserved = %d MiB, want the up's 2048 MiB: %+v", tc.dir, tc.wt, got>>20, b.List())
+		}
+	}
+}
+
+// Two stdin ups whose name the shim could not know, in one dir and one
+// worktree, reserve once: the second takes the first over, as a repeat up
+// of a named project does (#85's R1, #122). In another dir or another
+// worktree, each reserves.
+func TestARepeatUnnamedUpTakesTheFirstOver(t *testing.T) {
+	for _, tc := range []struct {
+		name, wt, dir string
+		want          uint64
+	}{
+		{"the same dir and worktree", "w1", "/src/a", 2 * gib},
+		{"another dir", "w1", "/src/b", 4 * gib},
+		{"another worktree", "w2", "/src/a", 4 * gib},
+	} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		if d := b.Check(unnamedUp(tc.wt, tc.dir), snap(), cfg); !d.Allow {
+			t.Fatalf("%s: %+v", tc.name, d)
+		}
+		if got := reserved(b); got != tc.want {
+			t.Errorf("%s: reserved = %d MiB, want %d MiB: %+v", tc.name, got>>20, tc.want>>20, b.List())
+		}
+	}
+}
+
+// A repeat stdin up whose name the shim could not know, of a stack that
+// runs once the first up's lease ended, holds the stack as a repeat up of
+// a named project does: it never warns "never appeared" (#122).
+func TestARepeatUnnamedUpHoldsItsRunningStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	running := func() *protocol.Snapshot {
+		s := read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: 2 * gib, Labels: pipedLabels("/src/a")}, "w1"), c.t)
+		s.CollectedAt = c.t
+		return s
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(running()) // it uses the lease's cost: the lease ends
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want the first ended", l)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Check(unnamedUp("w1", "/src/a"), running(), cfg)
+	for range 3 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(running())
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// qUp is w1's named up of project q in /src/a, the dir of an unnamed up.
+func qUp() policy.Request {
+	return policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
+		OnEngine: true, ComposeDir: "/src/a", Target: "q"}
+}
+
+// An unnamed up in /src/a, then a named up of project q in the same dir and
+// worktree: q's container binds q's lease, whose project it is, not the
+// unnamed one, and q's lease never warns "never appeared" (#122 review B1).
+func TestANamedUpInAnUnnamedUpsDirBindsItsOwnStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	q := b.Check(qUp(), snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	if got := lease.Bound(b, q.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
+		t.Fatalf("q's lease bound %v, want q1: %+v", got, b.List())
+	}
+	for range 4 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	}
+	if strings.Contains(log.String(), "lease="+q.LeaseID+" ") && strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("q's lease warned: %s", log)
+	}
+}
+
+// An unnamed up binds a container of project q in its dir, no named lease
+// keying it: a later -p q up does not take the unnamed lease over as q's
+// (#122 review B1b). The unnamed lease keeps its own key, and each reserves.
+func TestANamedUpDoesNotTakeAnUnnamedLeaseOver(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib / 2,
+		Labels: map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}}, "w1"), c.t))
+	if got := lease.Bound(b, d.LeaseID); len(got) != 1 {
+		t.Fatalf("the unnamed lease bound %v, want q1", got)
+	}
+	b.Check(qUp(), snap(), cfg)
+	if l := b.List(); len(l) != 2 || l[0].ID != d.LeaseID {
+		t.Fatalf("leases = %+v, want the unnamed one kept beside q's", l)
+	}
+}
+
+// A request marked Unnamed that also carries a Target (the dir's name, for
+// an older daemon, #122 B2) is decided and keyed exactly as one with none:
+// the dir is its key, and the Target is ignored.
+func TestAnUnnamedRequestIgnoresItsTarget(t *testing.T) {
+	run := func(target string) (got []string) {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		r := unnamedUp("w1", "/src/a")
+		r.Target = target
+		b.Check(r, snap(), cfg)
+		r2 := unnamedUp("w1", "/src/a")
+		r2.Target = target
+		b.Check(r2, snap(), cfg) // a repeat: taken over
+		named := upIn("w1", "/src/a")
+		named.Target = target
+		b.Check(named, snap(), cfg) // a named up of the Target's project: not taken over
+		c.t = c.t.Add(5 * time.Second)
+		s := addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: pipedLabels("/src/a")}, "w1")
+		s = addContainer(s, protocol.Container{ID: "b1", Name: "b1", MemoryBytes: gib / 2, Labels: pipedLabels("/src/b")}, "w1")
+		b.Observe(read(s, c.t))
+		for _, l := range b.List() {
+			got = append(got, fmt.Sprintf("%s %d", l.Command, l.Bytes>>20))
+		}
+		for _, u := range b.Ungated() {
+			got = append(got, "ungated "+u.Key)
+		}
+		return got
+	}
+	if without, with := run(""), run("a"); !slices.Equal(without, with) {
+		t.Fatalf("with a Target: %v, without: %v", with, without)
+	}
+}
+
+// w1's unnamed up in /src/a, and w2's named up of project q with no dir: a
+// q container labelled with /src/a and attributed to w1 binds w1's lease,
+// by #109's dir rule and its attribution, before the named-before-unnamed
+// tie-break, which decides only a true tie; w1's lease never warns "never
+// appeared" (#122 review B3).
+// So does one the reading leaves unattributed: across worktrees the dir
+// decides, as between two named leases (#109).
+func TestAnUnnamedUpKeepsItsDirsContainerFromAnotherWorktreesNamedUp(t *testing.T) {
+	for _, wt := range []string{"w1", ""} {
+		b, c, log := book(t)
+		b.Observe(read(snap(), c.t))
+		u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		b.Check(policy.Request{Worktree: "w2", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
+			OnEngine: true, Target: "q"}, snap(), cfg)
+		l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("start", "q1", "q1", l)
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, wt), c.t))
+		if got := lease.Bound(b, u.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
+			t.Fatalf("attributed %q: w1's unnamed lease bound %v, want q1: %+v", wt, got, b.List())
+		}
+		for range 4 {
+			c.t = c.t.Add(time.Minute)
+			b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, wt), c.t))
+		}
+		if strings.Contains(log.String(), "never appeared") && strings.Contains(log.String(), "lease="+u.LeaseID+" ") {
+			t.Fatalf("attributed %q: w1's lease warned: %s", wt, log)
+		}
+	}
+}
+
+// w1's unnamed up in /src/a, then w1's named up of project q whose shim
+// found no dir (an .env that sets COMPOSE_FILE): q's container, labelled
+// with /src/a and attributed to w1, binds q's lease, whose project it is,
+// and q's lease never warns "never appeared" (#122 review B4). The dir
+// does not decide between two leases of one worktree when one is unnamed.
+func TestANamedUpWithNoDirInAnUnnamedUpsDirBindsItsOwnStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	u := b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	q := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose -p q up", CostBytes: 2 * gib,
+		OnEngine: true, Target: "q"}, snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "q1", "q1", l)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	if got := lease.Bound(b, q.LeaseID); !slices.Equal(got, []string{"container:q1"}) {
+		t.Fatalf("q's lease bound %v, the unnamed one %v, want q's q1", got, lease.Bound(b, u.LeaseID))
+	}
+	for range 4 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: gib, Labels: l}, "w1"), c.t))
+	}
+	if strings.Contains(log.String(), "lease="+q.LeaseID+" ") && strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("q's lease warned: %s", log)
+	}
+}

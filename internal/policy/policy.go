@@ -118,6 +118,9 @@ type Request struct {
 	// ComposeDir is the working dir Compose labels a compose call's
 	// project with, or "" when the shim cannot be sure of it (#158).
 	ComposeDir string
+	// Unnamed is set for a compose call whose project name the shim cannot
+	// know: ComposeDir keys its lease, and Target is ignored (#122).
+	Unnamed bool
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far

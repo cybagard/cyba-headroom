@@ -581,11 +581,6 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already counts. Allowed, and no lease.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
-	if r.Kind == "pod" && r.Op == "restart" && len(r.Pods) == 0 {
-		// pod restart --all restarts the pods that run: their containers
-		// already count. Allowed, and no lease (#241 plan amendment 1).
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it restarts running pods)", Summary(r.Command))}
-	}
 	if r.Kind == "pod" && (r.Op == "start" || r.Op == "restart") && s != nil && podsRun(s, r.Pods) {
 		// Each of its pods runs: podman starts nothing, or restarts what
 		// already counts. Allowed, and no lease (#230, plan amendment 3;

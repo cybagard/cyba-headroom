@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -77,11 +78,8 @@ const (
 // per PID.
 type Finder struct {
 	sys System
-	// tartVMs is TART_HOME's vms folder with a trailing slash; empty without
-	// one.
-	tartVMs string
-	// tartOCIs is its OCI cache folder, likewise.
-	tartOCIs string
+	// tartHome is the Tart home (TartHome); empty without one.
+	tartHome string
 
 	mu    sync.Mutex
 	known map[int]identity
@@ -109,18 +107,49 @@ func TartHome(getenv func(string) string) string {
 
 // WithTartHome makes f also recognise Tart VMs under home (TartHome): local
 // VMs in vms/<name>/ and VMs run from the OCI cache in cache/OCIs/. An empty
-// or relative home is ignored, as tart's shim ignores it. lsof prints resolved paths, so home is
-// resolved too (/tmp is /private/tmp on macOS); if it can't be, it is used
-// as given.
+// or relative home is ignored, as tart's shim ignores it.
 func (f *Finder) WithTartHome(home string) *Finder {
 	if path.IsAbs(home) {
-		if resolved, err := filepath.EvalSymlinks(home); err == nil {
-			home = resolved
-		}
-		f.tartVMs = path.Join(home, "vms") + "/"
-		f.tartOCIs = path.Join(home, "cache", "OCIs") + "/"
+		f.tartHome = home
 	}
 	return f
+}
+
+// tartLocation is a folder whose open files mark a Tart VM, as lsof prints
+// it: resolved, with a trailing slash.
+type tartLocation struct {
+	dir string
+	// name is the local VM's name; empty for the OCI cache, where which of
+	// tart list's names a VM runs under is not known.
+	name string
+	// nameFromPath takes the name from the folder after dir instead: the
+	// vms folder itself, for a VM folder not read from it.
+	nameFromPath bool
+}
+
+// tartLocations lists the Tart home's VM folders and its OCI cache. lsof
+// prints resolved paths and a symlink can sit at any level under the home
+// (the home, vms/, cache/, one VM's folder), so each location is resolved
+// itself; one that can't be is used as given. The VM folders are read
+// afresh on each scan, since VMs come and go; the vms folder itself comes
+// last, for one that can't be read.
+func (f *Finder) tartLocations() []tartLocation {
+	if f.tartHome == "" {
+		return nil
+	}
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return path.Clean(p) + "/"
+	}
+	locs := []tartLocation{{dir: resolve(path.Join(f.tartHome, "cache", "OCIs"))}}
+	vms := path.Join(f.tartHome, "vms")
+	entries, _ := os.ReadDir(vms) // none yet: no local VM to match
+	for _, e := range entries {
+		locs = append(locs, tartLocation{dir: resolve(path.Join(vms, e.Name())), name: e.Name()})
+	}
+	return append(locs, tartLocation{dir: resolve(vms), nameFromPath: true})
 }
 
 // List returns the running VMs, in PID order of the system listing. A process
@@ -132,9 +161,10 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 		return nil, fmt.Errorf("vmproc: listing processes: %w", err)
 	}
 	f.forgetExited(pids)
+	tart := f.tartLocations()
 	vms := make([]VM, 0, len(pids))
 	for _, pid := range pids {
-		id, err := f.identify(ctx, pid)
+		id, err := f.identify(ctx, pid, tart)
 		var fp uint64
 		if err == nil {
 			fp, err = f.footprint(ctx, pid)
@@ -172,7 +202,7 @@ func (f *Finder) forgetExited(live []int) {
 	}
 }
 
-func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
+func (f *Finder) identify(ctx context.Context, pid int, tart []tartLocation) (identity, error) {
 	f.mu.Lock()
 	id, ok := f.known[pid]
 	f.mu.Unlock()
@@ -183,7 +213,7 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 	if err != nil {
 		return identity{}, err
 	}
-	id = classify(out, f.tartVMs, f.tartOCIs)
+	id = classify(out, tart)
 	// Unknown is not cached: a VM caught while booting has not opened its
 	// image yet and is classified once it has.
 	if id.kind != Unknown {
@@ -195,9 +225,9 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 }
 
 // classify reads lsof -Fn output: an "f<fd>" line, then an "n<path>" line,
-// per open file. The first txt file is the executable. tartVMs and tartOCIs,
-// if not empty, are the Tart home's VM and OCI cache folders.
-func classify(lsof []byte, tartVMs, tartOCIs string) identity {
+// per open file. The first txt file is the executable. tart is the Tart
+// home's locations.
+func classify(lsof []byte, tart []tartLocation) identity {
 	var fd, command string
 	sc := bufio.NewScanner(bytes.NewReader(lsof))
 	for sc.Scan() {
@@ -215,19 +245,20 @@ func classify(lsof []byte, tartVMs, tartOCIs string) identity {
 		if strings.Contains(p, "/Docker.app/") || strings.Contains(p, "/com.docker.docker/") {
 			return identity{kind: Docker}
 		}
+		// A VM run from the OCI cache holds the digest folder its tag links
+		// to open: its location is the cache, and it is left unnamed.
+		for _, l := range tart {
+			if rest, ok := strings.CutPrefix(p, l.dir); ok {
+				name := l.name
+				if l.nameFromPath {
+					name, _, _ = strings.Cut(rest, "/")
+				}
+				return identity{kind: Tart, name: name}
+			}
+		}
 		if _, rest, ok := strings.Cut(p, "/.tart/vms/"); ok {
 			name, _, _ := strings.Cut(rest, "/")
 			return identity{kind: Tart, name: name}
-		}
-		if rest, ok := strings.CutPrefix(p, tartVMs); ok && tartVMs != "" {
-			name, _, _ := strings.Cut(rest, "/")
-			return identity{kind: Tart, name: name}
-		}
-		// A VM run from the OCI cache holds the digest folder its tag links
-		// to open; which of tart list's names it runs under is not known, so
-		// it is left unnamed.
-		if strings.HasPrefix(p, tartOCIs) && tartOCIs != "" {
-			return identity{kind: Tart}
 		}
 		// A Podman machine also holds its EFI store open there: only the
 		// disk, <machine>-<arch>.raw, names it (spike #49).

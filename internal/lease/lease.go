@@ -580,6 +580,12 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already counts. Allowed, and no lease.
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
 	}
+	if r.Kind == "pod" && s != nil && podsRun(s, r.Pods) {
+		// Each of its pods runs: podman starts nothing, and their
+		// containers already count. Allowed, and no lease (#230, plan
+		// amendment 3).
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}
+	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
 	if !d.Allow {
@@ -730,6 +736,16 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
 	return d
+}
+
+// podsRun reports whether s shows a running container of each of pods,
+// by name; false for none.
+func podsRun(s *protocol.Snapshot, pods []string) bool {
+	running := map[string]bool{}
+	for _, c := range s.Containers() {
+		running[c.Pod] = c.Pod != ""
+	}
+	return len(pods) > 0 && !slices.ContainsFunc(pods, func(p string) bool { return !running[p] })
 }
 
 // resource is a container or VM in a snapshot.
@@ -1670,6 +1686,8 @@ func rank(e *entry, r resource) int {
 		return 1 // docker start of a stopped service: its own lease
 	case len(e.containerIDs) > 0, e.Kind == "compose" && (!e.oneoff || r.oneoff):
 		return 2
+	case e.Kind == "pod" && len(e.pods) == 0:
+		return 4 // a pod lease with no pod: any lease that keys r wins it
 	}
 	return 3
 }
@@ -1791,6 +1809,12 @@ func (e *entry) key(r resource, based bool) bool {
 	case r.kind == "machine":
 		// A podman machine start's VM: its machine's, by name.
 		return e.Kind == "machine" && based && e.takes(r) && e.target != "" && e.target == r.name
+	case e.Kind == "pod" && len(e.pods) == 0:
+		// One with no pod to name (pod start --all, a kube file on stdin):
+		// a new container in a pod, in its own worktree, that no other
+		// lease keys (rank), so the containers it starts are not ungated
+		// (#230, plan amendment 3).
+		return based && r.kind == "container" && r.pod != "" && r.worktree != "" && r.worktree == e.Worktree && !e.bound[r.key]
 	case e.Kind == "pod":
 		// A pod start's or kube play's: each container of its pods, as
 		// the Podman engine names them (#230).
@@ -1846,12 +1870,11 @@ func (e *entry) hasKey() bool {
 		len(e.pods) > 0
 }
 
-// inPods reports whether container r is in one of e's pods: by its name,
-// or by its ID or a prefix of it, as podman takes one.
+// inPods reports whether container r is in one of e's pods, by its name
+// exactly: pod IDs are hex, so a name may be a prefix of another pod's ID
+// (#230, plan amendment 3).
 func (e *entry) inPods(r resource) bool {
-	return r.pod != "" && slices.ContainsFunc(e.pods, func(p string) bool {
-		return p == r.pod || p != "" && strings.HasPrefix(r.podID, p)
-	})
+	return r.pod != "" && slices.Contains(e.pods, r.pod)
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and

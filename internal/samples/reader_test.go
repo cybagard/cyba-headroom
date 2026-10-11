@@ -267,3 +267,24 @@ func TestReadSkipsV1SamplesWithANote(t *testing.T) {
 		t.Fatalf("stats %+v; want no outdated sample in range", st)
 	}
 }
+
+// A sample with more engines or VMs than a Mac runs is skipped as broken: a
+// crafted line must not make a replay slow (#229, review B1).
+func TestReadSkipsSamplesWithTooManyEnginesOrVMs(t *testing.T) {
+	line := func(at string, key, item string, n int) string {
+		return `{"v":2,"t":"` + at + `","` + key + `":[` + strings.TrimSuffix(strings.Repeat(item+",", n), ",") + `]}` + "\n"
+	}
+	dir := threeDays(t)
+	f, err := os.OpenFile(filepath.Join(dir, "2026-10-08.jsonl"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(line("2026-10-08T14:00:00Z", "engines", `{}`, 64) + line("2026-10-08T14:00:05Z", "engines", `{}`, 65) +
+		line("2026-10-08T14:00:10Z", "podman", `{}`, 256) + line("2026-10-08T14:00:15Z", "podman", `{}`, 257) +
+		line("2026-10-08T14:00:20Z", "other_vms", `{}`, 256) + line("2026-10-08T14:00:25Z", "other_vms", `{}`, 257))
+	_ = f.Close()
+	got, st := readAll(t, dir, time.Time{}, day1.AddDate(1, 0, 0))
+	if len(got) != 9 || st.Skipped != 3 {
+		t.Fatalf("got %d samples, stats %+v; want 9 read and the 3 over the caps skipped", len(got), st)
+	}
+}

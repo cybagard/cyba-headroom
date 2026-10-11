@@ -356,7 +356,12 @@ func (in *installer) uninstall(ctx context.Context) int {
 		// Ours is unloaded, so nothing of ours can be refused again; the
 		// marker goes, held lock or not (#194).
 		_ = os.Remove(lock + ".reported")
-		removeLock(lock, cfgDir)
+		// With both agents, Homebrew's --wait daemon may have the lock
+		// file open to take it: unlinking it could leave two daemons
+		// each holding a lock.
+		if brewPlist(in.home) == "" {
+			removeLock(lock, cfgDir)
+		}
 	}
 	fmt.Fprintln(in.out, "headroom daemon removed from launchd.")
 	if len(gone) > 0 || len(shims) > 0 {

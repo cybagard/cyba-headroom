@@ -1033,3 +1033,27 @@ func TestUninstallKeepsALockAnotherDaemonHolds(t *testing.T) {
 		t.Errorf("held lock removed: %v", err)
 	}
 }
+
+// In the both state, Homebrew's --wait daemon may have opened the lock
+// file to take it: an unheld lock stays, and so does the folder, or two
+// daemons could each hold a lock (#194, review round 1).
+func TestUninstallInTheBothStateKeepsAnUnheldLock(t *testing.T) {
+	f := newInstallFixture(t)
+	if err := os.Remove(filepath.Join(f.cfg, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	lock := f.in.socket + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.writeBrewPlist(t, "sh.brew.headroom.plist")
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("unheld lock removed in the both state: %v", err)
+	}
+}

@@ -25,7 +25,7 @@ func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribut
 		for i, w := range s.Orca.Worktrees {
 			wts = append(wts, Worktree{ID: w.ID, Path: w.Path})
 			index[w.ID] = i
-			wu := protocol.WorktreeUsage{ID: w.ID, Path: w.Path, Name: w.Name}
+			wu := protocol.WorktreeUsage{ID: w.ID, Path: w.Path, Name: w.Name, Project: w.Project}
 			if s.Orca.MemoryError == "" {
 				mem, cpu := w.MemoryBytes, w.CPUPercent
 				wu.AgentMemoryBytes, wu.AgentCPUPercent = &mem, &cpu

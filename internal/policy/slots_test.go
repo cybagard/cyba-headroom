@@ -161,3 +161,15 @@ func TestStopOfferNeedsAKnownIdleTimeAndASafeName(t *testing.T) {
 		t.Fatalf("the idle-holder rule changed: %+v", d)
 	}
 }
+
+// The slot holders are named project/name, as the view does (#102).
+func TestSlotHoldersAreNamedByProject(t *testing.T) {
+	s := slotSnap()
+	s.Attribution.Worktrees[0].Project, s.Attribution.Worktrees[0].Name = "project-a", "main"
+	s.Attribution.Worktrees[1].Project, s.Attribution.Worktrees[1].Name = "project-b", "main"
+	msg := policy.Decide(tartReq("busy", true), s, slotCfg).Reasons[0].Text
+	if !strings.Contains(msg, `rel-mac (worktree "project-b/main": agents done`) ||
+		!strings.Contains(msg, `ci-mac (worktree "project-a/main": an agent working)`) {
+		t.Fatalf("message %q", msg)
+	}
+}

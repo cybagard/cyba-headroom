@@ -277,11 +277,34 @@ func visible(s string) int {
 
 func TestNamesUseTheirColumn(t *testing.T) {
 	s := busy()
-	s.Attribution.Worktrees[0].Name = "exactly-eighteen-c" // 18 runes: fits
-	s.Attribution.Worktrees[1].Name = "nineteen-characters"
+	s.Attribution.Worktrees[0].Name = "exactly-twenty-eight-runes-x" // 28 runes: fits
+	s.Attribution.Worktrees[1].Name = "twenty-nine-runes-is-one-more"
 	lines := render(t, s, view.Options{})
-	line(t, lines, "exactly-eighteen-c ")
-	line(t, lines, "nineteen-characte… ")
+	line(t, lines, "exactly-twenty-eight-runes-x ")
+	line(t, lines, "twenty-nine-runes-is-one-mo… ")
+}
+
+// Rows are labelled project/name, so two projects' primary checkouts, both
+// named main, can be told apart (#102). A worktree with no project shows its
+// name alone, and the label is cut like any name.
+func TestRowsAreLabelledByProject(t *testing.T) {
+	s := busy()
+	s.Attribution.Worktrees[0].Project, s.Attribution.Worktrees[0].Name = "project-a", "main"
+	s.Attribution.Worktrees[1].Project, s.Attribution.Worktrees[1].Name = "project-b", "main"
+	s.Attribution.Worktrees[3].Project, s.Attribution.Worktrees[3].Name = "a-rather-long-project", "feature-x"
+	lines := render(t, s, view.Options{})
+	has(t, line(t, lines, "project-a/main "), "claude working")
+	has(t, line(t, lines, "project-b/main "), "claude done")
+	line(t, lines, "a-rather-long-project/featu… ")
+	if r := line(t, lines, "WORKTREE"); !strings.HasPrefix(r, "WORKTREE"+strings.Repeat(" ", 21)+"AGENTS") {
+		t.Errorf("header = %q, want a 28-column WORKTREE", r)
+	}
+
+	s = busy()
+	s.Attribution.Worktrees[0].Name, s.Attribution.Worktrees[0].Path = "", "/Users/dev/src/no-project"
+	if r := line(t, render(t, s, view.Options{}), "no-project "); !strings.HasPrefix(r, "no-project ") {
+		t.Errorf("row = %q, want the name alone", r)
+	}
 }
 
 func TestUnknownPressureShowsQuestionMark(t *testing.T) {

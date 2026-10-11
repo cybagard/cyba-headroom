@@ -687,3 +687,17 @@ func TestDoctorShimsRemedyNamesWhatRelinksThem(t *testing.T) {
 		})
 	}
 }
+
+// The identity check names worktrees project/name, as the view does (#102),
+// including the one the working directory points at.
+func TestDoctorIdentityNamesTheProject(t *testing.T) {
+	r := newDoctorRig(t)
+	r.snap.Orca.Worktrees[0].Project, r.snap.Orca.Worktrees[0].Name = "project-a", "main"
+	r.snap.Orca.Worktrees[1].Project, r.snap.Orca.Worktrees[1].Name = "project-b", "main"
+	r.cwd = "/Users/dev/src/b"
+	_, out := r.run()
+	wantMark(t, out, "identity", "!", `worktree "project-a/main" (wt-a)`)
+	if !strings.Contains(out, `in worktree "project-b/main" (wt-b)`) {
+		t.Errorf("the working directory's worktree is not named by project:\n%s", out)
+	}
+}

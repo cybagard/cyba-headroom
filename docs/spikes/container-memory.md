@@ -2,7 +2,7 @@
 
 Issue: #9 · Docker Desktop 4.93.0 (240920), engine 29.8.1, LinuxKit kernel 7.0.14 · macOS, 64 GB · 2026-10-07
 
-**Podman is not installed on this machine and was not measured.** Re-run this spike if Podman gets used (its VM is a separate `vfkit`/`krunkit` process, and the same method applies).
+**Podman is not installed on this machine and was not measured.** Re-run this spike if Podman gets used (its VM is a separate `vfkit`/`krunkit` process, and the same method applies). Superseded for Podman by `podman.md`: `vfkit` only launches the VM, which runs in `com.apple.Virtualization.VirtualMachine`.
 
 ## Answer
 

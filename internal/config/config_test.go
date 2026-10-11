@@ -138,6 +138,9 @@ func TestLoadErrors(t *testing.T) {
 		{"negative ollama idle", "[budget]\nollama_idle_gb = -0.5\n", "budget.ollama_idle_gb must be >= 0"},
 		{"absurd baseline", "[budget]\nhost_baseline_gb = 1e10\n", "budget.host_baseline_gb must be <= 1024"},
 		{"absurd docker overhead", "[budget]\ndocker_overhead_gb = 5000\n", "budget.docker_overhead_gb must be <= 1024"},
+		{"negative podman overhead", "[budget]\npodman_overhead_gb = -1\n", "budget.podman_overhead_gb must be >= 0"},
+		{"absurd podman overhead", "[budget]\npodman_overhead_gb = 5000\n", "budget.podman_overhead_gb must be <= 1024"},
+		{"NaN podman overhead", "[budget]\npodman_overhead_gb = nan\n", "budget.podman_overhead_gb must be a number"},
 		{"retention under a day", "[samples]\nretention = \"12h\"\n", "samples.retention must be at least 24h"},
 		{"NaN baseline", "[budget]\nhost_baseline_gb = nan\n", "budget.host_baseline_gb must be a number"},
 		{"NaN headroom", "[policy]\nmin_headroom_gb = nan\n", "policy.min_headroom_gb must be >= 0"},
@@ -192,11 +195,11 @@ func write(t *testing.T, dir, body string) {
 
 func TestBudgetParams(t *testing.T) {
 	d := Defaults("/x").Budget
-	if d.DockerOverheadGB != 1.6 || d.LMStudioIdleGB != 0.6 || d.OllamaIdleGB != 0.1 || d.HostBaselineGB != 0 {
-		t.Fatalf("defaults = %+v, want docker 1.6, lmstudio 0.6, ollama 0.1, baseline 0 (set by #23)", d)
+	if d.DockerOverheadGB != 1.6 || d.PodmanOverheadGB != 1.0 || d.LMStudioIdleGB != 0.6 || d.OllamaIdleGB != 0.1 || d.HostBaselineGB != 0 {
+		t.Fatalf("defaults = %+v, want docker 1.6, podman 1.0, lmstudio 0.6, ollama 0.1, baseline 0 (set by #23)", d)
 	}
-	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, LMStudioIdleGB: 0.25, OllamaIdleGB: 0.5}.Params()
-	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.LMStudioIdleBytes != 1<<28 || p.OllamaIdleBytes != 1<<29 {
+	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, PodmanOverheadGB: 0.75, LMStudioIdleGB: 0.25, OllamaIdleGB: 0.5}.Params()
+	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.PodmanOverheadBytes != 3<<28 || p.LMStudioIdleBytes != 1<<28 || p.OllamaIdleBytes != 1<<29 {
 		t.Fatalf("params = %+v; GB means GiB, as macOS reports memory", p)
 	}
 }

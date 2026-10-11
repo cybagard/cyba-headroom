@@ -492,3 +492,63 @@ func TestOtherVMsWithNoReadingYetAreUnknown(t *testing.T) {
 		t.Errorf("stale = %v, want vms", b.Stale)
 	}
 }
+
+// podmanEngine is Podman's engine on machine, its VM at 1 GiB, running a
+// container of 512 MiB.
+func podmanEngine(machine string) protocol.Engine {
+	return protocol.Engine{Kind: protocol.EnginePodman, Socket: "/tmp/podman.sock", ID: "00000000-0000-4000-8000-000000000002",
+		Machine: machine, Running: true, VMRunning: true, VMFootprintBytes: gib,
+		Containers: []protocol.Container{{MemoryBytes: gib / 2}}}
+}
+
+// Podman's engine is reserved as Docker's is, with Podman's own overhead,
+// and its machine's VM is not reserved again (#228).
+func TestAPodmanEngineReservesItsVMOnce(t *testing.T) {
+	s := busyMac()
+	s.Engines = append(s.Engines, podmanEngine("podman-machine-default"))
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "podman-machine-default", PID: 9012, FootprintBytes: gib}}}
+	b := budget.Compute(s, budget.Params{DockerOverheadBytes: 2 * gib, PodmanOverheadBytes: gib})
+	// max(1 overhead + 0.5 container, 1 footprint)
+	if c := component(t, b, "podman"); c.ReservedBytes != gib+gib/2 || !usedEq(c.UsedBytes, u64(gib)) {
+		t.Errorf("podman = %d used %v, want 1.5 GiB used 1 GiB", c.ReservedBytes, c.UsedBytes)
+	}
+	names := []string{}
+	for _, c := range b.Components {
+		names = append(names, c.Name)
+	}
+	if want := []string{"docker-desktop", "podman", "tart", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+		t.Errorf("components = %v, want %v: the VM's reservation once", names, want)
+	}
+	// 17 as busyMac, less Podman's VM once
+	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(16*gib) {
+		t.Errorf("unaccounted = %v, want 16 GiB", b.UnaccountedBytes)
+	}
+}
+
+// A Podman VM that no engine covers (its socket not readable, or another
+// machine's engine) keeps its footprint's reservation.
+func TestAPodmanVMNoEngineCoversKeepsItsReservation(t *testing.T) {
+	for name, e := range map[string]protocol.Engine{
+		"another machine's": podmanEngine("other"),
+		"not running":       {Socket: "/tmp/podman.sock", Machine: "podman-machine-default", Containers: []protocol.Container{}},
+		"VM unread": func() protocol.Engine {
+			e := podmanEngine("podman-machine-default")
+			e.VMRunning, e.VMFootprintBytes, e.VMError = false, 0, "lsof failed"
+			return e
+		}(),
+	} {
+		s := busyMac()
+		s.Engines = append(s.Engines, e)
+		s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "podman-machine-default", PID: 9012, FootprintBytes: 3 * gib}}}
+		b := budget.Compute(s, budget.Params{PodmanOverheadBytes: gib})
+		var vm *protocol.BudgetComponent
+		for _, c := range b.Components {
+			if c.Name == "podman" && c.ReservedBytes == 3*gib && usedEq(c.UsedBytes, u64(3*gib)) {
+				vm = &c
+			}
+		}
+		if vm == nil {
+			t.Errorf("%s: components = %+v, want the VM's 3 GiB reserved", name, b.Components)
+		}
+	}
+}

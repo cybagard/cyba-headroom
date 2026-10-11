@@ -4,6 +4,7 @@ package budget
 
 import (
 	"cmp"
+	"slices"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -16,6 +17,9 @@ type Params struct {
 	// DockerOverheadBytes is the Docker VM's own cost beyond its containers:
 	// guest kernel, dockerd and page cache (~1.6 GB idle in spike #9).
 	DockerOverheadBytes uint64
+	// PodmanOverheadBytes is a Podman machine's VM's own cost beyond its
+	// containers (~1 GB idle for a 2 GiB machine in docs/spikes/podman.md).
+	PodmanOverheadBytes uint64
 	// LMStudioIdleBytes is LM Studio's footprint with no model loaded
 	// (~620 MiB in #16).
 	LMStudioIdleBytes uint64
@@ -61,9 +65,12 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		footprintsKnown = false
 	}
 	// The podman section is absent while no machine runs, so only the
-	// source's status tells "none running" from "no reading yet".
+	// source's status tells "none running" from "no reading yet". A VM
+	// whose engine is read is that engine's component's (#228).
 	if s.Podman != nil {
-		add(podman(s.Podman))
+		if c, ok := podman(s.Podman, s.Engines); ok {
+			add(c)
+		}
 	} else if st, ok := s.Sources["podman"]; ok && st.At.IsZero() {
 		b.Unknown = append(b.Unknown, "podman")
 		footprintsKnown = false
@@ -142,13 +149,22 @@ func tart(t *protocol.Tart) protocol.BudgetComponent {
 
 // podman reserves what the Podman machines' VMs cost the host now. Their
 // containers live inside that footprint, so it is the whole cost; the small
-// vfkit and gvproxy processes beside each VM stay unaccounted.
-func podman(p *protocol.Podman) protocol.BudgetComponent {
+// vfkit and gvproxy processes beside each VM stay unaccounted. A VM whose
+// machine's engine runs and has read that VM is left to the engine's
+// component (#228); with none left, there is no component.
+func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetComponent, bool) {
 	var fp uint64
+	n := 0
 	for _, vm := range p.VMs {
+		if slices.ContainsFunc(engines, func(e protocol.Engine) bool {
+			return e.Running && e.Machine == vm.Machine && e.VMError == "" && e.VMRunning
+		}) {
+			continue
+		}
 		fp += vm.FootprintBytes
+		n++
 	}
-	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}
+	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}, n > 0
 }
 
 // otherVMs reserves what the VMs no known owner claims cost the host now:
@@ -189,6 +205,9 @@ func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 		return c
 	}
 	need := p.DockerOverheadBytes
+	if d.Kind == protocol.EnginePodman {
+		need = p.PodmanOverheadBytes
+	}
 	for _, ct := range d.Containers {
 		need += ct.MemoryBytes
 	}

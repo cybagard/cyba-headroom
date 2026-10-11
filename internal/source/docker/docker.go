@@ -199,7 +199,32 @@ func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen 
 	var counters map[string]cpuCounters
 	var err error
 	e.Containers, counters, err = containers(ctx, c, s.prevCPU[key])
+	if err == nil && kind == protocol.EnginePodman {
+		pods(ctx, c, e.Containers)
+	}
 	return e, counters, err
+}
+
+// pods sets the pod each of a Podman engine's containers is in, from its
+// libpod list: Podman labels no pod's containers (#230). A list that fails
+// leaves them unknown: a pod's lease then holds its cost. The libpod API
+// answers only under a version (Podman 6.1 404s /libpod/containers/json).
+func pods(ctx context.Context, c *http.Client, cs []protocol.Container) {
+	var list []struct {
+		ID      string `json:"Id"`
+		Pod     string
+		PodName string
+	}
+	if get(ctx, c, "/v4.0.0/libpod/containers/json", &list) != nil {
+		return
+	}
+	for i := range cs {
+		for _, l := range list {
+			if l.ID == cs[i].ID {
+				cs[i].Pod, cs[i].PodID = l.PodName, l.Pod
+			}
+		}
+	}
 }
 
 // podmanID is a Podman engine's ID: Podman's /info answers with a new

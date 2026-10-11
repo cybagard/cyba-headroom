@@ -110,6 +110,38 @@ func TestParse(t *testing.T) {
 		{"docker compose up web --help", Call{}},
 		{"docker compose run web echo --dry-run", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
 		{"docker compose up -d --dry-run", Call{}},
+		// Podman's pods, kube play and machines (#230): one cost each, keyed
+		// by the pod, the kube files' pods or the machine.
+		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
+		{"podman pod start --pod-id-file f web db", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web", MultiTarget: true, Targets: []string{"web", "db"}}},
+		{"podman pod start --all", Call{Kind: "pod", Op: "start", Command: "podman pod start"}},
+		{"podman pod start web --help", Call{}},
+		{"podman --connection m1 pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web", Context: "m1"}},
+		{"podman kube play web.yml", Call{Kind: "pod", Op: "play", Command: "podman kube play", KubeFiles: []string{"web.yml"}}},
+		{"podman kube play --network n1 -q a.yml b.yml", Call{Kind: "pod", Op: "play", Command: "podman kube play", KubeFiles: []string{"a.yml", "b.yml"}}},
+		{"podman play kube --replace web.yml", Call{Kind: "pod", Op: "play", Command: "podman play kube", KubeFiles: []string{"web.yml"}}},
+		{"podman kube play -", Call{Kind: "pod", Op: "play", Command: "podman kube play", KubeFiles: []string{"-"}}},
+		{"podman kube play --future x web.yml", Call{Kind: "pod", Op: "play", Command: "podman kube play"}},
+		{"podman machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start"}},
+		{"podman machine start -q dev", Call{Kind: "machine", Op: "start", Command: "podman machine start dev", Target: "dev"}},
+		{"podman --connection remote machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start", Context: "remote"}},
+		{"podman machine start --log-level debug big", Call{Kind: "machine", Op: "start", Command: "podman machine start", Guessed: true}},
+		// Creating starts nothing: pod create has no --start (podman 6.1),
+		// and kube play --start=false only creates. --down tears down.
+		{"podman pod create --name web", Call{}},
+		{"podman kube play --start=false web.yml", Call{}},
+		{"podman kube play --down web.yml", Call{}},
+		{"podman play kube web.yml --down", Call{}},
+		{"podman kube play --help", Call{}},
+		{"podman machine start --help", Call{}},
+		{"podman machine stop", Call{}},
+		{"podman machine init", Call{}},
+		{"podman pod stop web", Call{}},
+		{"podman kube down web.yml", Call{}},
+		{"podman pod", Call{}},
+		{"podman kube", Call{}},
+		{"docker pod start web", Call{}},
+		{"podman container pod start web", Call{}},
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
 		{"tart run --no-graphics --dir src:/tmp/src ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
@@ -185,6 +217,9 @@ func TestFlagTablesMatchTheCLIs(t *testing.T) {
 		{composeScale, []string{"docker-compose-scale"}},
 		{composeWatch, []string{"docker-compose-watch"}},
 		{tartRun, []string{"tart-run"}},
+		{podStart, []string{"podman-pod-start"}},
+		{kubePlay, []string{"podman-kube-play", "podman-play-kube"}},
+		{machineStart, []string{"podman-machine-start"}},
 	} {
 		want := flagSet{}
 		for _, h := range c.help {
@@ -249,6 +284,15 @@ func helpFlags(t *testing.T, name string) flagSet {
 		t.Fatalf("%s: no flags found", name)
 	}
 	return out
+}
+
+// TestPodCreateStartsNothing pins why pod create passes through: it
+// creates a pod and starts nothing, with no --start to ask for that. A
+// Podman that adds one fails here.
+func TestPodCreateStartsNothing(t *testing.T) {
+	if _, ok := helpFlags(t, "podman-pod-create")["--start"]; ok {
+		t.Fatal("podman pod create has --start: gate it when given (#230)")
+	}
 }
 
 func FuzzParse(f *testing.F) {

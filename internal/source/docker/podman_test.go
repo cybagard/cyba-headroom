@@ -431,3 +431,42 @@ func TestAShimGatedPodmanRunBindsItsLease(t *testing.T) {
 		t.Fatalf("ungated = %+v, log:\n%s", u, log.String())
 	}
 }
+
+// Podman labels no pod's containers: on a Podman engine, the libpod list
+// names the pod each container is in, and its ID, for a pod start's or
+// kube play's lease to bind by (#230; testdata/libpod-containers.json has
+// the fields of a probe's capture, with neutral names and IDs). A libpod
+// list that fails leaves the pods unknown and the engine read.
+func TestPodmanEngineNamesEachContainersPod(t *testing.T) {
+	const infraID = "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f"
+	routes := func(libpod bool) map[string]string {
+		r := map[string]string{
+			"/info":            "info-podman.json",
+			"/version":         "version-podman.json",
+			"/containers/json": `[{"Id":"` + podmanID + `","Names":["/web-app"]},{"Id":"` + infraID + `","Names":["/00000000000a-infra"]}]`,
+			"/containers/" + podmanID + "/stats?stream=false&one-shot=true": cpuStats(1, 1),
+			"/containers/" + infraID + "/stats?stream=false&one-shot=true":  cpuStats(1, 1),
+		}
+		if libpod {
+			r["/v4.0.0/libpod/containers/json"] = "libpod-containers.json"
+		}
+		return r
+	}
+	for _, libpod := range []bool{true, false} {
+		sock, _ := engine(t, routes(libpod))
+		p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
+		got := found(t, fakeVMs{podmanVM}, p.Candidates()...)
+		if len(got) != 1 || !got[0].Running || len(got[0].Containers) != 2 {
+			t.Fatalf("libpod %v: engines = %+v", libpod, got)
+		}
+		for _, c := range got[0].Containers {
+			want, wantID := "", ""
+			if libpod {
+				want, wantID = "web", "00000000000000000000000000000000000000000000000000000000000000aa"
+			}
+			if c.Pod != want || c.PodID != wantID {
+				t.Errorf("libpod %v: %s is in pod %q (%q), want %q", libpod, c.Name, c.Pod, c.PodID, want)
+			}
+		}
+	}
+}

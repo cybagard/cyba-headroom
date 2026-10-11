@@ -40,7 +40,8 @@ type Request struct {
 type CheckRequest struct {
 	// Worktree is the Orca worktree ID; empty for a manual call.
 	Worktree string `json:"worktree,omitempty"`
-	// Kind is container, compose or tart.
+	// Kind is container, compose, tart, pod (podman pod start, kube play)
+	// or machine (podman machine start).
 	Kind    string `json:"kind"`
 	Command string `json:"command"`
 	// CostBytes is the caller's estimate; 0 means the policy's default.
@@ -157,9 +158,9 @@ type Lease struct {
 // or an SDK, by a login shell that put the real binary first, by an agent
 // not launched through headroom run, or while the daemon was down.
 type Ungated struct {
-	Key  string `json:"key"` // container:<id> or vm:<name>
+	Key  string `json:"key"` // container:<id>, vm:<name> or machine:<name>
 	Name string `json:"name"`
-	Kind string `json:"kind"` // container, compose or vm
+	Kind string `json:"kind"` // container, compose, vm (Tart's) or machine (a Podman machine's VM)
 	// Worktree is the worktree it is attributed to; "" when none.
 	Worktree string    `json:"worktree,omitempty"`
 	Since    time.Time `json:"since"`
@@ -609,6 +610,11 @@ type Container struct {
 	// Engine is the ID of the engine it runs on (its socket if the engine
 	// gave none), set by Snapshot.Containers (#227).
 	Engine string `json:"engine,omitempty"`
+	// Pod and PodID are the name and ID of the Podman pod it is in, from
+	// the Podman engine's libpod API: Podman labels no pod's containers
+	// (#230). A pod start's or kube play's lease binds them by the pod.
+	Pod   string `json:"pod,omitempty"`
+	PodID string `json:"pod_id,omitempty"`
 }
 
 // Host is the host's memory state (R1, R4 top line).

@@ -81,6 +81,7 @@ type Env struct {
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
 	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
+	machineAsk func(bin string, args []string) ([]byte, error)                        // askMachine
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise
@@ -684,6 +685,14 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 			Unnamed: r.Unnamed, OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
+		}
+		if r.Kind == "pod" {
+			// Its pods key its lease: the Podman engine names each
+			// container's (#230).
+			req.Pods = r.Targets
+			if len(req.Pods) == 0 && r.Target != "" {
+				req.Pods = []string{r.Target}
+			}
 		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by

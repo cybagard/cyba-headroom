@@ -1,0 +1,31 @@
+[
+     {
+          "ConfigDir": {
+               "Path": "/Users/dev/.config/containers/podman/machine/applehv"
+          },
+          "ConnectionInfo": {
+               "PodmanSocket": {
+                    "Path": "/var/folders/00/0000000000000000000000000000gn/T/podman/podman-machine-default-api.sock"
+               },
+               "PodmanPipe": null
+          },
+          "Created": "2026-10-11T14:40:51.414662+02:00",
+          "LastUp": "2026-10-11T17:36:10.619897+02:00",
+          "Name": "podman-machine-default",
+          "Resources": {
+               "CPUs": 2,
+               "DiskSize": 100,
+               "Memory": 2048,
+               "USBs": []
+          },
+          "SSHConfig": {
+               "IdentityPath": "/Users/dev/.local/share/containers/podman/machine/machine",
+               "Port": 59251,
+               "RemoteUsername": "core"
+          },
+          "State": "running",
+          "UserModeNetworking": true,
+          "Rootful": false,
+          "Rosetta": false
+     }
+]

@@ -51,6 +51,8 @@ type shimRig struct {
 	composeDry func(string, []string) ([]byte, error)
 	// getwd stands in for os.Getwd when set.
 	getwd func() (string, error)
+	// machineAsk stands in for podman machine inspect.
+	machineAsk func(string, []string) ([]byte, error)
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -60,7 +62,7 @@ func newShimRig(t testing.TB) *shimRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	for _, n := range []string{"docker", "tart"} {
+	for _, n := range []string{"docker", "podman", "tart"} {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte("#!real\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -114,6 +116,12 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 				return r.composeDry(bin, args)
 			}
 			return nil, errors.New("no compose here")
+		},
+		machineAsk: func(bin string, args []string) ([]byte, error) {
+			if r.machineAsk != nil {
+				return r.machineAsk(bin, args)
+			}
+			return nil, errors.New("no podman machine here")
 		},
 	})
 	return code, errb.String()
@@ -437,6 +445,120 @@ func TestShimGateTartVMs(t *testing.T) {
 	if code, _ := r.run("tart", "clone", "mac-ci", "mac-ci-2"); code != 0 || len(r.asked) != 2 || r.execed == "" {
 		t.Fatalf("clone: exit %d, asked %d", code, len(r.asked))
 	}
+}
+
+// podman machine start asks with the machine's memory, from podman machine
+// inspect (a recorded capture), and names the machine: the default one's
+// name when the call gives none. A machine is this Mac's whatever
+// connection the call names. When inspect fails, the start is not gated
+// (R7) (#230).
+func TestShimGatePodmanMachineStart(t *testing.T) {
+	r := newShimRig(t)
+	inspect, err := os.ReadFile(filepath.Join("testdata", "podman-machine-inspect.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inspected [][]string
+	r.machineAsk = func(bin string, args []string) ([]byte, error) {
+		if bin != filepath.Join(r.dir, "podman") {
+			t.Errorf("inspect ran %q, not the real podman", bin)
+		}
+		inspected = append(inspected, args)
+		return inspect, nil
+	}
+	r.env = append(r.env, "HEADROOM_WORKTREE=w")
+	r.ask = allow
+	if code, stderr := r.run("podman", "machine", "start"); code != 0 || !slices.Equal(r.execArgv, []string{"podman", "machine", "start"}) {
+		t.Fatalf("exit %d, exec %q, stderr %q", code, r.execArgv, stderr)
+	}
+	want := protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "start", Command: "podman machine start", CostBytes: 2 << 30, Target: "podman-machine-default"}
+	if len(r.asked) != 1 || !equalRequest(r.asked[0], want) || r.asked[0].Op != want.Op || r.asked[0].Target != want.Target || r.asked[0].PID != 0 {
+		t.Fatalf("asked %+v, want %+v", r.asked, want)
+	}
+	if !slices.Equal(inspected[0], []string{"machine", "inspect"}) {
+		t.Fatalf("inspected %q", inspected)
+	}
+	if code, _ := r.run("podman", "--connection", "remote", "machine", "start", "-q", "podman-machine-default"); code != 0 || len(r.asked) != 2 ||
+		!slices.Equal(inspected[1], []string{"machine", "inspect", "podman-machine-default"}) {
+		t.Fatalf("exit %d, asked %d, inspected %q", code, len(r.asked), inspected)
+	}
+	// Past a flag the parser does not know, the machine is a guess: not
+	// gated, rather than sized and keyed as the default machine (plan
+	// amendment 4).
+	r.execed = ""
+	code, stderr := r.run("podman", "machine", "start", "--log-level", "debug", "big")
+	if code != 0 || r.execed == "" || len(r.asked) != 2 || len(inspected) != 2 ||
+		!strings.Contains(stderr, "headroom: not gated (podman machine start: an option the shim does not know); running `podman machine start` anyway") {
+		t.Fatalf("guessed: exit %d, exec %q, asked %d, inspected %q, stderr %q", code, r.execed, len(r.asked), inspected, stderr)
+	}
+	r.machineAsk = func(string, []string) ([]byte, error) { return nil, errors.New("exit status 125") }
+	r.execed = ""
+	code, stderr = r.run("podman", "machine", "start", "gone")
+	if code != 0 || r.execed == "" || len(r.asked) != 2 || !strings.Contains(stderr, "headroom: not gated (podman machine inspect: exit status 125); running `podman machine start gone` anyway") {
+		t.Fatalf("inspect failed: exit %d, exec %q, asked %d, stderr %q", code, r.execed, len(r.asked), stderr)
+	}
+}
+
+// End to end: podman machine start is denied when the budget cannot fit
+// the machine's memory, from inspect, and allowed when it can; the
+// allowed start's lease holds that memory (#230).
+func TestShimGatePodmanMachineAgainstTheDaemon(t *testing.T) {
+	inspect, err := os.ReadFile(filepath.Join("testdata", "podman-machine-inspect.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults("/x")
+	base := cfg.Budget.Params().HostBaselineBytes + cfg.PolicyConfig().MinHeadroomBytes
+	host := &sizedHost{total: base + 1<<30} // room for 1 GiB: not the machine's 2
+	envMap, d := serveDaemonFrom(t, []daemon.Source{host}, func(d *daemon.Daemon) {
+		wireGate(d, cfg, discardLog(), nil)
+	})
+	r := newShimRig(t)
+	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w"}
+	var stderr strings.Builder
+	execed := false
+	shimEnv := Env{Args: []string{"podman", "machine", "start"}, Stdout: io.Discard, Stderr: &stderr,
+		Getenv: func(string) string { return "" }, Environ: func() []string { return env },
+		exec:       func(string, []string, []string) error { execed = true; return nil },
+		machineAsk: func(string, []string) ([]byte, error) { return inspect, nil }}
+	if code := Run(shimEnv); code != exitDenied || execed || !strings.Contains(stderr.String(), "not starting `podman machine start`") {
+		t.Fatalf("exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	host.set(base + 3<<30)
+	d.Tick(context.Background())
+	if code := Run(shimEnv); code != 0 || !execed {
+		t.Fatalf("with room: exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	d.Tick(context.Background())
+	s := d.Snapshot()
+	if len(s.Leases) != 1 || s.Leases[0].Kind != "machine" || s.Leases[0].Bytes != 2<<30 || s.Leases[0].Command != "podman machine start" {
+		t.Fatalf("leases %+v", s.Leases)
+	}
+}
+
+// sizedHost is a host source whose total memory a test can change.
+type sizedHost struct {
+	mu    sync.Mutex
+	total uint64
+}
+
+func (h *sizedHost) set(total uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.total = total
+}
+
+func (h *sizedHost) Name() string { return "host" }
+func (h *sizedHost) Collect(context.Context) (daemon.Reading, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return sizedHostReading{h.total}, nil
+}
+
+type sizedHostReading struct{ total uint64 }
+
+func (r sizedHostReading) Apply(s *protocol.Snapshot) {
+	s.Host = &protocol.Host{TotalBytes: r.total, Pressure: "normal"}
 }
 
 // fakeTart is a Tart source whose running VMs a test can change.
@@ -2028,6 +2150,77 @@ func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
 		r.run(call...)
 		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Unnamed != tc.unnamed || r.asked[0].ComposeDir != tc.dir {
 			t.Errorf("%s: asked %+v, want target %q, unnamed %v, dir %q", tc.name, r.asked, tc.target, tc.unnamed, tc.dir)
+		}
+	}
+}
+
+// A pod start names its pods, and a kube play the pods its kube files
+// define (each Pod's metadata.name), read from the files: its lease binds
+// their containers. Files the shim cannot read for sure (stdin, a URL,
+// another workload kind, which Podman names itself) leave it no pod: it
+// holds its cost. Neither is labelled (#230).
+func TestShimGatePodStartAndKubePlay(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "HEADROOM_WORKTREE=w")
+	r.getwd = func() (string, error) { return r.dir, nil }
+	r.ask = allow
+	write := func(name, yaml string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("web.yml", `# two pods and a claim
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: web
+  name: "web"  # the pod
+spec:
+  containers:
+  - name: app
+    image: alpine
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+---
+kind: Pod
+apiVersion: v1
+metadata:
+    name: db
+spec:
+  containers:
+  - name: db
+    image: postgres
+`)
+	write("deploy.yml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n")
+	write("flow.yml", "kind: Pod\nmetadata: {name: web}\n")
+	for _, c := range []struct {
+		argv    []string
+		target  string
+		targets []string
+	}{
+		{[]string{"podman", "pod", "start", "web"}, "web", nil},
+		{[]string{"podman", "pod", "start", "web", "db"}, "web", []string{"web", "db"}},
+		{[]string{"podman", "kube", "play", "--replace", "web.yml"}, "web", []string{"web", "db"}},
+		{[]string{"podman", "play", "kube", filepath.Join(r.dir, "web.yml")}, "web", []string{"web", "db"}},
+		{[]string{"podman", "kube", "play", "-"}, "", nil},
+		{[]string{"podman", "kube", "play", "https://example.com/web.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "deploy.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "flow.yml"}, "", nil},
+		{[]string{"podman", "kube", "play", "web.yml", "missing.yml"}, "", nil},
+	} {
+		r.asked = nil
+		code, stderr := r.run(c.argv...)
+		if code != 0 || !slices.Equal(r.execArgv, c.argv) || len(r.asked) != 1 {
+			t.Fatalf("%q: exit %d, exec %q, asked %d, stderr %q", c.argv, code, r.execArgv, len(r.asked), stderr)
+		}
+		a := r.asked[0]
+		if a.Kind != "pod" || a.CostBytes != 0 || a.Target != c.target || !slices.Equal(a.Targets, c.targets) || a.MultiTarget != (c.targets != nil) || a.Labelled {
+			t.Errorf("%q: asked %+v, want target %q, targets %q", c.argv, a, c.target, c.targets)
 		}
 	}
 }

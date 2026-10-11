@@ -907,3 +907,31 @@ func TestFollowEventsALiveDieFromALaggingVMIsDatedNow(t *testing.T) {
 		t.Errorf("the run's own one-off was warned ungated: %s", log.String())
 	}
 }
+
+// A pod start or kube play names its pods: the daemon keys its lease by
+// each, so the containers the Podman engine says are in any of them bind it
+// (#230).
+func TestGateKeysAPodLeaseByItsPods(t *testing.T) {
+	book := lease.New(time.Minute, time.Now, discardLog())
+	cfg := config.Defaults("/x")
+	tick := derive(book, cfg.Budget.Params())
+	check := gateCheckOn(book, cfg.PolicyConfig(), nil, "")
+	snap := func(cs ...protocol.Container) *protocol.Snapshot {
+		s := &protocol.Snapshot{
+			Host:    &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
+			Sources: map[string]protocol.SourceStatus{"podman": {At: time.Now()}},
+			Engines: []protocol.Engine{{Kind: protocol.EnginePodman, ID: "podman:m", Machine: "m", Running: true, VMRunning: true, Containers: cs}},
+		}
+		tick(s)
+		return s
+	}
+	s := snap()
+	d := check(&protocol.CheckRequest{Worktree: "w", Kind: "pod", Op: "play", Command: "podman kube play", Target: "web", Targets: []string{"web", "db"}, MultiTarget: true}, s)
+	if !d.Allow || d.LeaseID == "" {
+		t.Fatalf("check: %+v", d)
+	}
+	snap(protocol.Container{ID: "db-app", Name: "db-app", Pod: "db", PodID: "0f0f", MemoryBytes: 64 << 30})
+	if l := book.List(); len(l) != 0 {
+		t.Fatalf("its second pod's container did not bind its lease: %+v", l)
+	}
+}

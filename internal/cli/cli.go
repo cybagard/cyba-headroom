@@ -623,29 +623,6 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 	}
 }
 
-// refStarts names the containers a start resolved as the book does, by
-// protocol.ContainerRef: with several engines running, the ID of the engine
-// at socket prefixes each (#227).
-func refStarts(req *policy.Request, s *protocol.Snapshot, socket string) {
-	if s == nil || protocol.RunningEngines(s.Engines) < 2 {
-		return
-	}
-	i := slices.IndexFunc(s.Engines, func(e protocol.Engine) bool { return e.Running && sameSocket("unix://"+e.Socket, socket) })
-	if i < 0 {
-		return
-	}
-	ref := func(id string) string {
-		if id == "" {
-			return ""
-		}
-		return protocol.ContainerRef(true, s.Engines[i].ID, id)
-	}
-	req.ContainerID = ref(req.ContainerID)
-	for j := range req.Others {
-		req.Others[j].ID = ref(req.Others[j].ID)
-	}
-}
-
 // sleepCtx waits d, or until ctx ends.
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
@@ -695,7 +672,6 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 			Unnamed: r.Unnamed, OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
-			refStarts(&req, s, socket)
 		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by

@@ -57,7 +57,7 @@ func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribut
 		u := usage(m)
 		u.Containers = append(u.Containers, protocol.AttributedContainer{
 			ID: c.ID, Name: c.Name, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
-			By: m.By, Reason: m.Reason,
+			By: m.By, Reason: m.Reason, Engine: c.Engine,
 		})
 	}
 	if s.Tart != nil {

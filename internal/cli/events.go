@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -23,15 +22,12 @@ type Eventer interface {
 // engine, by its ID, from the first snapshot it runs in. A follower is
 // never stopped while the daemon runs: an engine that goes away is waited
 // for by its backoff, and on its return what it missed is replayed (#146).
-// Each event's container ID becomes a protocol.ContainerRef, as the book's
-// readings name it.
 type engineFollowers struct {
 	ctx    context.Context
 	wg     *sync.WaitGroup
 	follow func(ctx context.Context, src Eventer, fn func(at time.Time, action, id, name string, labels map[string]string))
 	fn     func(at time.Time, action, id, name string, labels map[string]string)
 
-	multi    atomic.Bool
 	mu       sync.Mutex
 	followed map[string]bool
 }
@@ -42,7 +38,6 @@ func (f *engineFollowers) Offer(s *protocol.Snapshot) {
 	if s.Engines == nil {
 		return // no reading: nothing to say how many engines run
 	}
-	f.multi.Store(protocol.RunningEngines(s.Engines) > 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, e := range s.Engines {
@@ -52,9 +47,7 @@ func (f *engineFollowers) Offer(s *protocol.Snapshot) {
 		f.followed[e.ID] = true
 		src := docker.New(e.Socket, nil)
 		f.wg.Go(func() {
-			f.follow(f.ctx, src, func(at time.Time, action, id, name string, labels map[string]string) {
-				f.fn(at, action, protocol.ContainerRef(f.multi.Load(), e.ID, id), name, labels)
-			})
+			f.follow(f.ctx, src, f.fn)
 		})
 	}
 }

@@ -761,7 +761,6 @@ func resources(s *protocol.Snapshot) []resource {
 		}
 	}
 	var out []resource
-	// IDs are ContainerRefs: unique across engines (#227).
 	for _, c := range s.Containers() {
 		r := containerResource(c.ID, c.Name, c.Labels)
 		r.worktree, r.bytes = owner[r.key], c.MemoryBytes

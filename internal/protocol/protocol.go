@@ -4,7 +4,10 @@
 // stay dependency-free (ADR 0001).
 package protocol
 
-import "time"
+import (
+	"cmp"
+	"time"
+)
 
 // Version is the protocol version every request and reply carries.
 const Version = 1
@@ -286,6 +289,8 @@ type AttributedContainer struct {
 	CPUPercent  *float64 `json:"cpu_percent,omitempty"`
 	By          string   `json:"by,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
+	// Engine is the container's engine, as Container.Engine (#227).
+	Engine string `json:"engine,omitempty"`
 }
 
 // AttributedVM is a Tart VM and how it was matched (By), or why it was not
@@ -565,24 +570,15 @@ func RunningEngines(engines []Engine) int {
 	return n
 }
 
-// ContainerRef is a container's ID made unique across engines (#227): with
-// more than one engine running (multi), its engine's ID, a slash and its
-// ID; else its ID as the engine gives it.
-func ContainerRef(multi bool, engineID, id string) string {
-	if multi {
-		return engineID + "/" + id
-	}
-	return id
-}
-
-// Containers returns every engine's containers in engine order, each ID a
-// ContainerRef.
+// Containers returns every engine's containers in engine order, each with
+// its engine. A container is named by its own ID whatever the number of
+// engines: Docker's and Podman's IDs are random 256-bit values, unique
+// across engines (#227).
 func (s *Snapshot) Containers() []Container {
-	multi := RunningEngines(s.Engines) > 1
 	var out []Container
 	for _, e := range s.Engines {
 		for _, c := range e.Containers {
-			c.ID = ContainerRef(multi, e.ID, c.ID)
+			c.Engine = cmp.Or(e.ID, e.Socket)
 			out = append(out, c)
 		}
 	}
@@ -602,6 +598,9 @@ type Container struct {
 	// CPUPercent is CPU use since the previous tick, 100 = one core, as
 	// docker stats shows; absent on a container's first tick.
 	CPUPercent *float64 `json:"cpu_percent,omitempty"`
+	// Engine is the ID of the engine it runs on (its socket if the engine
+	// gave none), set by Snapshot.Containers (#227).
+	Engine string `json:"engine,omitempty"`
 }
 
 // Host is the host's memory state (R1, R4 top line).

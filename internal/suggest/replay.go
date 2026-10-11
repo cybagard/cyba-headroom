@@ -27,16 +27,18 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 		}
 	}
 	if known("docker") {
-		out.Docker = &protocol.Docker{}
+		// A sample records Docker Desktop's engine alone (#229).
+		out.Engines = []protocol.Engine{}
 		if d := s.Docker; d != nil {
-			out.Docker = &protocol.Docker{Running: true, VMRunning: d.VMRunning,
+			e := protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: d.VMRunning,
 				VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes}
 			if d.VMUnknown {
-				out.Docker.VMError = "unknown when recorded"
+				e.VMError = "unknown when recorded"
 			}
 			for _, c := range s.Containers {
-				out.Docker.Containers = append(out.Docker.Containers, protocol.Container{Name: c.Name, MemoryBytes: c.MemoryBytes})
+				e.Containers = append(e.Containers, protocol.Container{Name: c.Name, MemoryBytes: c.MemoryBytes})
 			}
+			out.Engines = append(out.Engines, e)
 		}
 	}
 	if known("tart") {

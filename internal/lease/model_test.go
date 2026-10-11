@@ -192,7 +192,7 @@ func (m *model) fail(f string, a ...any) {
 
 func (m *model) snapshot() *protocol.Snapshot {
 	s := snap()
-	s.Docker.Containers = nil
+	s.Engines[0].Containers = nil
 	// Each worktree's directory, as Compose labels its stacks with, so the
 	// book's matcher finds the attribution below again (lease.go Observe,
 	// attribution.AttributeLeased); none while attribution is lost.

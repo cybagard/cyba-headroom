@@ -761,12 +761,11 @@ func resources(s *protocol.Snapshot) []resource {
 		}
 	}
 	var out []resource
-	if s.Docker != nil {
-		for _, c := range s.Docker.Containers {
-			r := containerResource(c.ID, c.Name, c.Labels)
-			r.worktree, r.bytes = owner[r.key], c.MemoryBytes
-			out = append(out, r)
-		}
+	// IDs are ContainerRefs: unique across engines (#227).
+	for _, c := range s.Containers() {
+		r := containerResource(c.ID, c.Name, c.Labels)
+		r.worktree, r.bytes = owner[r.key], c.MemoryBytes
+		out = append(out, r)
 	}
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
@@ -842,12 +841,14 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		}
 	}
 	// The Docker engine back after a fresh reading showed it down restarts
-	// containers itself: those appearing soon after are a baseline.
-	if d := s.Docker; d != nil && readable(s, "container") {
-		if b.dockerDown && d.Running {
+	// containers itself: those appearing soon after are a baseline. Down is
+	// no engine running (#227).
+	if s.Engines != nil && readable(s, "container") {
+		up := protocol.RunningEngines(s.Engines) > 0
+		if b.dockerDown && up {
 			b.dockerUp = now
 		}
-		b.dockerDown = !d.Running
+		b.dockerDown = !up
 	}
 	dockerSettling := !b.dockerUp.IsZero() && now.Sub(b.dockerUp) < dockerSettle
 	present := map[string]uint64{}
@@ -1408,7 +1409,7 @@ func (b *Book) baseline(s *protocol.Snapshot) {
 
 // markBased records which sources s has a fresh reading of.
 func (b *Book) markBased(s *protocol.Snapshot) {
-	if s.Docker != nil && readable(s, "container") {
+	if s.Engines != nil && readable(s, "container") {
 		b.based["container"] = true
 	}
 	if s.Tart != nil && readable(s, "vm") {

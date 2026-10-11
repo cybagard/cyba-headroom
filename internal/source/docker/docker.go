@@ -1,5 +1,6 @@
-// Package docker collects Docker Desktop's containers and VM cost (R1) from
-// the Docker Engine API on its Unix socket. It uses net/http directly rather
+// Package docker collects the containers and VM cost (R1) of each engine
+// that speaks the Docker Engine API on a Unix socket: Docker Desktop's, and
+// those DOCKER_HOST and the Docker contexts name (#227). It uses net/http directly rather
 // than the Docker SDK, which would bloat the binary the shim also runs from.
 package docker
 
@@ -29,108 +30,208 @@ import (
 // a large compose project would overrun the source timeout under pressure.
 const statsWorkers = 8
 
-// Source is the Docker source.
+// Source is the Docker source: every engine that speaks the Docker API on
+// a Unix socket (#227).
 type Source struct {
-	socket string
-	http   *http.Client
-	vms    vmproc.Lister
+	// socket is the engine Inspect, Clock and Events ask, through one:
+	// New's. They may run concurrently with each other and with Collect.
+	socket     string
+	one        *http.Client
+	candidates func() []string
+	vms        vmproc.Lister
+	clients    map[string]*http.Client
 
-	// prevCPU holds each container's CPU counters from the previous tick.
-	// Collect is never called concurrently (daemon.Tick), so no lock.
-	prevCPU map[string]cpuCounters
+	// prevCPU holds each engine's containers' CPU counters from the
+	// previous tick, by engine ID. Collect is never called concurrently
+	// (daemon.Tick), so no lock.
+	prevCPU map[string]map[string]cpuCounters
 }
 
 type cpuCounters struct{ container, system uint64 }
 
-// New returns a source for the Engine API at socket.
+// New returns a source for the Engine API at socket alone.
 func New(socket string, vms vmproc.Lister) *Source {
-	tr := &http.Transport{
+	s := Discover(func() []string { return Candidates(socket, func(string) string { return "" }) }, vms)
+	s.socket, s.one = socket, dial(socket)
+	return s
+}
+
+// Discover returns a source for the engines on the sockets candidates
+// returns, asked afresh each tick: Candidates, for the daemon.
+func Discover(candidates func() []string, vms vmproc.Lister) *Source {
+	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prevCPU: map[string]map[string]cpuCounters{}}
+}
+
+// client returns Collect's HTTP client for socket, made once.
+func (s *Source) client(socket string) *http.Client {
+	c, ok := s.clients[socket]
+	if !ok {
+		c = dial(socket)
+		s.clients[socket] = c
+	}
+	return c
+}
+
+// dial returns an HTTP client for the engine at socket.
+func dial(socket string) *http.Client {
+	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
-	}
-	return &Source{socket: socket, http: &http.Client{Transport: tr}, vms: vms, prevCPU: map[string]cpuCounters{}}
+	}}
 }
 
 // Name implements daemon.Source.
 func (s *Source) Name() string { return "docker" }
 
-// Collect implements daemon.Source.
+// Collect implements daemon.Source. Each candidate socket answers /info;
+// those that answer with one ID are one engine, by the first of them. A
+// socket that refuses is an engine that is not running. Any other failure
+// fails the reading: the last good one stands, rather than one missing an
+// engine's containers.
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
-	if s.socket == "" {
-		return nil, errors.New("docker: socket unknown (no DOCKER_HOST or HOME); set [docker] socket")
-	}
-	var info struct{ MemTotal uint64 }
-	if err := s.get(ctx, "/info", &info); err != nil {
-		if notRunning(err) {
-			return reading{protocol.Docker{Containers: []protocol.Container{}}}, nil
+	engines := []protocol.Engine{}
+	seen := map[string]bool{}
+	cpu := map[string]map[string]cpuCounters{}
+	for _, sock := range s.candidates() {
+		c := s.client(sock)
+		var info struct {
+			ID       string
+			MemTotal uint64
 		}
-		return nil, err
+		if err := get(ctx, c, "/info", &info); err != nil {
+			if notRunning(err) {
+				engines = append(engines, protocol.Engine{Socket: sock, Containers: []protocol.Container{}})
+				continue
+			}
+			return nil, err
+		}
+		id := cmp.Or(info.ID, sock)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		var version apiVersion
+		if err := get(ctx, c, "/version", &version); err != nil {
+			return nil, err
+		}
+		e := protocol.Engine{Kind: version.kind(), Socket: sock, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
+		var err error
+		e.Containers, cpu[id], err = containers(ctx, c, s.prevCPU[id])
+		if err != nil {
+			return nil, err
+		}
+		engines = append(engines, e)
 	}
-	d := protocol.Docker{Running: true, VMLimitBytes: info.MemTotal, Containers: []protocol.Container{}}
+	s.prevCPU = cpu // engines and containers that are gone drop out
+	s.vmCost(ctx, engines)
+	return reading{engines}, nil
+}
 
-	var list []apiContainer
-	if err := s.get(ctx, "/containers/json", &list); err != nil {
-		return nil, err
+// vmCost fills in each running engine's VM. Docker Desktop's VM process
+// is known (vmproc); another kind's is not, so its cost is unknown, not
+// zero. A VM read failure leaves the containers valid; it is reported
+// alongside.
+func (s *Source) vmCost(ctx context.Context, engines []protocol.Engine) {
+	var desktop *protocol.Engine
+	for i := range engines {
+		e := &engines[i]
+		switch {
+		case !e.Running:
+		case e.Kind == protocol.EngineDockerDesktop && desktop == nil:
+			desktop = e
+		default:
+			e.VMError = "the VM of a " + e.Kind + " engine is not known"
+		}
 	}
-	stats, err := s.allStats(ctx, list)
+	if desktop == nil {
+		return
+	}
+	vms, err := s.vms.List(ctx)
 	if err != nil {
-		return nil, err
+		desktop.VMError = err.Error()
 	}
+	for _, vm := range vms {
+		if vm.Kind == vmproc.Docker {
+			desktop.VMRunning = true
+			desktop.VMFootprintBytes = vm.FootprintBytes
+		}
+	}
+}
+
+// apiVersion is the part of GET /version headroom reads.
+type apiVersion struct {
+	Platform   struct{ Name string }
+	Components []struct{ Name string }
+}
+
+// kind tells the engine apart (spike #49, P3): Podman names itself among
+// the components, Docker Desktop in the platform's name.
+func (v apiVersion) kind() string {
+	for _, c := range v.Components {
+		if c.Name == "Podman Engine" {
+			return protocol.EnginePodman
+		}
+	}
+	if strings.HasPrefix(v.Platform.Name, "Docker Desktop") {
+		return protocol.EngineDockerDesktop
+	}
+	return protocol.EngineDocker
+}
+
+// containers lists an engine's running containers with their memory, and
+// CPU since prev; it returns their counters for the next tick.
+func containers(ctx context.Context, c *http.Client, prev map[string]cpuCounters) ([]protocol.Container, map[string]cpuCounters, error) {
+	var list []apiContainer
+	if err := get(ctx, c, "/containers/json", &list); err != nil {
+		return nil, nil, err
+	}
+	stats, err := allStats(ctx, c, list)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := []protocol.Container{}
 	cpu := make(map[string]cpuCounters, len(list))
-	for i, c := range list {
+	for i, ct := range list {
 		st := stats[i]
 		if st == nil {
 			continue // exited or being removed since the list call
 		}
 		cur := cpuCounters{st.CPUStats.CPUUsage.TotalUsage, st.CPUStats.SystemCPUUsage}
-		cpu[c.ID] = cur
+		cpu[ct.ID] = cur
 		var pct *float64
-		if prev, ok := s.prevCPU[c.ID]; ok {
-			pct = cpuPercent(prev, cur, st.CPUStats.OnlineCPUs)
+		if p, ok := prev[ct.ID]; ok {
+			pct = cpuPercent(p, cur, st.CPUStats.OnlineCPUs)
 		}
-		d.Containers = append(d.Containers, protocol.Container{
-			ID:          c.ID,
-			Name:        strings.TrimPrefix(firstOr(c.Names, ""), "/"),
-			Image:       c.Image,
-			Labels:      c.Labels,
-			Mounts:      c.bindSources(),
+		out = append(out, protocol.Container{
+			ID:          ct.ID,
+			Name:        strings.TrimPrefix(firstOr(ct.Names, ""), "/"),
+			Image:       ct.Image,
+			Labels:      ct.Labels,
+			Mounts:      ct.bindSources(),
 			MemoryBytes: st.memory(),
 			CPUPercent:  pct,
 		})
 	}
-	s.prevCPU = cpu // containers that are gone drop out
-
-	// A VM read failure leaves the containers valid; report it alongside.
-	vms, err := s.vms.List(ctx)
-	if err != nil {
-		d.VMError = err.Error()
-	}
-	for _, vm := range vms {
-		if vm.Kind == vmproc.Docker {
-			d.VMRunning = true
-			d.VMFootprintBytes = vm.FootprintBytes
-		}
-	}
-	return reading{d}, nil
+	return out, cpu, nil
 }
 
 // allStats fetches each container's one-shot stats concurrently. A container
 // whose stats fail (exited, being removed, restarting) gets nil and is left
 // out; only when every one fails is that an error, since the engine itself is
 // then likely broken.
-func (s *Source) allStats(ctx context.Context, list []apiContainer) ([]*apiStats, error) {
+func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiStats, error) {
 	out := make([]*apiStats, len(list))
 	errs := make([]error, len(list))
 	sem := make(chan struct{}, statsWorkers)
 	var wg sync.WaitGroup
-	for i, c := range list {
+	for i, ct := range list {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			var st apiStats
-			if errs[i] = s.get(ctx, "/containers/"+c.ID+"/stats?stream=false&one-shot=true", &st); errs[i] == nil {
+			if errs[i] = get(ctx, c, "/containers/"+ct.ID+"/stats?stream=false&one-shot=true", &st); errs[i] == nil {
 				out[i] = &st
 			}
 		})
@@ -227,12 +328,13 @@ func notRunning(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
-func (s *Source) get(ctx context.Context, path string, v any) error {
+// get decodes the answer to GET path on the engine c reaches into v.
+func get(ctx context.Context, c *http.Client, path string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := s.http.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return err
 	}
@@ -253,12 +355,9 @@ func (s *Source) get(ctx context.Context, path string, v any) error {
 	return nil
 }
 
-type reading struct{ d protocol.Docker }
+type reading struct{ engines []protocol.Engine }
 
-func (r reading) Apply(s *protocol.Snapshot) {
-	d := r.d
-	s.Docker = &d
-}
+func (r reading) Apply(s *protocol.Snapshot) { s.Engines = r.engines }
 
 // ErrNoSuchContainer is Docker's word that a container does not exist: a
 // start of it starts nothing.
@@ -288,7 +387,10 @@ func (s *Source) Inspect(ctx context.Context, ref string) (string, map[string]st
 			Running bool
 		}
 	}
-	if err := s.get(ctx, "/containers/"+ref+"/json", &c); err != nil {
+	if s.socket == "" {
+		return "", nil, false, errors.New("docker: socket unknown")
+	}
+	if err := get(ctx, s.one, "/containers/"+ref+"/json", &c); err != nil {
 		return "", nil, false, err
 	}
 	return c.ID, c.Config.Labels, c.State.Running, nil
@@ -301,7 +403,7 @@ func (s *Source) Clock(ctx context.Context) (int64, error) {
 		return 0, errors.New("docker: socket unknown")
 	}
 	var info struct{ SystemTime string }
-	if err := s.get(ctx, "/info", &info); err != nil {
+	if err := get(ctx, s.one, "/info", &info); err != nil {
 		return 0, err
 	}
 	t, err := time.Parse(time.RFC3339Nano, info.SystemTime)
@@ -342,7 +444,7 @@ func (s *Source) Events(ctx context.Context, since, until int64, fn func(action,
 	if err != nil {
 		return err
 	}
-	resp, err := s.http.Do(req)
+	resp, err := s.one.Do(req)
 	if err != nil {
 		return err
 	}

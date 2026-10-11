@@ -251,7 +251,9 @@ func runDaemon(e Env) int {
 	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
-	dockerSrc := docker.New(cfg.Docker.Socket, vms)
+	// Every engine is found afresh each tick (#227); a start is looked up
+	// on the configured one.
+	dockerSrc := docker.Discover(func() []string { return docker.Candidates(cfg.Docker.Socket, e.Getenv) }, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		dockerSrc,
@@ -266,7 +268,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	book := wireGate(d, cfg, log, dockerSrc)
+	book := wireGate(d, cfg, log, docker.New(cfg.Docker.Socket, nil))
 	sleep := e.sleep
 	if sleep == nil {
 		sleep = sleepCtx
@@ -318,13 +320,22 @@ func runDaemon(e Env) int {
 			linkOwnShims(e.Args[0], cfg.ShimDir, log)
 		})
 	}
+	followers := &engineFollowers{ctx: ctx, wg: &wg, fn: book.ContainerEventAt, followed: map[string]bool{},
+		follow: func(ctx context.Context, src Eventer, fn func(time.Time, string, string, string, map[string]string)) {
+			followEvents(ctx, src, fn, time.Now, log, sleepCtx)
+		}}
+	publish := []func(*protocol.Snapshot){followers.Offer}
 	if cfg.Samples.Enabled {
 		w := samples.NewWriter(cfg.SamplesDir(), cfg.Samples.Retention.Duration, log)
-		d.OnPublish(w.Offer)
+		publish = append(publish, w.Offer)
 		wg.Go(func() { w.Run(ctx) })
 	}
+	d.OnPublish(func(s *protocol.Snapshot) {
+		for _, f := range publish {
+			f(s)
+		}
+	})
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
-	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEventAt, time.Now, log, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()
@@ -612,6 +623,29 @@ func lookUpStarts(req *policy.Request, r *protocol.CheckRequest, inspector Inspe
 	}
 }
 
+// refStarts names the containers a start resolved as the book does, by
+// protocol.ContainerRef: with several engines running, the ID of the engine
+// at socket prefixes each (#227).
+func refStarts(req *policy.Request, s *protocol.Snapshot, socket string) {
+	if s == nil || protocol.RunningEngines(s.Engines) < 2 {
+		return
+	}
+	i := slices.IndexFunc(s.Engines, func(e protocol.Engine) bool { return e.Running && sameSocket("unix://"+e.Socket, socket) })
+	if i < 0 {
+		return
+	}
+	ref := func(id string) string {
+		if id == "" {
+			return ""
+		}
+		return protocol.ContainerRef(true, s.Engines[i].ID, id)
+	}
+	req.ContainerID = ref(req.ContainerID)
+	for j := range req.Others {
+		req.Others[j].ID = ref(req.Others[j].ID)
+	}
+}
+
 // sleepCtx waits d, or until ctx ends.
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
@@ -661,6 +695,7 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 			Unnamed: r.Unnamed, OnEngine: sameSocket(r.Engine, socket)}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
+			refStarts(&req, s, socket)
 		}
 		d := book.Check(req, s, pol)
 		d.Worktree, d.IdentifiedBy = id, by

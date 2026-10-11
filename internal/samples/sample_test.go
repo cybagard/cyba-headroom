@@ -25,14 +25,14 @@ func fullSnapshot() *protocol.Snapshot {
 		Sources: map[string]protocol.SourceStatus{"host": {}, "docker": {Stale: true, Err: "timed out"}},
 		Host: &protocol.Host{TotalBytes: 64 << 30, UsedBytes: u64(20 << 30), CompressorBytes: u64(1 << 30),
 			CompressedBytes: u64(3 << 30), Pressure: "warn", FreePercent: 41, SwapUsedBytes: 1 << 20},
-		Docker: &protocol.Docker{Running: true, VMRunning: true, VMFootprintBytes: 4 << 30, Containers: []protocol.Container{{
+		Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMFootprintBytes: 4 << 30, Containers: []protocol.Container{{
 			ID: "abc", Name: "db", Image: "postgres:17", MemoryBytes: 1 << 30, CPUPercent: &cpu,
 			Labels: map[string]string{
 				"com.docker.compose.project.working_dir": "/Users/dev/project-a",
 				"secret.token":                           "s3cr3t-value",
 			},
 			Mounts: []string{"/Users/dev/project-a/data"},
-		}}},
+		}}}},
 		Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{{
 			Name: "ci-mac", OS: "darwin", CPUs: 4, MemoryBytes: 8 << 30, FootprintBytes: u64(5 << 30),
 			RunPID: 4242, LaunchCwd: "/Users/dev/project-b", SharedDirs: []string{"/Users/dev/project-b"},

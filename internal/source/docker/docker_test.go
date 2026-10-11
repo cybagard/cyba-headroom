@@ -54,6 +54,9 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, ok := routes["/version"]; !ok {
+		routes["/version"] = "version-desktop.json" // info.json is Docker Desktop's too
+	}
 	var mu sync.Mutex
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -92,7 +95,8 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 	}
 }
 
-func collect(t *testing.T, src *docker.Source) protocol.Docker {
+// collect returns the one engine src finds.
+func collect(t *testing.T, src *docker.Source) protocol.Engine {
 	t.Helper()
 	r, err := src.Collect(context.Background())
 	if err != nil {
@@ -100,17 +104,24 @@ func collect(t *testing.T, src *docker.Source) protocol.Docker {
 	}
 	var snap protocol.Snapshot
 	r.Apply(&snap)
-	if snap.Docker == nil {
-		t.Fatal("reading did not fill Snapshot.Docker")
+	if len(snap.Engines) != 1 {
+		t.Fatalf("engines = %+v, want one", snap.Engines)
 	}
-	return *snap.Docker
+	return snap.Engines[0]
 }
 
-func TestDockerNotRunningIsAReading(t *testing.T) {
-	sock := filepath.Join(shortDir(t), "docker.sock") // nothing listens here
-	d := collect(t, docker.New(sock, fakeVMs{}))
-	if d.Running || d.Containers == nil || len(d.Containers) != 0 {
-		t.Fatalf("got %+v, want not running with an empty (not null) container list", d)
+// No socket is no engine: a reading, not a failure.
+func TestDockerNotThereIsAReading(t *testing.T) {
+	for _, sock := range []string{filepath.Join(shortDir(t), "docker.sock"), ""} {
+		r, err := docker.New(sock, fakeVMs{}).Collect(context.Background())
+		if err != nil {
+			t.Fatalf("%q: Collect: %v", sock, err)
+		}
+		var snap protocol.Snapshot
+		r.Apply(&snap)
+		if snap.Engines == nil || len(snap.Engines) != 0 {
+			t.Fatalf("%q: engines = %+v, want an empty (not null) list", sock, snap.Engines)
+		}
 	}
 }
 
@@ -220,13 +231,6 @@ func TestContainerGoneBeforeStatsIsSkipped(t *testing.T) {
 	d := collect(t, docker.New(sock, fakeVMs{}))
 	if len(d.Containers) != 1 || d.Containers[0].ID != fixtureID {
 		t.Fatalf("containers = %+v, want only the live one", d.Containers)
-	}
-}
-
-func TestUnsetSocketIsAnError(t *testing.T) {
-	_, err := docker.New("", fakeVMs{}).Collect(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "[docker] socket") {
-		t.Fatalf("err = %v, want a hint to set [docker] socket", err)
 	}
 }
 

@@ -19,8 +19,8 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 	snaps := map[string]*protocol.Snapshot{
 		"everything running": {
 			Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(30 * gib), CompressorBytes: u64(gib), CompressedBytes: u64(3 * gib)},
-			Docker: &protocol.Docker{Running: true, VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: 6 * gib,
-				Containers: []protocol.Container{{Name: "db", MemoryBytes: 5 * gib}}},
+			Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: 6 * gib,
+				Containers: []protocol.Container{{Name: "db", MemoryBytes: 5 * gib}}}},
 			Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{{Name: "ci", MemoryBytes: 8 * gib, FootprintBytes: u64(9 * gib)}}},
 			LMStudio: &protocol.LMStudio{Installed: true, Running: true, FootprintBytes: u64(13 * gib),
 				Models: []protocol.LoadedModel{{Key: "m", SizeBytes: 12 * gib}}},
@@ -28,8 +28,8 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 				Models: []protocol.OllamaModel{{Name: "o", SizeBytes: 2 * gib}}},
 		},
 		"nothing running": {
-			Host:   &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(18 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
-			Docker: &protocol.Docker{}, Tart: &protocol.Tart{Installed: true}, LMStudio: &protocol.LMStudio{Installed: true},
+			Host:    &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(18 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
+			Engines: []protocol.Engine{}, Tart: &protocol.Tart{Installed: true}, LMStudio: &protocol.LMStudio{Installed: true},
 			Ollama: &protocol.Ollama{Installed: true},
 		},
 		"sources unknown": {
@@ -37,18 +37,18 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 		},
 		"docker VM unreadable": {
 			Host: &protocol.Host{TotalBytes: 64 * gib},
-			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib, VMError: "lsof: timed out",
-				Containers: []protocol.Container{{Name: "db", MemoryBytes: 3 * gib}}},
+			Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib, VMError: "lsof: timed out",
+				Containers: []protocol.Container{{Name: "db", MemoryBytes: 3 * gib}}}},
 			Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
 		},
 		"docker VM stopped by Resource Saver": {
-			Host:   &protocol.Host{TotalBytes: 64 * gib},
-			Docker: &protocol.Docker{Running: true, VMLimitBytes: 31 * gib},
-			Tart:   &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
+			Host:    &protocol.Host{TotalBytes: 64 * gib},
+			Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib}},
+			Tart:    &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
 		},
 		"ollama models unknown": {
-			Host:   &protocol.Host{TotalBytes: 64 * gib},
-			Docker: &protocol.Docker{}, Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
+			Host:    &protocol.Host{TotalBytes: 64 * gib},
+			Engines: []protocol.Engine{}, Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{},
 			Ollama: &protocol.Ollama{Installed: true, Running: true, ModelsError: "remote", FootprintBytes: u64(5 * gib)},
 		},
 	}

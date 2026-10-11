@@ -18,7 +18,7 @@ func TestObservePlacesALeasedContainerUnderItsWorktree(t *testing.T) {
 	tick := func(cs ...protocol.Container) *protocol.Snapshot {
 		s := snap()
 		s.Orca.Worktrees = []protocol.Worktree{{ID: w, Path: "/Users/dev/w/project-a", Name: "A"}}
-		s.Docker.Containers = cs
+		s.Engines[0].Containers = cs
 		a := attribution.Attribute(s)
 		s.Attribution = &a
 		b.Observe(s)
@@ -48,7 +48,7 @@ func TestALeasePlacedStackIsNotHeldByTheNextUp(t *testing.T) {
 		s := snap()
 		s.Orca.Worktrees = []protocol.Worktree{{ID: w, Path: "/Users/dev/w/project-a", Name: "A",
 			Agents: []protocol.Agent{{State: "working"}}}}
-		s.Docker.Containers = cs
+		s.Engines[0].Containers = cs
 		a := attribution.Attribute(s)
 		s.Attribution = &a
 		b.Observe(read(s, c.t))

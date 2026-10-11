@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
 )
 
@@ -14,6 +17,46 @@ import (
 type Eventer interface {
 	Events(ctx context.Context, since, until int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error
 	Clock(ctx context.Context) (vmNano int64, err error)
+}
+
+// engineFollowers follows each engine's events (#227): one followEvents per
+// engine, by its ID, from the first snapshot it runs in. A follower is
+// never stopped while the daemon runs: an engine that goes away is waited
+// for by its backoff, and on its return what it missed is replayed (#146).
+// Each event's container ID becomes a protocol.ContainerRef, as the book's
+// readings name it.
+type engineFollowers struct {
+	ctx    context.Context
+	wg     *sync.WaitGroup
+	follow func(ctx context.Context, src Eventer, fn func(at time.Time, action, id, name string, labels map[string]string))
+	fn     func(at time.Time, action, id, name string, labels map[string]string)
+
+	multi    atomic.Bool
+	mu       sync.Mutex
+	followed map[string]bool
+}
+
+// Offer starts a follower for each running engine in s not yet followed.
+// It does not block: it runs as each snapshot is published.
+func (f *engineFollowers) Offer(s *protocol.Snapshot) {
+	if s.Engines == nil {
+		return // no reading: nothing to say how many engines run
+	}
+	f.multi.Store(protocol.RunningEngines(s.Engines) > 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range s.Engines {
+		if !e.Running || e.ID == "" || f.followed[e.ID] {
+			continue
+		}
+		f.followed[e.ID] = true
+		src := docker.New(e.Socket, nil)
+		f.wg.Go(func() {
+			f.follow(f.ctx, src, func(at time.Time, action, id, name string, labels map[string]string) {
+				f.fn(at, action, protocol.ContainerRef(f.multi.Load(), e.ID, id), name, labels)
+			})
+		})
+	}
 }
 
 // A reconnect's replay is dated by the Docker VM's clock, read with an RTT

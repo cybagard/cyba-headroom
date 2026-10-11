@@ -196,9 +196,11 @@ type Snapshot struct {
 	CollectedAt time.Time               `json:"collected_at"`
 	Sources     map[string]SourceStatus `json:"sources"`
 
-	Host   *Host   `json:"host,omitempty"`
-	Docker *Docker `json:"docker,omitempty"`
-	Tart   *Tart   `json:"tart,omitempty"`
+	Host *Host `json:"host,omitempty"`
+	// Engines are the container engines that speak the Docker API, in
+	// candidate order (#227): nil before a reading, empty when none is there.
+	Engines []Engine `json:"engines"`
+	Tart    *Tart    `json:"tart,omitempty"`
 	// Podman is absent while no Podman machine runs.
 	Podman *Podman `json:"podman,omitempty"`
 	// VMs is absent while every VM process has a known owner.
@@ -517,9 +519,24 @@ type TartVM struct {
 	SharedDirs []string `json:"shared_dirs,omitempty"`
 }
 
-// Docker is Docker Desktop's state (R1).
-type Docker struct {
-	// Running is false when nothing answers on the Docker socket.
+// Engine kinds, read from an engine's /version (#227).
+const (
+	EngineDockerDesktop = "docker-desktop"
+	EngineDocker        = "docker"
+	EnginePodman        = "podman"
+)
+
+// Engine is one container engine's state (R1, #227): Docker Desktop, or
+// another engine that speaks the Docker API on a Unix socket.
+type Engine struct {
+	// Kind is docker-desktop, docker or podman; empty while it does not
+	// answer.
+	Kind string `json:"kind,omitempty"`
+	// Socket is the first socket it was found on.
+	Socket string `json:"socket"`
+	// ID is /info's ID: sockets that answer with one ID are one engine.
+	ID string `json:"id,omitempty"`
+	// Running is false when nothing answers on the socket.
 	Running bool `json:"running"`
 	// VMLimitBytes is the VM's configured memory (/info MemTotal): a ceiling,
 	// not a cost (spike #9).
@@ -530,10 +547,46 @@ type Docker struct {
 	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
 	// overhead plus the guest's high-water mark, which it does not give back.
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
-	// VMError is set when the VM process could not be read; VMRunning and
-	// VMFootprintBytes are then unknown, not zero.
+	// VMError is set when the VM process could not be read, or is not
+	// known for the engine's kind; VMRunning and VMFootprintBytes are then
+	// unknown, not zero.
 	VMError    string      `json:"vm_error,omitempty"`
 	Containers []Container `json:"containers"`
+}
+
+// RunningEngines is how many of engines answer.
+func RunningEngines(engines []Engine) int {
+	n := 0
+	for _, e := range engines {
+		if e.Running {
+			n++
+		}
+	}
+	return n
+}
+
+// ContainerRef is a container's ID made unique across engines (#227): with
+// more than one engine running (multi), its engine's ID, a slash and its
+// ID; else its ID as the engine gives it.
+func ContainerRef(multi bool, engineID, id string) string {
+	if multi {
+		return engineID + "/" + id
+	}
+	return id
+}
+
+// Containers returns every engine's containers in engine order, each ID a
+// ContainerRef.
+func (s *Snapshot) Containers() []Container {
+	multi := RunningEngines(s.Engines) > 1
+	var out []Container
+	for _, e := range s.Engines {
+		for _, c := range e.Containers {
+			c.ID = ContainerRef(multi, e.ID, c.ID)
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // Container is one running container.

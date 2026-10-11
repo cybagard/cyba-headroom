@@ -52,15 +52,13 @@ func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribut
 		return &a.Worktrees[index[m.WorktreeID]].Usage
 	}
 
-	if s.Docker != nil {
-		for _, c := range s.Docker.Containers {
-			m := match("container:"+c.ID, Keys{ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts})
-			u := usage(m)
-			u.Containers = append(u.Containers, protocol.AttributedContainer{
-				ID: c.ID, Name: c.Name, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
-				By: m.By, Reason: m.Reason,
-			})
-		}
+	for _, c := range s.Containers() {
+		m := match("container:"+c.ID, Keys{ComposeDir: c.Labels[protocol.ComposeWorkingDirLabel], Mounts: c.Mounts})
+		u := usage(m)
+		u.Containers = append(u.Containers, protocol.AttributedContainer{
+			ID: c.ID, Name: c.Name, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
+			By: m.By, Reason: m.Reason,
+		})
 	}
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {

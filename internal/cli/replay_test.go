@@ -131,13 +131,13 @@ func crashBeforeUp(t *testing.T, attempts ...attempt) {
 		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 * gib, Pressure: "normal"},
 			Budget:      &protocol.Budget{TotalBytes: 64 * gib, HeadroomBytes: &headroom},
 			Orca:        &protocol.Orca{Running: true, Worktrees: []protocol.Worktree{{ID: "w1", Name: "A", Agents: []protocol.Agent{{State: "working"}}}}},
-			Docker:      &protocol.Docker{Running: true},
+			Engines:     []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}},
 			Tart:        &protocol.Tart{Installed: true},
 			Attribution: &protocol.Attribution{Worktrees: []protocol.WorktreeUsage{{ID: "w1"}}},
 			Sources:     map[string]protocol.SourceStatus{"docker": {At: now.Add(3 * time.Second), Took: time.Second, Began: now}},
 			CollectedAt: now}
 		if db > 0 {
-			s.Docker.Containers = []protocol.Container{{ID: "db", Name: "db", MemoryBytes: db, Labels: lab}}
+			s.Engines[0].Containers = []protocol.Container{{ID: "db", Name: "db", MemoryBytes: db, Labels: lab}}
 			s.Attribution.Worktrees[0].Containers = []protocol.AttributedContainer{{ID: "db", Name: "db"}}
 		}
 		return s

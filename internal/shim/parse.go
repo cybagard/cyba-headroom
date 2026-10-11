@@ -11,10 +11,11 @@ import (
 // Call is what a docker, podman or tart call would start (R5, #27). Only
 // calls with a Kind are gated; everything else passes straight through.
 type Call struct {
-	// Kind is container, compose or tart (protocol.CheckRequest.Kind); ""
+	// Kind is container, compose, tart, pod (podman pod start, kube play)
+	// or machine (podman machine start) (protocol.CheckRequest.Kind); ""
 	// means the call starts nothing and passes through.
 	Kind string
-	// Op is run, create, start, restart, up or clone.
+	// Op is run, create, start, restart, up, play or clone.
 	Op string
 	// Command names the call without its flags or arguments, which may hold
 	// secrets: "docker run postgres:17", "docker compose up", "tart run ci-vm".
@@ -27,8 +28,10 @@ type Call struct {
 	// MultiTarget is set for a start or restart of several containers:
 	// Target is only the first.
 	MultiTarget bool
-	// Targets are all the containers a start or restart names.
+	// Targets are all the containers or pods a start or restart names.
 	Targets []string
+	// KubeFiles are a kube play's files, as given: "-" is stdin.
+	KubeFiles []string
 	// ComposeEnvFiles are a compose call's --env-files, in order, which
 	// Compose reads instead of the project's .env.
 	ComposeEnvFiles []string
@@ -101,6 +104,12 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	}
 	opAt := len(all) - len(args) // args is what is left of all
 	c.Op = args[0]
+	if name == "podman" && len(words) == 1 {
+		switch c.Op {
+		case "pod", "kube", "play", "machine":
+			return parsePodman(c, args), -1
+		}
+	}
 	var flags flagSet
 	switch c.Op {
 	case "run", "create":
@@ -155,6 +164,58 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		}
 	}
 	return c.named(append(words, c.Op)), at
+}
+
+// parsePodman parses the Podman calls that start a pod or a machine
+// (#230): pod start, kube play (play kube) and machine start. engine holds
+// the call's global options; args start at its first word (pod, kube,
+// play, machine). pod create starts nothing (it has no --start), nor does
+// kube play --start=false, or --down, a teardown --help hides.
+func parsePodman(engine Call, args []string) Call {
+	if len(args) < 2 {
+		return Call{}
+	}
+	cmd := args[0] + " " + args[1]
+	c := Call{Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context, HostLast: engine.HostLast, ConfigDir: engine.ConfigDir}
+	start, down := true, false
+	var table flagSet
+	switch cmd {
+	case "pod start":
+		c.Kind, c.Op, table = "pod", "start", podStart
+	case "kube play", "play kube":
+		c.Kind, c.Op, table = "pod", "play", kubePlayAll
+	case "machine start":
+		c.Kind, c.Op, table = "machine", "start", machineStart
+	default:
+		return Call{}
+	}
+	pos, res, guessed := scanAll(args[2:], table, func(f, v string) {
+		switch f {
+		case "--start":
+			start = IsTrue(v)
+		case "--down":
+			down = IsTrue(v)
+		}
+	})
+	if res == askedHelp || !start || down {
+		return Call{}
+	}
+	words := []string{"podman", args[0], args[1]}
+	if guessed {
+		return c.named(words) // past a guess, a positional may be a flag's value
+	}
+	if c.Op == "play" {
+		c.KubeFiles = pos // paths: never shown
+		return c.named(words)
+	}
+	if len(pos) > 0 {
+		c.Target = pos[0]
+		c.MultiTarget = len(pos) > 1
+		if c.MultiTarget {
+			c.Targets = pos
+		}
+	}
+	return c.named(words)
 }
 
 // Labelled returns a docker or podman run or create call's args with a
@@ -569,6 +630,18 @@ func withGlobals(t flagSet) flagSet {
 	return s
 }
 
+// withFlags is t plus more.
+func withFlags(t, more flagSet) flagSet {
+	s := flagSet{}
+	for f, v := range t {
+		s[f] = v
+	}
+	for f, v := range more {
+		s[f] = v
+	}
+	return s
+}
+
 // words builds a set of space-separated words.
 func words(list string) map[string]bool {
 	s := map[string]bool{}
@@ -654,10 +727,18 @@ var (
 	engineCommands = words("agent ai artifact attach bake build builder buildx commit compose container context cp " +
 		"create debug desktop dhi diff events exec export extension farm generate healthcheck help history image images " +
 		"import info init inspect kill kube load login logout logs machine manifest mcp model network offload pass pause " +
-		"plugin pod port ps pull push quadlet rename restart rm rmi run save scout search secret start stats stop swarm " +
+		"play plugin pod port ps pull push quadlet rename restart rm rmi run save scout search secret start stats stop swarm " +
 		"system tag top unpause untag update version volume wait")
 	composeCommands = words("attach bridge build commit config cp create down events exec export images kill logs ls " +
 		"pause port ps publish pull push restart rm run scale start stats stop top unpause up version volumes wait watch")
+
+	podStart     = flags("--pod-id-file", "--all -a")
+	machineStart = flags("", "--no-info --quiet --update-connection -q -u")
+	kubePlay     = flags(
+		"--annotation --authfile --configmap --creds --ip --log-driver --log-opt --mac-address --network --publish --userns",
+		"--force --no-hostname --no-hosts --no-pod-prefix --publish-all --quiet --replace --start --tls-verify --wait -q -w")
+	// kube play takes --down, which its --help hides: a teardown.
+	kubePlayAll = withFlags(kubePlay, flags("", "--down"))
 
 	tartRun = flags(
 		"--dir --disk --net-bridged --net-softnet-allow --net-softnet-block --net-softnet-control-fd --net-softnet-expose "+

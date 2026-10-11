@@ -161,6 +161,8 @@ type Budget struct {
 	HostBaselineGB float64 `toml:"host_baseline_gb"`
 	// DockerOverheadGB is the Docker VM's cost beyond its containers.
 	DockerOverheadGB float64 `toml:"docker_overhead_gb"`
+	// PodmanOverheadGB is a Podman machine's VM's cost beyond its containers.
+	PodmanOverheadGB float64 `toml:"podman_overhead_gb"`
 	// LMStudioIdleGB is LM Studio's footprint with no model loaded.
 	LMStudioIdleGB float64 `toml:"lmstudio_idle_gb"`
 	// OllamaIdleGB is the Ollama server's footprint with no model loaded.
@@ -174,6 +176,7 @@ func (b Budget) Params() budget.Params {
 	return budget.Params{
 		HostBaselineBytes:   gib(b.HostBaselineGB),
 		DockerOverheadBytes: gib(b.DockerOverheadGB),
+		PodmanOverheadBytes: gib(b.PodmanOverheadGB),
 		LMStudioIdleBytes:   gib(b.LMStudioIdleGB),
 		OllamaIdleBytes:     gib(b.OllamaIdleGB),
 	}
@@ -226,9 +229,9 @@ func Defaults(dir string) Config {
 			DefaultTartGB:       4, // tart's default VM memory
 			IdleGrace:           Duration{2 * time.Minute},
 		},
-		// Overheads measured in spike #9, #16 and docs/spikes/ollama.md; #23
-		// refines them.
-		Budget:  Budget{DockerOverheadGB: 1.6, LMStudioIdleGB: 0.6, OllamaIdleGB: 0.1, MaxMacOSVMs: 2},
+		// Overheads measured in spike #9, #16, docs/spikes/ollama.md and
+		// docs/spikes/podman.md; #23 refines them.
+		Budget:  Budget{DockerOverheadGB: 1.6, PodmanOverheadGB: 1.0, LMStudioIdleGB: 0.6, OllamaIdleGB: 0.1, MaxMacOSVMs: 2},
 		Samples: Samples{Enabled: true, Retention: Duration{30 * 24 * time.Hour}},
 	}
 }
@@ -371,6 +374,7 @@ func (c Config) Validate() error {
 	}{
 		{"host_baseline_gb", c.Budget.HostBaselineGB},
 		{"docker_overhead_gb", c.Budget.DockerOverheadGB},
+		{"podman_overhead_gb", c.Budget.PodmanOverheadGB},
 		{"lmstudio_idle_gb", c.Budget.LMStudioIdleGB},
 		{"ollama_idle_gb", c.Budget.OllamaIdleGB},
 	} {

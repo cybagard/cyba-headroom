@@ -539,8 +539,13 @@ type Engine struct {
 	Kind string `json:"kind,omitempty"`
 	// Socket is the first socket it was found on.
 	Socket string `json:"socket"`
-	// ID is /info's ID: sockets that answer with one ID are one engine.
+	// ID is /info's ID: sockets that answer with one ID are one engine. A
+	// Podman engine's /info ID changes on every request, so its ID is
+	// podman:<machine>, or its socket's resolved path (#228).
 	ID string `json:"id,omitempty"`
+	// Machine is the Podman machine whose socket reaches it (#228): its VM
+	// is that machine's.
+	Machine string `json:"machine,omitempty"`
 	// Running is false when nothing answers on the socket.
 	Running bool `json:"running"`
 	// Error is why an untrusted candidate (a Docker context's socket) could

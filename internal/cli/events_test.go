@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +18,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/source/docker"
+	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
 // The Docker VM's clock steps back more than 1 s between Y, logged before
@@ -231,3 +237,65 @@ func BenchmarkFollowEventsStorm(b *testing.B) {
 		})
 	}
 }
+
+// Podman's engine is offered to the events followers once, though its
+// /info answers with a new random ID on every request (#228, review round
+// 1, B1): one follower, not one per snapshot.
+func TestOfferFollowsPodmansEngineOnce(t *testing.T) {
+	sock := filepath.Join(daemonDir(t), "api.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	infos := 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/info":
+			infos++
+			_, _ = fmt.Fprintf(w, `{"ID":"00000000-0000-4000-8000-%012d"}`, infos)
+		case "/version":
+			_, _ = w.Write([]byte(`{"Components":[{"Name":"Podman Engine"}]}`))
+		case "/containers/json":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	src := docker.Discover(func() []docker.Candidate {
+		return []docker.Candidate{{Socket: sock, Trusted: true, Machine: "podman-machine-default"}}
+	}, noVMs{})
+	var wg sync.WaitGroup
+	follows := 0
+	f := &engineFollowers{ctx: context.Background(), wg: &wg, followed: map[string]bool{},
+		fn: func(time.Time, string, string, string, map[string]string) {},
+		follow: func(context.Context, Eventer, func(time.Time, string, string, string, map[string]string)) {
+			mu.Lock()
+			follows++
+			mu.Unlock()
+		}}
+	for range 3 {
+		r, err := src.Collect(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var s protocol.Snapshot
+		r.Apply(&s)
+		f.Offer(&s)
+	}
+	wg.Wait()
+	if follows != 1 {
+		t.Fatalf("followers started = %d, want 1", follows)
+	}
+}
+
+// noVMs lists no VM processes.
+type noVMs struct{}
+
+func (noVMs) List(context.Context) ([]vmproc.VM, error) { return nil, nil }

@@ -584,12 +584,13 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 		subs      []string
 		forbidden string
 	}{
-		"headroom's":     {plists: []string{"headroom"}, mark: "✓", subs: []string{"headroom's LaunchAgent", "headroom install"}},
-		"homebrew's":     {plists: []string{"homebrew"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
-		"legacy":         {plists: []string{"legacy"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
-		"none":           {mark: "✓", subs: []string{"no LaunchAgent"}},
-		"both":           {plists: []string{"headroom", "homebrew"}, mark: "!", subs: []string{"both", "headroom uninstall", "brew services restart headroom"}},
-		"both, legacy":   {plists: []string{"headroom", "legacy"}, mark: "!", subs: []string{"both", "headroom uninstall", "brew services restart headroom"}},
+		"headroom's": {plists: []string{"headroom"}, mark: "✓", subs: []string{"headroom's LaunchAgent", "headroom install"}},
+		"homebrew's": {plists: []string{"homebrew"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
+		"legacy":     {plists: []string{"legacy"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
+		"none":       {mark: "✓", subs: []string{"no LaunchAgent"}},
+		// Homebrew's daemon runs --wait: it takes over by itself (#194).
+		"both":           {plists: []string{"headroom", "homebrew"}, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
+		"both, legacy":   {plists: []string{"headroom", "legacy"}, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
 		"homebrew's off": {plists: []string{"homebrew"}, down: true, mark: "!", subs: []string{"brew services start headroom"}, forbidden: "headroom install"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -626,9 +627,9 @@ func TestDoctorPATHHintNamesWhatStartsTheDaemon(t *testing.T) {
 		"no agent": {want: "(after `headroom install`)"},
 		"homebrew": {plists: []string{"sh.brew.headroom.plist"}, want: "(after `brew services start headroom`)", not: "headroom install"},
 		"legacy":   {plists: []string{"homebrew.mxcl.headroom.plist"}, want: "(after `brew services start headroom`)", not: "headroom install"},
-		// As the daemon line advises (#192).
+		// As the daemon line advises (#192, #194).
 		"both": {plists: []string{agentLabel + ".plist", "sh.brew.headroom.plist"},
-			want: "(after `headroom uninstall`, then `brew services restart headroom`)", not: "brew services start"},
+			want: "(after `headroom uninstall`)", not: "brew services"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newDoctorRig(t)

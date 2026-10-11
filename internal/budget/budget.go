@@ -151,7 +151,10 @@ func tart(t *protocol.Tart) protocol.BudgetComponent {
 // containers live inside that footprint, so it is the whole cost; the small
 // vfkit and gvproxy processes beside each VM stay unaccounted. A VM whose
 // machine's engine runs and has read that VM is left to the engine's
-// component (#228); with none left, there is no component.
+// component (#228); with none left, there is no component. One the engine
+// could not read (vm_error) stays here too, as one with no engine does: for
+// that tick it counts twice, which errs toward a deny and never reserves
+// too little (#228, plan amendment 1).
 func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetComponent, bool) {
 	var fp uint64
 	n := 0

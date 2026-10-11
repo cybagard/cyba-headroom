@@ -713,3 +713,90 @@ func TestAReplayedDeathOfAStartOfSeveralIsTakenByTheUpBetween(t *testing.T) {
 		t.Fatalf("w1's up %s never took c1: leases = %+v\n%s", d.LeaseID, b.List(), log)
 	}
 }
+
+// A container started between two readings, before a compose up's check
+// that did not see it running, joins the up held at the next reading, as
+// one the check found running does: its use is not what the up waits for,
+// so the up keeps its reservation (#190). One started after the check,
+// bound by that reading, is the call's, as before.
+func TestAStartBeforeAnUpsCheckBindsHeld(t *testing.T) {
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	for _, tc := range []struct {
+		name        string
+		guessed     bool
+		startFirst  bool
+		bindings    string
+		reservedMiB uint64
+	}{
+		{"started before an up's check", false, true, " (held)", 2048},
+		{"started after a guessed up's check", true, false, "", 2048 - 256},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c, _ := book(t)
+			b.Observe(read(snap(), t0))
+			up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib,
+				Target: "app", OnEngine: true, Guessed: tc.guessed}
+			c.t = t0.Add(2 * time.Second)
+			if tc.startFirst {
+				b.ContainerEvent("start", "db", "db", lab) // no lease open: it binds none
+				c.t = t0.Add(3 * time.Second)
+			}
+			d := b.Check(up, snap(), cfg) // the last reading does not show db
+			if !tc.startFirst {
+				c.t = t0.Add(3 * time.Second)
+				b.ContainerEvent("start", "db", "db", lab) // a guess keys no event
+			}
+			c.t = t0.Add(5 * time.Second)
+			b.Observe(read(service("db", "app", "w1")(snap()), t0.Add(4*time.Second)))
+			if got, want := lease.Bindings(b, "db"), []string{d.LeaseID + tc.bindings}; !slices.Equal(got, want) {
+				t.Errorf("db is bound by %q, want %q", got, want)
+			}
+			if r := reserved(b); r != tc.reservedMiB<<20 {
+				t.Errorf("reserved %d MiB, want %d", r>>20, tc.reservedMiB)
+			}
+		})
+	}
+}
+
+// A container missing from two readings, with no event, is gone; back
+// after a compose up's check, it ran all along, so it joins the up held and
+// the up keeps its reservation (#190's rule b2). With a die between, the
+// book knows it stopped: the reading binds it as the call's, as before.
+func TestAContainerBackAfterMissedReadingsBindsHeld(t *testing.T) {
+	lab := map[string]string{protocol.ComposeProjectLabel: "app"}
+	for _, tc := range []struct {
+		name        string
+		die         bool
+		bindings    string
+		reservedMiB uint64
+	}{
+		{"no event", false, " (held)", 2048},
+		{"a die between", true, "", 2048 - 256},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, c, _ := book(t)
+			b.Observe(read(snap(), t0))
+			c.t = t0.Add(5 * time.Second)
+			b.Observe(read(service("db", "app", "w1")(snap()), t0.Add(4*time.Second)))
+			if tc.die {
+				c.t = t0.Add(7 * time.Second)
+				b.ContainerEvent("die", "db", "db", lab)
+			}
+			for range 2 { // db missing from two readings: gone
+				c.t = c.t.Add(5 * time.Second)
+				b.Observe(read(snap(), c.t.Add(-time.Second)))
+			}
+			c.t = c.t.Add(time.Second)
+			d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib,
+				Target: "app", OnEngine: true}, snap(), cfg)
+			c.t = c.t.Add(5 * time.Second)
+			b.Observe(read(service("db", "app", "w1")(snap()), c.t.Add(-time.Second)))
+			if got, want := lease.Bindings(b, "db"), []string{d.LeaseID + tc.bindings}; !slices.Equal(got, want) {
+				t.Errorf("db is bound by %q, want %q", got, want)
+			}
+			if r := reserved(b); r != tc.reservedMiB<<20 {
+				t.Errorf("reserved %d MiB, want %d", r>>20, tc.reservedMiB)
+			}
+		})
+	}
+}

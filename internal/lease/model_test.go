@@ -54,6 +54,7 @@ type mcont struct {
 	missing                  bool      // left out of this reading
 	missedAt                 int       // the last reading it was left out of
 	read                     int       // the last reading it was in
+	readAt                   time.Time // when that reading was taken
 	// deaths are its deaths since a reading showed it, while deadIn, a
 	// start of several's lease (model.several), binds it, each with when it
 	// ran again: that lease keeps it until a lease checked in one of them
@@ -726,13 +727,17 @@ func (m *model) tick() {
 			// not new to its first (shown): back after missing it, it is
 			// back as any other (#168 F4).
 			back, gone := (x.guess == "" || x.shown) && x.missedAt > 0 && x.missedAt == m.ticks-1, x.read < m.ticks-2
-			x.read = m.ticks
+			var ran time.Time // since when the book's verdict says it ran all along (lease.go verdict.missedOut)
+			if gone && x.verdict {
+				ran = x.readAt
+			}
+			x.read, x.readAt = m.ticks, m.c.t
 			x.owned, x.verdict, x.verdictAt = x.owned || !m.flick && x.wt != "", true, m.c.t
 			m.deadReading(x)
 			m.firstReading(x)
 			m.pendingReading(x)
 			if back {
-				m.backReading(x, gone)
+				m.backReading(x, gone, ran)
 			}
 		}
 	}
@@ -803,10 +808,23 @@ func (m *model) deadReading(x *mcont) {
 // fresh, binder).
 func (m *model) pendingReading(x *mcont) {
 	if x.pending && !x.shown && !m.bound(x) {
-		x.boundBy = m.binder(x)
-		x.owned = x.owned || x.boundBy != "" // its project's lease's worktree (lease.go boundBy)
+		id := m.binder(x)
+		m.readingBinds(x, id)
+		x.owned = x.owned || id != "" // its project's lease's worktree (lease.go boundBy)
 	}
 	x.pending = false
+}
+
+// readingBinds binds x, new to this reading, to lease id ("" none): held if
+// its start event, since the last reading, came before id's check, else as
+// the call's (lease.go Observe fresh, #190). Call it in tick, after the
+// count.
+func (m *model) readingBinds(x *mcont, id string) {
+	if created, ok := m.created(id); ok && x.began == m.ticks-1 && x.startedAt.Before(created) {
+		x.heldBy = id
+		return
+	}
+	x.boundBy = id
 }
 
 // firstReading settles a guessed hit's container at its first reading: if
@@ -826,14 +844,15 @@ func (m *model) firstReading(x *mcont) {
 	case m.flick:
 		m.outcomes["flicker"]++
 		if id := m.binder(x); id != "" && !x.shown && !x.pending {
-			x.boundBy, x.owned = id, true // an up keys it with no attribution, as at an event (#168 F5)
+			m.readingBinds(x, id)
+			x.owned = true // an up keys it with no attribution, as at an event (#168 F5)
 		} else {
 			x.firstGated = false
 		}
 	case x.shown:
 	default:
 		if id := m.binder(x); id != "" {
-			x.boundBy = id
+			m.readingBinds(x, id)
 		}
 	}
 	x.guess = ""
@@ -843,15 +862,17 @@ func (m *model) firstReading(x *mcont) {
 // from, and bound to no lease, whoever started it: it binds the lease the
 // reading keys it to (binder). Missing from one, it is held (lease.go
 // Observe) until it stops: a guess that holds it is confirmed (lease.go
-// composeTakes) until then. Missing from two in a row, it went, and binds
-// as new, as at a first reading.
-func (m *model) backReading(x *mcont, gone bool) {
+// composeTakes) until then. Missing from two in a row, it went: it binds as
+// new, as at a first reading, unless the book's verdict says it ran all
+// along since a reading before the lease's check (ran): held (#190).
+func (m *model) backReading(x *mcont, gone bool, ran time.Time) {
 	if x.miss || m.bound(x) {
 		return
 	}
 	id := m.binder(x)
 	x.owned = x.owned || id != "" // its project's lease's worktree (lease.go boundBy)
-	if !gone {
+	created, ok := m.created(id)
+	if !gone || ok && !ran.IsZero() && ran.Before(created) {
 		x.heldBy = id
 		return
 	}
@@ -1303,6 +1324,56 @@ func TestTheLeaseModelOn87(t *testing.T) {
 	}
 	if f := play(t, ops); f != nil {
 		t.Errorf("#87:\n%s", f.msg)
+	}
+}
+
+// TestTheLeaseModelOn190 plays seed 3577, shrunk: a restart policy starts
+// c8 between two readings, while no lease of p1 is open, and an up of p1 is
+// checked before the next reading shows it. The up starts c9; c8, started
+// before its check, joins it held, so the up keeps c9's reservation.
+func TestTheLeaseModelOn190(t *testing.T) {
+	ops := []op{
+		{8, 696, 506},  // raw docker run c1
+		{12, 227, 83},  // w2: compose up evil, c2
+		{13, 825, 259}, // w2: dressed docker run c3
+		{1, 303, 642},  // w2: compose up app starts c4 and c5
+		{8, 531, 144},  // raw docker run c6
+		{13, 555, 846}, // w2: dressed docker run c7
+		{1, 232, 317},  // w1: compose up p1 starts c8 and c9
+		{15, 873, 131}, // BUDGET_WAIT docker run c10
+		{9, 979, 876},  // wait 1m: the leases end
+		{8, 58, 169},   // raw docker run c11
+		{15, 415, 546}, // BUDGET_WAIT idle compose up app
+		{6, 678, 62},   // crash c8
+		{16, 333, 467}, // c9 missing from the reading
+		{14, 501, 115}, // headroom 0 MiB, and a reading
+		{3, 928, 121},  // compose stop p1 (c9)
+		{11, 332, 909}, // tick: c8 and c9 gone
+		{17, 967, 494}, // the restart policy starts c8
+		{0, 348, 65},   // w1: compose up p1 starts c9; the last reading did not show c8
+		{11, 949, 265}, // tick: c8 and c9 bind the up
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#190:\n%s", f.msg)
+	}
+}
+
+// TestTheLeaseModelOn190Missed plays seed 29228, shrunk: c2 misses two
+// readings, so it is gone with no die event, and an up of its stack is
+// checked before the next reading shows it again. It ran all along, so it
+// joins the up held, and the up keeps c1's reservation (#190's rule b2).
+func TestTheLeaseModelOn190Missed(t *testing.T) {
+	ops := []op{
+		{1, 226, 107},  // w1: compose up app starts c1 and c2
+		{9, 98, 468},   // wait 1m: the lease ends
+		{6, 736, 618},  // crash c1
+		{16, 196, 254}, // c2 missing from the reading
+		{16, 283, 244}, // and from the next: gone
+		{2, 562, 848},  // w1: compose up app starts c1
+		{10, 260, 14},  // tick: c1 and c2 bind the up
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#190, missed readings:\n%s", f.msg)
 	}
 }
 

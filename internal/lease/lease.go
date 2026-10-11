@@ -240,6 +240,10 @@ type verdict struct {
 	// crashes it sets it.
 	event   time.Time // its last start or die event
 	present bool      // in the latest reading (or a failed read kept it)
+	// missedOut is set for a container gone only by the readings it missed,
+	// with no start or die event since the last that listed it (last): it
+	// ran all along, as far as the book knows (#190).
+	missedOut bool
 }
 
 // reserved is what the lease still holds back: its cost less what its
@@ -790,7 +794,14 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	res := resources(s)
 	// The reading is the word on what runs, for events before it began.
 	began, current := readingBegan(s)
+	// When each container that runs, by the events, last started: kept for
+	// the bindings below, which the reading may make after it drops the
+	// event (#190).
+	started := map[string]time.Time{}
 	for k, v := range b.seen {
+		if !v.started.IsZero() {
+			started[k] = v.started
+		}
 		if current && v.at.Before(began) {
 			delete(b.seen, k)
 		}
@@ -912,6 +923,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				// (#131).
 				e.held[r.key], e.found = true, true
 			} else {
+				at, ok := started[r.key]
+				if v := b.verdicts[r.key]; ok && at.Before(e.Created) || v != nil && v.missedOut && v.last.Before(e.Created) {
+					// Started before the check, which did not see it
+					// running (a restart policy's restart since the last
+					// reading), or run all along since a reading before it:
+					// held, as one the check found running (#190). Its use
+					// is not what the lease waits for.
+					e.held[r.key], e.found = true, true
+				}
 				b.judge(r, gated, now)
 			}
 			b.boundBy(r, e)
@@ -954,7 +974,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		if v == nil {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
-		v.last, v.present = now, true
+		v.last, v.present, v.missedOut = now, true, false
 		// No run known (a failed launch read): keep the last.
 		if runs := r.runs(); len(runs) > 0 {
 			v.runPIDs = runs
@@ -991,6 +1011,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			n = 0
 		case readable(s, kindOf(k)):
 			n = min(n+1, goneAfter(k)) // a failed read keeps the count
+			if v := b.verdicts[k]; v != nil && kindOf(k) == "container" && b.missed[k] < n && n == goneAfter(k) && !v.event.After(v.last) {
+				v.missedOut = true // gone by the readings alone, no event since the last that listed it
+			}
 		}
 		missed[k] = n
 		switch at, ok := b.missedSince[k]; {
@@ -1153,6 +1176,10 @@ type seen struct {
 	// events lost, which began a life no event bound: that die drops
 	// bound (#131).
 	died bool
+	// started is when it last started, while that start is its last word
+	// (a kill that stops it keeps it, until its die): zero once it died
+	// or stopped (#190).
+	started time.Time
 }
 
 // readingBegan is when s's Docker reading began: an event after it may be
@@ -1202,16 +1229,16 @@ func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels ma
 		}
 	case "start":
 		if v := b.verdicts[r.key]; v != nil {
-			v.event = now
+			v.event, v.missedOut = now, false
 		}
 		last := b.seen[r.key]
 		stopped := last.stopped
-		b.seen[r.key] = seen{at: now}
+		b.seen[r.key] = seen{at: now, started: now}
 		delete(b.missed, r.key) // it runs again
 		from, d := b.deadIn(r.key)
 		if from == nil && b.boundAnywhere(r.key) {
 			// Its lease still holds it: this start is bound too (#147).
-			b.seen[r.key] = seen{at: now, bound: true}
+			b.seen[r.key] = seen{at: now, bound: true, started: now}
 			return
 		}
 		if from != nil && d.last().ran.IsZero() {
@@ -1254,13 +1281,13 @@ func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels ma
 		e.bind(r)
 		b.judge(r, gated, now)
 		b.boundBy(r, e)
-		b.seen[r.key] = seen{at: now, bound: true}
+		b.seen[r.key] = seen{at: now, bound: true, started: now}
 	case "die":
 		last := b.seen[r.key]
 		b.seen[r.key] = seen{at: now, gone: true, stopped: last.stopped, bound: last.bound && !last.died, died: true}
 		if v := b.verdicts[r.key]; v != nil {
 			v.crashed = !b.seen[r.key].stopped
-			v.event = now
+			v.event, v.missedOut = now, false
 		}
 		b.missed[r.key] = goneAfter(r.key) // gone at once
 		b.release(r.key)

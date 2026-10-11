@@ -105,7 +105,7 @@ func daemonFinding(home, socket string, err error) finding {
 	manager := "no LaunchAgent (started by hand)"
 	switch {
 	case ours && brew:
-		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`, then `brew services restart headroom`)"
+		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`)"
 	case brew:
 		manager = "under Homebrew's LaunchAgent (brew services)"
 	case ours:
@@ -186,7 +186,7 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 	if home := getenv("HOME"); home != "" && brewPlist(home) != "" {
 		start = "`brew services start headroom`"
 		if _, err := os.Stat(agentPlist(home)); err == nil {
-			start = "`headroom uninstall`, then `brew services restart headroom`"
+			start = "`headroom uninstall`"
 		}
 	}
 	restart := ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after " + start + ")"

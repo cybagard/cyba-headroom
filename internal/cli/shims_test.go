@@ -189,3 +189,35 @@ func TestUnlinkShimsTakesALinkGoneUnderItAsGone(t *testing.T) {
 		t.Errorf("the empty shim dir stayed: %v", err)
 	}
 }
+
+// In the both state, Homebrew's daemon may link its shims into the folder
+// between uninstall's emptiness check and the folder's removal: the folder
+// stays, with no error, and its shims are reported as kept (#194).
+func TestUnlinkShimsKeepsAFolderFilledUnderIt(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin", "headroom")
+	opt := filepath.Join(root, "opt", "headroom", "bin", "headroom") // Homebrew's
+	dir := filepath.Join(root, "shims")
+	if _, err := linkShims(dir, bin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeShimDir = os.Remove })
+	removeShimDir = func(p string) error {
+		if _, err := linkShims(p, opt); err != nil { // the other daemon, first
+			t.Fatal(err)
+		}
+		return os.Remove(p)
+	}
+	removed, kept, err := unlinkShims(dir, bin, true, true)
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Join(removed, " ") != "docker podman tart" || strings.Join(kept, " ") != "docker podman tart" {
+		t.Errorf("removed %q, kept %q; want all three each", removed, kept)
+	}
+	for _, n := range []string{"docker", "podman", "tart"} {
+		if got, err := os.Readlink(filepath.Join(dir, n)); err != nil || got != opt {
+			t.Errorf("%s -> %q, %v", n, got, err)
+		}
+	}
+}

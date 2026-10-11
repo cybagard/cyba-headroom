@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -282,6 +283,14 @@ func runDaemon(e Env) int {
 			return 0
 		}
 	}
+	// Under launchd, a daemon refused by the lock is restarted again and
+	// again: say so once per holder (#194).
+	if errors.Is(err, daemon.ErrLocked) && logPath != "" {
+		if reportLocked(cfg.Socket, log) {
+			fmt.Fprintln(e.Stderr, "headroom:", err)
+		}
+		return 1
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -321,6 +330,25 @@ func runDaemon(e Env) int {
 	}
 	log.Info("daemon stopped")
 	return 0
+}
+
+// reportLocked warns that another daemon holds the lock beside socket,
+// unless it already did for that holder: the marker beside the lock names
+// the last one reported. A holder it cannot name is always new. It reports
+// whether it warned.
+func reportLocked(socket string, log *slog.Logger) bool {
+	marker := socket + ".lock.reported"
+	pid, err := daemon.LockHolder(socket)
+	if err != nil {
+		log.Warn("another daemon is running; see `headroom doctor`", "socket", socket)
+		return true
+	}
+	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == strconv.Itoa(pid) {
+		return false
+	}
+	log.Warn(fmt.Sprintf("another daemon is running (pid %d); see `headroom doctor`", pid), "socket", socket)
+	_ = os.WriteFile(marker, []byte(strconv.Itoa(pid)+"\n"), 0o600)
+	return true
 }
 
 // runStatus prints the daemon's raw snapshot as JSON; runView is the human

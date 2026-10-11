@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -44,12 +46,30 @@ func Listen(path string) (net.Listener, error) {
 		}
 		return nil, fmt.Errorf("daemon: locking %s: %w", lockPath, err)
 	}
+	// The holder's PID, for a daemon refused to name it (#194).
+	if err := lock.Truncate(0); err == nil {
+		_, _ = lock.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	}
 	ln, err := listenLocked(path)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
 	return &lockedListener{Listener: ln, lock: lock}, nil
+}
+
+// LockHolder is the PID the daemon holding the lock beside the socket at
+// path wrote into it.
+func LockHolder(path string) (int, error) {
+	b, err := os.ReadFile(path + ".lock")
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("no PID in %s.lock", path)
+	}
+	return pid, nil
 }
 
 func listenLocked(path string) (net.Listener, error) {

@@ -1,10 +1,12 @@
 // Package vmproc finds the host processes of Apple Virtualization VMs, tells
-// Docker Desktop's VM from Tart VMs, and reads what each costs the host.
+// Docker Desktop's VM from Tart VMs and Podman machines, and reads what each
+// costs the host.
 //
 // Every VM runs as a com.apple.Virtualization.VirtualMachine XPC service with
 // parent PID 1, so neither name nor parent tells them apart (spike #9). The
 // files each one holds open do: Docker's VM has Docker.app's linuxkit image and
-// com.docker.docker data open, a Tart VM its ~/.tart/vms/<name>/disk.img.
+// com.docker.docker data open, a Tart VM its ~/.tart/vms/<name>/disk.img, a
+// Podman machine its disk under ~/.local/share/containers/podman/machine/.
 package vmproc
 
 import (
@@ -12,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +28,7 @@ type Kind string
 const (
 	Docker  Kind = "docker"
 	Tart    Kind = "tart"
+	Podman  Kind = "podman"
 	Unknown Kind = "unknown"
 )
 
@@ -32,7 +36,8 @@ const (
 type VM struct {
 	PID  int
 	Kind Kind
-	// Name is the Tart VM name; empty for other kinds.
+	// Name is the Tart VM name or the Podman machine name; empty for other
+	// kinds.
 	Name string
 	// FootprintBytes is phys_footprint: what the host pays, as Activity
 	// Monitor shows it.
@@ -167,6 +172,15 @@ func classify(lsof []byte) identity {
 		if _, rest, ok := strings.Cut(p, "/.tart/vms/"); ok {
 			name, _, _ := strings.Cut(rest, "/")
 			return identity{kind: Tart, name: name}
+		}
+		// A Podman machine also holds its EFI store open there: only the
+		// disk, <machine>-<arch>.raw, names it (spike #49).
+		if strings.Contains(p, "/.local/share/containers/podman/machine/") {
+			if disk, ok := strings.CutSuffix(path.Base(p), ".raw"); ok {
+				if i := strings.LastIndex(disk, "-"); i > 0 {
+					return identity{kind: Podman, name: disk[:i]}
+				}
+			}
 		}
 	}
 	return identity{kind: Unknown}

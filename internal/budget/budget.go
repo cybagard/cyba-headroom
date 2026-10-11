@@ -52,6 +52,14 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		b.Unknown = append(b.Unknown, "tart")
 		footprintsKnown = false
 	}
+	// The podman section is absent while no machine runs, so only the
+	// source's status tells "none running" from "no reading yet".
+	if s.Podman != nil {
+		add(podman(s.Podman))
+	} else if st, ok := s.Sources["podman"]; ok && st.At.IsZero() {
+		b.Unknown = append(b.Unknown, "podman")
+		footprintsKnown = false
+	}
 	if s.LMStudio != nil {
 		add(lmstudio(s.LMStudio, p))
 	} else {
@@ -78,7 +86,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
 
-	for _, name := range []string{"host", "docker", "tart", "lmstudio", "ollama"} {
+	for _, name := range []string{"host", "docker", "tart", "podman", "lmstudio", "ollama"} {
 		if s.Sources[name].Stale {
 			b.Stale = append(b.Stale, name)
 		}
@@ -115,6 +123,17 @@ func tart(t *protocol.Tart) protocol.BudgetComponent {
 		c.UsedBytes = &used
 	}
 	return c
+}
+
+// podman reserves what the Podman machines' VMs cost the host now. Their
+// containers live inside that footprint, so it is the whole cost; the small
+// vfkit and gvproxy processes beside each VM stay unaccounted.
+func podman(p *protocol.Podman) protocol.BudgetComponent {
+	var fp uint64
+	for _, vm := range p.VMs {
+		fp += vm.FootprintBytes
+	}
+	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}
 }
 
 // docker reserves what the VM already holds or what its containers need plus

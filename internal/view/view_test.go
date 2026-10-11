@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/view"
 )
@@ -157,6 +158,15 @@ func TestReservedLine(t *testing.T) {
 	s.Budget.Components[0].ReservedBytes = 0
 	l = render(t, s, view.Options{})[1]
 	has(t, l, "reserved: tart 8.0 · lmstudio 13.0 · baseline 10.0 (in use ?)")
+}
+
+func TestReservedLineNamesPodmanBesideTart(t *testing.T) {
+	s := busy()
+	s.Tart = &protocol.Tart{Installed: true, VMs: []protocol.TartVM{{Name: "ci", MemoryBytes: 8 * gib, FootprintBytes: u64(5 * gib)}}}
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "podman-machine-default", PID: 30, FootprintBytes: gib}}}
+	b := budget.Compute(s, budget.Params{HostBaselineBytes: 10 * gib})
+	s.Budget = &b
+	has(t, render(t, s, view.Options{})[1], "reserved: tart 8.0 · podman 1.0 · baseline 10.0")
 }
 
 func TestReservedLineNamesOllama(t *testing.T) {

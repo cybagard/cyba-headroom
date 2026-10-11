@@ -172,3 +172,30 @@ func TestModelIdlenessSurvivesWriteAndRead(t *testing.T) {
 		t.Fatalf("read back %+v", got)
 	}
 }
+
+// A worktree's project survives a write and a read, and a sample written
+// before samples had one still loads, with no project (#102).
+func TestWorktreeProjectSurvivesWriteAndRead(t *testing.T) {
+	w, dir, _ := newTestWriter(t)
+	s := snapAt(day1)
+	s.Orca = &protocol.Orca{Installed: true, Running: true, Worktrees: []protocol.Worktree{
+		{ID: "w1", Path: "/Users/dev/src/project-a", Name: "main", Project: "project-a"}}}
+	w.write(s)
+	w.close()
+	f, err := os.OpenFile(filepath.Join(dir, "2026-10-07.jsonl"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"v":1,"t":"2026-10-07T13:00:00Z","worktrees":[{"id":"w2","path":"/Users/dev/src/project-b","name":"main","memory_bytes":0,"cpu_percent":0}]}` + "\n")
+	_ = f.Close()
+	var got []Worktree
+	if _, err := Read(dir, time.Time{}, day1.AddDate(0, 0, 1), func(s Sample) error {
+		got = append(got, s.Worktrees...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "w1" || got[0].Project != "project-a" || got[1].ID != "w2" || got[1].Project != "" || got[1].Name != "main" {
+		t.Fatalf("read back %+v", got)
+	}
+}

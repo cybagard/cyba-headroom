@@ -102,7 +102,7 @@ func (r *renderer) reserved(b *protocol.Budget) {
 	r.add("  reserved: %s", strings.Join(parts, " · "))
 }
 
-const rowFormat = "%-18s %-20s %-2s %-13s %-13s %-6s %s"
+const rowFormat = "%-28s %-20s %-2s %-13s %-13s %-6s %s"
 
 // worktrees adds a row per worktree and the unattributed row; it returns
 // how many idle worktrees it left out.
@@ -141,7 +141,7 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 			// per row: two wide glyphs would shift the columns.
 			mark = "⚠"
 		}
-		r.add(rowFormat, short(name(w), 18), agentSummary(ag), mark,
+		r.add(rowFormat, short(Label(w.Project, w.Name, w.Path), 28), agentSummary(ag), mark,
 			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true), gbOrUnknown(w.AgentMemoryBytes))
 	}
 	u := a.Unattributed
@@ -209,11 +209,17 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 	r.add("%s", strings.Join(parts, " · "))
 }
 
-func name(w protocol.WorktreeUsage) string {
-	if w.Name != "" {
-		return Clean(w.Name)
+// Label names a worktree everywhere headroom shows one: project/name, or the
+// name alone when Orca gives no project (#102). The name is Orca's display
+// name, else the folder's. The result is cleaned.
+func Label(project, name, path string) string {
+	if name == "" {
+		name = filepath.Base(path)
 	}
-	return Clean(filepath.Base(w.Path))
+	if project != "" {
+		name = project + "/" + name
+	}
+	return Clean(name)
 }
 
 // Clean makes text from outside headroom (names, errors) safe to print:

@@ -381,3 +381,13 @@ func TestAStaleTartReadingNamesNoHolders(t *testing.T) {
 		t.Fatalf("%+v", d)
 	}
 }
+
+// A deny names the worktree project/name, as the view does (#102).
+func TestDenyNamesTheWorktreeByProject(t *testing.T) {
+	s := snap()
+	s.Orca.Worktrees[1].Project, s.Orca.Worktrees[1].Name = "project-a", "main"
+	d := policy.Decide(req("idle", gib), s, cfg)
+	if d.Allow || !strings.Contains(d.Message, `for worktree "project-a/main"`) {
+		t.Fatalf("message %q", d.Message)
+	}
+}

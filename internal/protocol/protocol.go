@@ -241,9 +241,10 @@ const (
 
 // WorktreeUsage is one worktree and what it runs.
 type WorktreeUsage struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	Name    string `json:"name"`
+	Project string `json:"project,omitempty"`
 	Usage
 	// The agents' own processes, from Orca (RSS); absent when Orca's memory
 	// diagnostics failed.
@@ -402,10 +403,12 @@ type Orca struct {
 // Worktree is one local, unarchived Orca worktree.
 type Worktree struct {
 	// ID is <repoId>::<path>, the same value as ORCA_WORKTREE_ID.
-	ID     string `json:"id"`
-	Path   string `json:"path"`
-	Name   string `json:"name"`
-	Branch string `json:"branch"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+	// Project is Orca's repo name; empty from an Orca that sends none.
+	Project string `json:"project,omitempty"`
+	Branch  string `json:"branch"`
 	// Status is Orca's worktree status: working, active or inactive.
 	Status         string    `json:"status"`
 	LiveTerminals  int       `json:"live_terminals"`

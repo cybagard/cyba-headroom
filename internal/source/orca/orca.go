@@ -115,6 +115,7 @@ type apiWorktree struct {
 	WorktreeID        string     `json:"worktreeId"`
 	Path              string     `json:"path"`
 	DisplayName       string     `json:"displayName"`
+	Repo              string     `json:"repo"`
 	Branch            string     `json:"branch"`
 	Status            string     `json:"status"`
 	HostID            string     `json:"hostId"`
@@ -136,6 +137,7 @@ func (w apiWorktree) toProtocol() protocol.Worktree {
 		ID:             w.WorktreeID,
 		Path:           w.Path,
 		Name:           w.DisplayName,
+		Project:        w.Repo,
 		Branch:         strings.TrimPrefix(w.Branch, "refs/heads/"),
 		Status:         w.Status,
 		LiveTerminals:  w.LiveTerminalCount,

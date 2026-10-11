@@ -13,6 +13,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/units"
+	"github.com/cybagard/cyba-headroom/internal/view"
 )
 
 // Reason codes.
@@ -322,7 +323,7 @@ func slotHolders(s *protocol.Snapshot, c Config) (holders []string, stop string)
 			continue
 		}
 		state, since, working := agentState(s, w.ID, c)
-		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, w.Name, state)}
+		h := holder{rank: 2, name: vm.Name, text: fmt.Sprintf("%s (worktree %q: %s)", shown, view.Label(w.Project, w.Name, w.Path), state)}
 		if !working {
 			h.rank, h.idle = 0, since
 			// Offered for stopping only when the idle-holder rule calls
@@ -499,12 +500,12 @@ func message(r Request, s *protocol.Snapshot, d Decision) string {
 	return b.String()
 }
 
-// worktreeName is the worktree's display name in Orca, if known.
+// worktreeName labels the worktree as the view does, if Orca knows it.
 func worktreeName(s *protocol.Snapshot, id string) string {
 	if s.Orca != nil {
 		for _, w := range s.Orca.Worktrees {
 			if w.ID == id {
-				return w.Name
+				return view.Label(w.Project, w.Name, w.Path)
 			}
 		}
 	}

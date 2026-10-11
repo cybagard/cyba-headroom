@@ -131,9 +131,11 @@ type Ungated struct {
 
 // Worktree is one Orca worktree, its agents' processes and their states.
 type Worktree struct {
-	ID          string  `json:"id"`
-	Path        string  `json:"path"`
-	Name        string  `json:"name"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+	// Project is Orca's repo name; absent in samples written before #102.
+	Project     string  `json:"project,omitempty"`
 	MemoryBytes uint64  `json:"memory_bytes"`
 	CPUPercent  float64 `json:"cpu_percent"`
 	// Agents are the agents' states: working, waiting, done, ...
@@ -199,7 +201,7 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 		app := o.AppMemoryBytes
 		out.OrcaAppBytes = &app
 		for _, w := range o.Worktrees {
-			ws := Worktree{ID: w.ID, Path: w.Path, Name: w.Name, MemoryBytes: w.MemoryBytes, CPUPercent: w.CPUPercent}
+			ws := Worktree{ID: w.ID, Path: w.Path, Name: w.Name, Project: w.Project, MemoryBytes: w.MemoryBytes, CPUPercent: w.CPUPercent}
 			for _, a := range w.Agents {
 				ws.Agents = append(ws.Agents, a.State)
 			}

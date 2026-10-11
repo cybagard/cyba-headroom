@@ -237,3 +237,25 @@ func TestBothCallsRunConcurrently(t *testing.T) {
 		t.Fatalf("collect took %s, want the two 200 ms calls overlapped", el)
 	}
 }
+
+// Every worktree carries its project, Orca's repo name (#102).
+func TestWorktreesCarryTheirProject(t *testing.T) {
+	got := collect(t, orca.New(runningCLI()))
+	want := map[string]string{
+		"/Users/dev/orca/workspaces/project-a/feature-1": "project-a",
+		"/Users/dev/orca/workspaces/cyba-headroom/main":  "cyba-headroom",
+		"/Users/dev/orca/workspaces/project-a/feature-2": "project-a",
+		"/Users/dev/Downloads/Dev/cyba-headroom":         "cyba-headroom",
+		"/Users/dev/Downloads/Dev/project-b":             "project-b",
+		"/Users/dev/Downloads/Dev/project-a":             "project-a",
+		"/Users/dev/Downloads/Dev/project-c":             "project-c",
+	}
+	if len(got.Worktrees) != len(want) {
+		t.Fatalf("worktrees = %d, want %d", len(got.Worktrees), len(want))
+	}
+	for _, w := range got.Worktrees {
+		if w.Project != want[w.Path] {
+			t.Errorf("%s: project = %q, want %q", w.Path, w.Project, want[w.Path])
+		}
+	}
+}

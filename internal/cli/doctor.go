@@ -293,15 +293,11 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 	return f
 }
 
-// worktreeName names worktree id as the view does: Orca may leave the
-// display name empty.
+// worktreeName labels worktree id as the view does.
 func worktreeName(snap *protocol.Snapshot, id string) string {
 	for _, w := range snap.Orca.Worktrees {
 		if w.ID == id {
-			if w.Name != "" {
-				return w.Name
-			}
-			return filepath.Base(w.Path)
+			return view.Label(w.Project, w.Name, w.Path)
 		}
 	}
 	return id

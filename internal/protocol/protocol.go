@@ -191,9 +191,11 @@ type Snapshot struct {
 	CollectedAt time.Time               `json:"collected_at"`
 	Sources     map[string]SourceStatus `json:"sources"`
 
-	Host     *Host     `json:"host,omitempty"`
-	Docker   *Docker   `json:"docker,omitempty"`
-	Tart     *Tart     `json:"tart,omitempty"`
+	Host   *Host   `json:"host,omitempty"`
+	Docker *Docker `json:"docker,omitempty"`
+	Tart   *Tart   `json:"tart,omitempty"`
+	// Podman is absent while no Podman machine runs.
+	Podman   *Podman   `json:"podman,omitempty"`
 	Orca     *Orca     `json:"orca,omitempty"`
 	LMStudio *LMStudio `json:"lmstudio,omitempty"`
 	Ollama   *Ollama   `json:"ollama,omitempty"`
@@ -305,7 +307,8 @@ type Budget struct {
 	// (#23). Absent when host used, compressed or a component's footprint is
 	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
-	// Components are docker, tart, lmstudio, ollama and host_baseline, in that order.
+	// Components are docker, tart, podman (while a Podman machine runs),
+	// lmstudio, ollama and host_baseline, in that order.
 	Components []BudgetComponent `json:"components"`
 	// Unknown names sources with no reading yet. They count as 0, so headroom
 	// is then an upper bound.
@@ -447,6 +450,22 @@ type Tart struct {
 	// LaunchError is set when tart run processes could not be read; launch
 	// details (attribution only) are then missing.
 	LaunchError string `json:"launch_error,omitempty"`
+}
+
+// Podman is the running Podman machines' VMs (R1), read from their VM
+// processes (internal/vmproc).
+type Podman struct {
+	VMs []PodmanVM `json:"vms"`
+	// Warnings are about what runs beside them: Docker Desktop's VM.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// PodmanVM is one running Podman machine's VM process.
+type PodmanVM struct {
+	Machine string `json:"machine"`
+	PID     int    `json:"pid"`
+	// FootprintBytes is what the VM process costs the host (phys_footprint).
+	FootprintBytes uint64 `json:"footprint_bytes"`
 }
 
 // TartVM is one running Tart VM.

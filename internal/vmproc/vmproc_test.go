@@ -159,3 +159,23 @@ func TestUnknownIsRetriedOnTheNextList(t *testing.T) {
 		t.Fatalf("kind = %s, want docker once the VM has its image open", got[0].Kind)
 	}
 }
+
+func TestPodmanVMIsNamedByItsMachine(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{1234, 5678, 9012}
+	sys.files["lsof 9012"] = "lsof-podman.txt"
+	sys.files["footprint 9012"] = "footprint.txt"
+	got, err := vmproc.New(sys).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The EFI store is open before the disk; the name comes from the disk.
+	want := []vmproc.VM{
+		{PID: 1234, Kind: vmproc.Docker, FootprintBytes: 1709280520},
+		{PID: 5678, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 1709280520},
+		{PID: 9012, Kind: vmproc.Podman, Name: "podman-machine-default", FootprintBytes: 1709280520},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}

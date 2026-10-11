@@ -3,6 +3,7 @@ package budget_test
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -350,5 +351,51 @@ func TestStaleSourcesAreFlagged(t *testing.T) {
 	}
 	if b.ReservedBytes == 0 {
 		t.Error("stale readings must still count")
+	}
+}
+
+func TestPodmanVMsAreReservedAndNotUnaccounted(t *testing.T) {
+	s := busyMac()
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{
+		{Machine: "podman-machine-default", PID: 9012, FootprintBytes: 1 * gib},
+		{Machine: "other", PID: 9013, FootprintBytes: 2 * gib},
+	}}
+	b := budget.Compute(s, budget.Params{})
+	if c := component(t, b, "podman"); c.ReservedBytes != 3*gib || !usedEq(c.UsedBytes, u64(3*gib)) {
+		t.Errorf("podman = %d used %v, want 3 GiB used 3 GiB", c.ReservedBytes, c.UsedBytes)
+	}
+	// 40 − 1 + 4 − (6 docker + 5 tart + 3 podman + 13 lmstudio + 2 ollama)
+	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(14*gib) {
+		t.Errorf("unaccounted = %v, want 14 GiB", b.UnaccountedBytes)
+	}
+	names := []string{}
+	for _, c := range b.Components {
+		names = append(names, c.Name)
+	}
+	if want := []string{"docker", "tart", "podman", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+		t.Errorf("components = %v, want %v", names, want)
+	}
+}
+
+func TestNoPodmanMachineLeavesTheBudgetKnown(t *testing.T) {
+	// The podman section is omitted while no machine runs: that is a
+	// reading, not a missing one.
+	s := busyMac()
+	s.Sources = map[string]protocol.SourceStatus{"podman": {At: time.Unix(1, 0)}}
+	b := budget.Compute(s, budget.Params{})
+	if b.Unknown != nil || b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(17*gib) {
+		t.Fatalf("unknown = %v unaccounted = %v, want none and 17 GiB", b.Unknown, b.UnaccountedBytes)
+	}
+}
+
+func TestPodmanWithNoReadingYetIsUnknown(t *testing.T) {
+	s := busyMac()
+	s.Sources = map[string]protocol.SourceStatus{"podman": {Err: "timed out", Stale: true}}
+	b := budget.Compute(s, budget.Params{})
+	if !slices.Contains(b.Unknown, "podman") || b.UnaccountedBytes != nil {
+		t.Fatalf("unknown = %v unaccounted = %v, want podman unknown and unaccounted unknown", b.Unknown, b.UnaccountedBytes)
+	}
+	if !slices.Contains(b.Stale, "podman") {
+		t.Errorf("stale = %v, want podman", b.Stale)
 	}
 }

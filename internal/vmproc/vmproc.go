@@ -14,11 +14,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Kind is who owns a VM process.
@@ -36,8 +39,9 @@ const (
 type VM struct {
 	PID  int
 	Kind Kind
-	// Name is the Tart VM name or the Podman machine name; empty for other
-	// kinds.
+	// Name is the Tart VM name, the Podman machine name, or for an unknown VM
+	// its command name (its executable's base name, printable characters
+	// only); empty for Docker's.
 	Name string
 	// FootprintBytes is phys_footprint: what the host pays, as Activity
 	// Monitor shows it.
@@ -74,6 +78,8 @@ const (
 // per PID.
 type Finder struct {
 	sys System
+	// tartHome is the Tart home (TartHome); empty without one.
+	tartHome string
 
 	mu    sync.Mutex
 	known map[int]identity
@@ -87,6 +93,65 @@ type identity struct {
 // New returns a Finder over sys.
 func New(sys System) *Finder { return &Finder{sys: sys, known: map[int]identity{}} }
 
+// TartHome is the folder Tart keeps its VMs and OCI cache in, as tart picks
+// it: TART_HOME if it is absolute, else ~/.tart; empty if neither is known.
+func TartHome(getenv func(string) string) string {
+	if h := getenv("TART_HOME"); path.IsAbs(h) {
+		return h
+	}
+	if h := getenv("HOME"); h != "" {
+		return path.Join(h, ".tart")
+	}
+	return ""
+}
+
+// WithTartHome makes f also recognise Tart VMs under home (TartHome): local
+// VMs in vms/<name>/ and VMs run from the OCI cache in cache/OCIs/. An empty
+// or relative home is ignored, as tart's shim ignores it.
+func (f *Finder) WithTartHome(home string) *Finder {
+	if path.IsAbs(home) {
+		f.tartHome = home
+	}
+	return f
+}
+
+// tartLocation is a folder whose open files mark a Tart VM, as lsof prints
+// it: resolved, with a trailing slash.
+type tartLocation struct {
+	dir string
+	// name is the local VM's name; empty for the OCI cache, where which of
+	// tart list's names a VM runs under is not known.
+	name string
+	// nameFromPath takes the name from the folder after dir instead: the
+	// vms folder itself, for a VM folder not read from it.
+	nameFromPath bool
+}
+
+// tartLocations lists the Tart home's VM folders and its OCI cache. lsof
+// prints resolved paths and a symlink can sit at any level under the home
+// (the home, vms/, cache/, one VM's folder), so each location is resolved
+// itself; one that can't be is used as given. The VM folders are read
+// afresh on each scan, since VMs come and go; the vms folder itself comes
+// last, for one that can't be read.
+func (f *Finder) tartLocations() []tartLocation {
+	if f.tartHome == "" {
+		return nil
+	}
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return path.Clean(p) + "/"
+	}
+	locs := []tartLocation{{dir: resolve(path.Join(f.tartHome, "cache", "OCIs"))}}
+	vms := path.Join(f.tartHome, "vms")
+	entries, _ := os.ReadDir(vms) // none yet: no local VM to match
+	for _, e := range entries {
+		locs = append(locs, tartLocation{dir: resolve(path.Join(vms, e.Name())), name: e.Name()})
+	}
+	return append(locs, tartLocation{dir: resolve(vms), nameFromPath: true})
+}
+
 // List returns the running VMs, in PID order of the system listing. A process
 // that exits while being read is left out; a VM that is still running but
 // cannot be read is an error, since dropping it would under-report its cost.
@@ -96,9 +161,10 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 		return nil, fmt.Errorf("vmproc: listing processes: %w", err)
 	}
 	f.forgetExited(pids)
+	tart := f.tartLocations()
 	vms := make([]VM, 0, len(pids))
 	for _, pid := range pids {
-		id, err := f.identify(ctx, pid)
+		id, err := f.identify(ctx, pid, tart)
 		var fp uint64
 		if err == nil {
 			fp, err = f.footprint(ctx, pid)
@@ -136,7 +202,7 @@ func (f *Finder) forgetExited(live []int) {
 	}
 }
 
-func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
+func (f *Finder) identify(ctx context.Context, pid int, tart []tartLocation) (identity, error) {
 	f.mu.Lock()
 	id, ok := f.known[pid]
 	f.mu.Unlock()
@@ -147,7 +213,7 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 	if err != nil {
 		return identity{}, err
 	}
-	id = classify(out)
+	id = classify(out, tart)
 	// Unknown is not cached: a VM caught while booting has not opened its
 	// image yet and is classified once it has.
 	if id.kind != Unknown {
@@ -158,16 +224,37 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 	return id, nil
 }
 
-// classify reads lsof -Fn output: one "n<path>" line per open file.
-func classify(lsof []byte) identity {
+// classify reads lsof -Fn output: an "f<fd>" line, then an "n<path>" line,
+// per open file. The first txt file is the executable. tart is the Tart
+// home's locations.
+func classify(lsof []byte, tart []tartLocation) identity {
+	var fd, command string
 	sc := bufio.NewScanner(bytes.NewReader(lsof))
 	for sc.Scan() {
+		if f, ok := strings.CutPrefix(sc.Text(), "f"); ok {
+			fd = f
+			continue
+		}
 		p, ok := strings.CutPrefix(sc.Text(), "n")
 		if !ok {
 			continue
 		}
+		if fd == "txt" && command == "" {
+			command = printable(path.Base(p))
+		}
 		if strings.Contains(p, "/Docker.app/") || strings.Contains(p, "/com.docker.docker/") {
 			return identity{kind: Docker}
+		}
+		// A VM run from the OCI cache holds the digest folder its tag links
+		// to open: its location is the cache, and it is left unnamed.
+		for _, l := range tart {
+			if rest, ok := strings.CutPrefix(p, l.dir); ok {
+				name := l.name
+				if l.nameFromPath {
+					name, _, _ = strings.Cut(rest, "/")
+				}
+				return identity{kind: Tart, name: name}
+			}
 		}
 		if _, rest, ok := strings.Cut(p, "/.tart/vms/"); ok {
 			name, _, _ := strings.Cut(rest, "/")
@@ -183,7 +270,18 @@ func classify(lsof []byte) identity {
 			}
 		}
 	}
-	return identity{kind: Unknown}
+	return identity{kind: Unknown, name: command}
+}
+
+// printable drops the characters a terminal would interpret, so a command
+// name is safe to show.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 func (f *Finder) footprint(ctx context.Context, pid int) (uint64, error) {

@@ -1,10 +1,12 @@
 package vmproc_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -17,7 +19,9 @@ import (
 type fakeSystem struct {
 	pids  []int
 	files map[string]string // "lsof <pid>" or "footprint <pid>" -> testdata file
-	calls map[string]int
+	// outputs, checked before files, are outputs built by the test.
+	outputs map[string][]byte
+	calls   map[string]int
 	// toolBroken makes a missing file a tool failure rather than an exit.
 	toolBroken bool
 }
@@ -33,6 +37,9 @@ func (f *fakeSystem) Run(_ context.Context, name string, args ...string) ([]byte
 	}
 	key := path.Base(name) + " " + pid
 	f.calls[key]++
+	if out, ok := f.outputs[key]; ok {
+		return out, nil
+	}
 	file, ok := f.files[key]
 	if !ok {
 		if f.toolBroken {
@@ -177,5 +184,199 @@ func TestPodmanVMIsNamedByItsMachine(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestUnknownVMIsNamedByItsCommand(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{1234, 5678, 4242}
+	// lsof-unknown.txt is the recorded lsof-tart.txt capture with the Tart
+	// VM's files moved to a folder no owner claims.
+	sys.files["lsof 4242"] = "lsof-unknown.txt"
+	sys.files["footprint 4242"] = "footprint.txt"
+	got, err := vmproc.New(sys).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{
+		{PID: 1234, Kind: vmproc.Docker, FootprintBytes: 1709280520},
+		{PID: 5678, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 1709280520},
+		{PID: 4242, Kind: vmproc.Unknown, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 1709280520},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestTartVMUnderTartHomeIsTart(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{4343}
+	// lsof-tart-home.txt is the recorded lsof-tart.txt capture with the Tart
+	// VM's files moved under a TART_HOME.
+	sys.files["lsof 4343"] = "lsof-tart-home.txt"
+	sys.files["footprint 4343"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome("/Users/dev/tart-home").List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unknown would also reserve it in other_vms, beside the tart source's.
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestTartVMUnderASymlinkedTartHomeIsTart(t *testing.T) {
+	// lsof prints resolved paths: a TART_HOME under /tmp on macOS is
+	// /private/tmp in its output.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real")
+	if err := os.MkdirAll(filepath.Join(target, "vms", "vm-a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.outputs = map[string][]byte{"lsof 4343": bytes.ReplaceAll(capture, []byte("/Users/dev/tart-home"), []byte(resolved))}
+	sys.files["footprint 4343"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome(link).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{4444}
+	// lsof-tart-oci.txt is the recorded lsof-tart.txt capture with the Tart
+	// VM's files moved into the OCI cache, at the digest folder a tag's
+	// symlink resolves to.
+	sys.files["lsof 4444"] = "lsof-tart-oci.txt"
+	sys.files["footprint 4444"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome("/Users/dev/.tart").List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its name in tart list is not derived: Tart is enough to keep it out of
+	// other_vms.
+	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Tart, FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestTartVMUnderASymlinkedDefaultTartHomeIsTart(t *testing.T) {
+	// ~/.tart moved to another disk and linked back; TART_HOME unset.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ext", "tart")
+	if err := os.MkdirAll(filepath.Join(target, "vms", "vm-a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".tart")); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.outputs = map[string][]byte{"lsof 4343": bytes.ReplaceAll(capture, []byte("/Users/dev/tart-home"), []byte(resolved))}
+	sys.files["footprint 4343"] = "footprint.txt"
+	getenv := func(k string) string { return map[string]string{"HOME": dir}[k] }
+	got, err := vmproc.New(sys).WithTartHome(vmproc.TartHome(getenv)).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+// TestTartVMsAreTartWhereverTheirFilesLive lays out a Tart home on disk for
+// each way Tart finds its VMs, symlinks included. lsof prints the resolved
+// path of each open file, so the capture names the VM folder's resolved
+// path, and the VM must still be Tart: else it is reserved again in
+// other_vms beside the tart source's reservation (#226 B1–B4).
+func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
+	const oci = "cache/OCIs/registry.example/org-a/image-a"
+	const digest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	cases := []struct {
+		name string
+		// dirs are made under the test's folder, then links (link -> target).
+		dirs  []string
+		links [][2]string
+		// tartHome is TART_HOME, relative to the test's folder; empty for unset.
+		tartHome string
+		// vm is the VM folder as Tart reaches it.
+		vm       string
+		wantName string
+	}{
+		{name: "TART_HOME", dirs: []string{"th/vms/vm-a"}, tartHome: "th", vm: "th/vms/vm-a", wantName: "vm-a"},
+		{name: "OCI cache", dirs: []string{".tart/" + oci + "/" + digest}, links: [][2]string{{".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "symlinked home", dirs: []string{"ext/tart/vms/vm-a"}, links: [][2]string{{".tart", "ext/tart"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
+		{name: "symlinked vms", dirs: []string{".tart", "ext/vms/vm-a"}, links: [][2]string{{".tart/vms", "../ext/vms"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
+		{name: "symlinked cache", dirs: []string{".tart", "ext/cache/OCIs/registry.example/org-a/image-a/" + digest}, links: [][2]string{{".tart/cache", "../ext/cache"}, {".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "symlinked VM folder", dirs: []string{".tart/vms", "ext/vm-a"}, links: [][2]string{{".tart/vms/vm-a", "../../ext/vm-a"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
+	}
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, d := range c.dirs {
+				if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, l := range c.links {
+				if err := os.Symlink(l[1], filepath.Join(dir, l[0])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolved, err := filepath.EvalSymlinks(filepath.Join(dir, c.vm))
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"HOME": dir}
+			if c.tartHome != "" {
+				env["TART_HOME"] = filepath.Join(dir, c.tartHome)
+			}
+			sys := newFake()
+			sys.pids = []int{4343}
+			sys.outputs = map[string][]byte{"lsof 4343": bytes.ReplaceAll(capture, []byte("/Users/dev/tart-home/vms/vm-a"), []byte(resolved))}
+			sys.files["footprint 4343"] = "footprint.txt"
+			getenv := func(k string) string { return env[k] }
+			got, err := vmproc.New(sys).WithTartHome(vmproc.TartHome(getenv)).List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: c.wantName, FootprintBytes: 1709280520}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got  %+v\nwant %+v", got, want)
+			}
+		})
 	}
 }

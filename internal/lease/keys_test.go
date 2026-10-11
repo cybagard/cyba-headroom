@@ -788,7 +788,7 @@ func TestComposeUpOfARunningStackBindsItsContainers(t *testing.T) {
 	// placement by the first up's lease would not count (#74).
 	s := withComposeContainer(snap(), "web", "w1", gib/2)
 	s.Orca.Worktrees[0].Path = "/Users/dev/w/w1"
-	s.Docker.Containers[len(s.Docker.Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/Users/dev/w/w1"
+	s.Engines[0].Containers[len(s.Engines[0].Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/Users/dev/w/w1"
 	b.Observe(s)
 	c.t = c.t.Add(3 * time.Minute)
 	b.Observe(s)

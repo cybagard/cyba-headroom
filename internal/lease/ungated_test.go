@@ -66,7 +66,7 @@ func TestAFailedReadDoesNotMakeContainersNew(t *testing.T) {
 	b, _, _ := book(t)
 	b.Observe(withContainer(snap(), "c2", "w1"))
 	missing := snap()
-	missing.Docker.Containers = nil
+	missing.Engines[0].Containers = nil
 	missing.Sources = map[string]protocol.SourceStatus{"docker": {Stale: true}}
 	b.Observe(missing)
 	b.Observe(withContainer(snap(), "c2", "w1"))
@@ -80,7 +80,7 @@ func TestAnUngatedContainerSurvivesAFailedRead(t *testing.T) {
 	b.Observe(snap())
 	b.Observe(withContainer(snap(), "c2", ""))
 	missing := snap()
-	missing.Docker.Containers = nil
+	missing.Engines[0].Containers = nil
 	missing.Sources = map[string]protocol.SourceStatus{"docker": {Stale: true}}
 	b.Observe(missing)
 	if k := ungatedKeys(b); len(k) != 1 {
@@ -92,7 +92,7 @@ func TestContainersDockerRestartsItselfAreNotUngated(t *testing.T) {
 	b, c, _ := book(t)
 	b.Observe(snap())
 	down := snap()
-	down.Docker = &protocol.Docker{} // Docker Desktop quit
+	down.Engines = []protocol.Engine{{Kind: protocol.EngineDockerDesktop}} // Docker Desktop quit
 	b.Observe(down)
 	// It is back, and restarts its --restart always containers.
 	b.Observe(withContainer(snap(), "c2", "w1"))
@@ -302,7 +302,7 @@ func TestAnUngatedContainerStaysFlaggedAfterDockerRestarts(t *testing.T) {
 	b.Observe(snap())
 	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
 	down := snap()
-	down.Docker = &protocol.Docker{}
+	down.Engines = []protocol.Engine{{Kind: protocol.EngineDockerDesktop}}
 	b.Observe(down)
 	b.Observe(withNamed(snap(), "x", "x", "alpine", ""))
 	if got := ungatedKeys(b); len(got) != 1 {
@@ -353,7 +353,7 @@ func TestAManualComposeWithAProjectIsGated(t *testing.T) {
 func TestABaselineIsPerSource(t *testing.T) {
 	b, _, _ := book(t)
 	none := snap()
-	none.Docker = nil
+	none.Engines = nil
 	b.Check(named("w1", "", "postgres"), none, cfg)
 	b.Observe(withNamed(snap(), "earlier", "earlier", "redis", ""))
 	if got := ungatedKeys(b); len(got) != 0 {
@@ -364,7 +364,7 @@ func TestABaselineIsPerSource(t *testing.T) {
 func TestRestartPolicyContainersAfterDockerStartsAreNotUngated(t *testing.T) {
 	b, c, _ := book(t)
 	down := snap()
-	down.Docker = &protocol.Docker{}
+	down.Engines = []protocol.Engine{{Kind: protocol.EngineDockerDesktop}}
 	b.Observe(down) // the daemon starts before Docker Desktop
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(snap()) // up, its containers not yet

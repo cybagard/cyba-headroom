@@ -20,13 +20,13 @@ func snapshot() *protocol.Snapshot {
 			{ID: "repo::/Users/dev/w/fix-login", Path: "/Users/dev/w/fix-login", Name: "Fix login", MemoryBytes: 1 * gib, CPUPercent: 30},
 			{ID: "repo::/Users/dev/w/project-b", Path: "/Users/dev/w/project-b", Name: "B"},
 		}},
-		Docker: &protocol.Docker{Running: true, Containers: []protocol.Container{
+		Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, Containers: []protocol.Container{
 			{ID: "c1", Name: "db", MemoryBytes: 2 * gib, CPUPercent: f64(10),
 				Labels: map[string]string{"com.docker.compose.project.working_dir": "/Users/dev/w/fix-login"}},
 			{ID: "c2", Name: "web", MemoryBytes: 1 * gib, CPUPercent: f64(5), Mounts: []string{"/Users/dev/w/fix-login/src"}},
 			{ID: "c3", Name: "stray", MemoryBytes: 3 * gib},
 			{ID: "c4", Name: "both", MemoryBytes: gib, Mounts: []string{"/Users/dev/w/fix-login", "/Users/dev/w/project-b"}},
-		}},
+		}}},
 		Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{
 			{Name: "ci", MemoryBytes: 8 * gib, FootprintBytes: u64(5 * gib), LaunchCwd: "/Users/dev/w/project-b"},
 			{Name: "orphan", MemoryBytes: 4 * gib},
@@ -109,7 +109,7 @@ func TestUnknownAgentMemoryIsNotZero(t *testing.T) {
 
 func TestContainerCPUUnknownWhenAnyIs(t *testing.T) {
 	s := snapshot()
-	s.Docker.Containers[1].CPUPercent = nil // first tick
+	s.Engines[0].Containers[1].CPUPercent = nil // first tick
 	if w := attribution.Attribute(s).Worktrees[0]; w.ContainerCPUPercent != nil {
 		t.Fatalf("cpu = %v, want unknown", *w.ContainerCPUPercent)
 	}
@@ -124,7 +124,7 @@ func TestEmptySnapshot(t *testing.T) {
 
 func TestEmptyListsAreArraysNotNull(t *testing.T) {
 	s := snapshot()
-	s.Docker, s.Tart = nil, nil
+	s.Engines, s.Tart = nil, nil
 	b, err := json.Marshal(attribution.Attribute(s))
 	if err != nil {
 		t.Fatal(err)

@@ -4,7 +4,10 @@
 // stay dependency-free (ADR 0001).
 package protocol
 
-import "time"
+import (
+	"cmp"
+	"time"
+)
 
 // Version is the protocol version every request and reply carries.
 const Version = 1
@@ -196,9 +199,11 @@ type Snapshot struct {
 	CollectedAt time.Time               `json:"collected_at"`
 	Sources     map[string]SourceStatus `json:"sources"`
 
-	Host   *Host   `json:"host,omitempty"`
-	Docker *Docker `json:"docker,omitempty"`
-	Tart   *Tart   `json:"tart,omitempty"`
+	Host *Host `json:"host,omitempty"`
+	// Engines are the container engines that speak the Docker API, in
+	// candidate order (#227): nil before a reading, empty when none is there.
+	Engines []Engine `json:"engines"`
+	Tart    *Tart    `json:"tart,omitempty"`
 	// Podman is absent while no Podman machine runs.
 	Podman *Podman `json:"podman,omitempty"`
 	// VMs is absent while every VM process has a known owner.
@@ -284,6 +289,8 @@ type AttributedContainer struct {
 	CPUPercent  *float64 `json:"cpu_percent,omitempty"`
 	By          string   `json:"by,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
+	// Engine is the container's engine, as Container.Engine (#227).
+	Engine string `json:"engine,omitempty"`
 }
 
 // AttributedVM is a Tart VM and how it was matched (By), or why it was not
@@ -517,10 +524,28 @@ type TartVM struct {
 	SharedDirs []string `json:"shared_dirs,omitempty"`
 }
 
-// Docker is Docker Desktop's state (R1).
-type Docker struct {
-	// Running is false when nothing answers on the Docker socket.
+// Engine kinds, read from an engine's /version (#227).
+const (
+	EngineDockerDesktop = "docker-desktop"
+	EngineDocker        = "docker"
+	EnginePodman        = "podman"
+)
+
+// Engine is one container engine's state (R1, #227): Docker Desktop, or
+// another engine that speaks the Docker API on a Unix socket.
+type Engine struct {
+	// Kind is docker-desktop, docker or podman; empty while it does not
+	// answer.
+	Kind string `json:"kind,omitempty"`
+	// Socket is the first socket it was found on.
+	Socket string `json:"socket"`
+	// ID is /info's ID: sockets that answer with one ID are one engine.
+	ID string `json:"id,omitempty"`
+	// Running is false when nothing answers on the socket.
 	Running bool `json:"running"`
+	// Error is why an untrusted candidate (a Docker context's socket) could
+	// not be read: it is then not running (#227, amendment 4).
+	Error string `json:"error,omitempty"`
 	// VMLimitBytes is the VM's configured memory (/info MemTotal): a ceiling,
 	// not a cost (spike #9).
 	VMLimitBytes uint64 `json:"vm_limit_bytes"`
@@ -530,10 +555,37 @@ type Docker struct {
 	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
 	// overhead plus the guest's high-water mark, which it does not give back.
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
-	// VMError is set when the VM process could not be read; VMRunning and
-	// VMFootprintBytes are then unknown, not zero.
+	// VMError is set when the VM process could not be read, or is not
+	// known for the engine's kind; VMRunning and VMFootprintBytes are then
+	// unknown, not zero.
 	VMError    string      `json:"vm_error,omitempty"`
 	Containers []Container `json:"containers"`
+}
+
+// RunningEngines is how many of engines answer.
+func RunningEngines(engines []Engine) int {
+	n := 0
+	for _, e := range engines {
+		if e.Running {
+			n++
+		}
+	}
+	return n
+}
+
+// Containers returns every engine's containers in engine order, each with
+// its engine. A container is named by its own ID whatever the number of
+// engines: Docker's and Podman's IDs are random 256-bit values, unique
+// across engines (#227).
+func (s *Snapshot) Containers() []Container {
+	var out []Container
+	for _, e := range s.Engines {
+		for _, c := range e.Containers {
+			c.Engine = cmp.Or(e.ID, e.Socket)
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // Container is one running container.
@@ -549,6 +601,9 @@ type Container struct {
 	// CPUPercent is CPU use since the previous tick, 100 = one core, as
 	// docker stats shows; absent on a container's first tick.
 	CPUPercent *float64 `json:"cpu_percent,omitempty"`
+	// Engine is the ID of the engine it runs on (its socket if the engine
+	// gave none), set by Snapshot.Containers (#227).
+	Engine string `json:"engine,omitempty"`
 }
 
 // Host is the host's memory state (R1, R4 top line).

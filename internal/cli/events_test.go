@@ -54,12 +54,12 @@ func followThrough(t *testing.T, streams []fakeStream) {
 		headroom := int64(8 << 30)
 		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 			Budget:      &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
-			Docker:      &protocol.Docker{Running: true},
+			Engines:     []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}},
 			Tart:        &protocol.Tart{Installed: true},
 			Sources:     map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}},
 			CollectedAt: now}
 		if running {
-			s.Docker.Containers = []protocol.Container{{ID: "x1", Name: "x", Image: "alpine", MemoryBytes: 1 << 29}}
+			s.Engines[0].Containers = []protocol.Container{{ID: "x1", Name: "x", Image: "alpine", MemoryBytes: 1 << 29}}
 		}
 		return s
 	}

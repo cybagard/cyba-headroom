@@ -251,7 +251,9 @@ func runDaemon(e Env) int {
 	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
-	dockerSrc := docker.New(cfg.Docker.Socket, vms)
+	// Every engine is found afresh each tick (#227); a start is looked up
+	// on the configured one.
+	dockerSrc := docker.Discover(func() []docker.Candidate { return docker.Candidates(cfg.Docker.Socket, e.Getenv, log) }, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		dockerSrc,
@@ -266,7 +268,7 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	book := wireGate(d, cfg, log, dockerSrc)
+	book := wireGate(d, cfg, log, docker.New(cfg.Docker.Socket, nil))
 	sleep := e.sleep
 	if sleep == nil {
 		sleep = sleepCtx
@@ -318,13 +320,22 @@ func runDaemon(e Env) int {
 			linkOwnShims(e.Args[0], cfg.ShimDir, log)
 		})
 	}
+	followers := &engineFollowers{ctx: ctx, wg: &wg, fn: book.ContainerEventAt, followed: map[string]bool{},
+		follow: func(ctx context.Context, src Eventer, fn func(time.Time, string, string, string, map[string]string)) {
+			followEvents(ctx, src, fn, time.Now, log, sleepCtx)
+		}}
+	publish := []func(*protocol.Snapshot){followers.Offer}
 	if cfg.Samples.Enabled {
 		w := samples.NewWriter(cfg.SamplesDir(), cfg.Samples.Retention.Duration, log)
-		d.OnPublish(w.Offer)
+		publish = append(publish, w.Offer)
 		wg.Go(func() { w.Run(ctx) })
 	}
+	d.OnPublish(func(s *protocol.Snapshot) {
+		for _, f := range publish {
+			f(s)
+		}
+	})
 	wg.Go(func() { d.Run(ctx, cfg.Daemon.Interval.Duration) })
-	wg.Go(func() { followEvents(ctx, dockerSrc, book.ContainerEventAt, time.Now, log, sleepCtx) })
 	err = d.Serve(ctx, ln)
 	stop()
 	wg.Wait()

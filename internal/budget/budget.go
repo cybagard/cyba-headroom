@@ -2,7 +2,11 @@
 // It is pure arithmetic: the collectors measure, this package adds up.
 package budget
 
-import "github.com/cybagard/cyba-headroom/internal/protocol"
+import (
+	"cmp"
+
+	"github.com/cybagard/cyba-headroom/internal/protocol"
+)
 
 // Params are the budget inputs that are configured rather than measured.
 type Params struct {
@@ -40,8 +44,12 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	if s.Host == nil {
 		b.Unknown = append(b.Unknown, "host")
 	}
-	if s.Docker != nil {
-		add(docker(s.Docker, p))
+	if s.Engines != nil {
+		for _, e := range s.Engines {
+			c := docker(e, p)
+			c.Name = engineName(e, s.Engines)
+			add(c)
+		}
 	} else {
 		b.Unknown = append(b.Unknown, "docker")
 		footprintsKnown = false
@@ -153,13 +161,29 @@ func otherVMs(v *protocol.VMs) protocol.BudgetComponent {
 	return protocol.BudgetComponent{Name: "other_vms", ReservedBytes: fp, UsedBytes: &fp}
 }
 
-// docker reserves what the VM already holds or what its containers need plus
+// engineName names an engine's component by its kind, and its socket too
+// when another engine is of that kind (#227).
+func engineName(e protocol.Engine, engines []protocol.Engine) string {
+	kind := func(e protocol.Engine) string { return cmp.Or(e.Kind, protocol.EngineDocker) }
+	n := 0
+	for _, o := range engines {
+		if kind(o) == kind(e) {
+			n++
+		}
+	}
+	if n > 1 {
+		return kind(e) + " " + e.Socket
+	}
+	return kind(e)
+}
+
+// docker reserves what an engine's VM already holds or what its containers need plus
 // the VM's overhead, whichever is larger. Not the VM's memory limit: that is a
 // ceiling it rarely reaches, and reserving it would leave no headroom (spike
 // #9). The VM keeps its high-water mark until Resource Saver stops it, so that
 // memory counts as spent.
-func docker(d *protocol.Docker, p Params) protocol.BudgetComponent {
-	c := protocol.BudgetComponent{Name: "docker"}
+func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
+	var c protocol.BudgetComponent
 	if !d.Running || (d.VMError == "" && !d.VMRunning) {
 		c.UsedBytes = new(uint64)
 		return c

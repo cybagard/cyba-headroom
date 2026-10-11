@@ -271,9 +271,11 @@ func Load(getenv func(string) string) (Config, error) {
 
 // dockerSocket follows the docker CLI: a unix:// DOCKER_HOST, else Docker
 // Desktop's per-user socket. A TCP DOCKER_HOST is a remote engine whose
-// memory is not this Mac's, so it is ignored. Docker contexts (Colima,
-// OrbStack) are not read; set [docker] socket for those. Without HOME it
-// stays empty rather than becoming a path relative to the daemon's cwd.
+// memory is not this Mac's, so it is ignored. It is the engine a start's
+// containers are looked up on, and the first the daemon reads; the daemon
+// also reads the engine of every Docker context (Colima, OrbStack) and
+// Docker Desktop's (#227). Without HOME it stays empty rather than becoming
+// a path relative to the daemon's cwd.
 func dockerSocket(getenv func(string) string) string {
 	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok && p != "" {
 		return p

@@ -41,3 +41,22 @@ func TestACheckRequestToleratesAnUnknownField(t *testing.T) {
 		t.Fatalf("read %+v, %v", r.Check, err)
 	}
 }
+
+// A container is named by its own ID whatever the number of engines, so
+// its key in the lease book and attribution does not change when a
+// second engine starts or stops (#227); its engine is a field beside it.
+func TestAContainersIDIsTheSameWithOneEngineOrTwo(t *testing.T) {
+	const id = "585f8ebeefcc32175f161d005a37cf22651c0b9ee7e4d46496a19be28943e4e0"
+	desktop := protocol.Engine{Kind: protocol.EngineDockerDesktop, ID: "00000000-0000-4000-8000-000000000001", Running: true,
+		Containers: []protocol.Container{{ID: id, Name: "db"}}}
+	other := protocol.Engine{Kind: protocol.EngineDocker, ID: "00000000-0000-4000-8000-000000000002", Running: true,
+		Containers: []protocol.Container{{ID: "c2", Name: "web"}}}
+	one := (&protocol.Snapshot{Engines: []protocol.Engine{desktop}}).Containers()
+	two := (&protocol.Snapshot{Engines: []protocol.Engine{desktop, other}}).Containers()
+	if len(one) != 1 || len(two) != 2 || one[0].ID != id || two[0].ID != id || two[1].ID != "c2" {
+		t.Fatalf("one engine: %+v; two: %+v; want %s each time", one, two, id)
+	}
+	if two[0].Engine != desktop.ID || two[1].Engine != other.ID {
+		t.Fatalf("engines = %q, %q, want each container's own", two[0].Engine, two[1].Engine)
+	}
+}

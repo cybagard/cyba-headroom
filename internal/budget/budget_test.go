@@ -83,35 +83,79 @@ func TestTartReservesConfiguredMemory(t *testing.T) {
 
 func TestDockerReservesFootprintOrContainersPlusOverhead(t *testing.T) {
 	p := budget.Params{DockerOverheadBytes: 2 * gib}
-	running := func(footprint uint64, containers ...uint64) *protocol.Docker {
-		d := &protocol.Docker{Running: true, VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: footprint}
+	running := func(footprint uint64, containers ...uint64) protocol.Engine {
+		d := protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: footprint}
 		for _, m := range containers {
 			d.Containers = append(d.Containers, protocol.Container{MemoryBytes: m})
 		}
 		return d
 	}
 	cases := map[string]struct {
-		d        *protocol.Docker
+		d        protocol.Engine
 		reserved uint64
 		used     *uint64
 	}{
-		"not running":           {&protocol.Docker{}, 0, u64(0)},
-		"resource saver":        {&protocol.Docker{Running: true, VMLimitBytes: 31 * gib}, 0, u64(0)},
+		"not running":           {protocol.Engine{Kind: protocol.EngineDockerDesktop}, 0, u64(0)},
+		"resource saver":        {protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib}, 0, u64(0)},
 		"retained high water":   {running(6*gib, 1*gib), 6 * gib, u64(6 * gib)},
 		"containers + overhead": {running(3*gib, 2*gib, 1*gib), 5 * gib, u64(3 * gib)},
 		"VM unreadable": {
-			&protocol.Docker{Running: true, VMLimitBytes: 31 * gib, VMError: "boom",
+			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib, VMError: "boom",
 				Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
 			3 * gib, nil,
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			c := component(t, budget.Compute(&protocol.Snapshot{Docker: tc.d}, p), "docker")
+			c := component(t, budget.Compute(&protocol.Snapshot{Engines: []protocol.Engine{tc.d}}, p), "docker-desktop")
 			if c.ReservedBytes != tc.reserved || !usedEq(c.UsedBytes, tc.used) {
 				t.Fatalf("got reserved=%d used=%v, want %d %v", c.ReservedBytes, c.UsedBytes, tc.reserved, tc.used)
 			}
 		})
+	}
+}
+
+// Each engine is a component, named by its kind, and by its socket too
+// when another engine is of that kind (#227). Each reserves by the Docker
+// formula; one whose VM is not known reserves its containers and the
+// overhead, its use unknown.
+func TestOneComponentPerEngine(t *testing.T) {
+	p := budget.Params{DockerOverheadBytes: 2 * gib}
+	s := &protocol.Snapshot{Engines: []protocol.Engine{
+		{Kind: protocol.EngineDockerDesktop, Socket: "/Users/dev/.docker/run/docker.sock", Running: true, VMRunning: true, VMFootprintBytes: 6 * gib,
+			Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
+		{Kind: protocol.EngineDocker, Socket: "/Users/dev/.colima/default/docker.sock", Running: true, VMError: "not known",
+			Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
+		{Kind: protocol.EngineDocker, Socket: "/Users/dev/.orbstack/run/docker.sock", Running: true, VMError: "not known"},
+	}}
+	b := budget.Compute(s, p)
+	var names []string
+	for _, c := range b.Components {
+		names = append(names, c.Name)
+	}
+	want := []string{"docker-desktop", "docker /Users/dev/.colima/default/docker.sock", "docker /Users/dev/.orbstack/run/docker.sock",
+		"tart", "lmstudio", "ollama", "host_baseline"}
+	if !slices.Equal(names[:3], want[:3]) {
+		t.Fatalf("components = %q, want %q first", names, want[:3])
+	}
+	for name, reserved := range map[string]uint64{want[0]: 6 * gib, want[1]: 3 * gib, want[2]: 2 * gib} {
+		if c := component(t, b, name); c.ReservedBytes != reserved {
+			t.Errorf("%s reserved %d, want %d", name, c.ReservedBytes, reserved)
+		}
+	}
+	if c := component(t, b, want[1]); c.UsedBytes != nil {
+		t.Errorf("%s used %v, want unknown", want[1], *c.UsedBytes)
+	}
+	if slices.Contains(b.Unknown, "docker") {
+		t.Errorf("unknown = %v: the engines were read", b.Unknown)
+	}
+}
+
+// No engine found is a reading that costs nothing, not an unknown.
+func TestNoEngineCostsNothing(t *testing.T) {
+	b := budget.Compute(&protocol.Snapshot{Engines: []protocol.Engine{}}, budget.Params{DockerOverheadBytes: 2 * gib})
+	if slices.Contains(b.Unknown, "docker") || b.ReservedBytes != 0 {
+		t.Fatalf("unknown = %v reserved = %d, want docker known and nothing reserved", b.Unknown, b.ReservedBytes)
 	}
 }
 
@@ -247,8 +291,8 @@ func busyMac() *protocol.Snapshot {
 		// 1 GiB of compressor pages holding 4 GiB, which footprints count whole.
 		Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(40 * gib),
 			CompressorBytes: u64(1 * gib), CompressedBytes: u64(4 * gib)},
-		Docker: &protocol.Docker{Running: true, VMRunning: true, VMFootprintBytes: 6 * gib,
-			Containers: []protocol.Container{{MemoryBytes: 2 * gib}}},
+		Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMFootprintBytes: 6 * gib,
+			Containers: []protocol.Container{{MemoryBytes: 2 * gib}}}},
 		Tart: &protocol.Tart{Installed: true, VMs: []protocol.TartVM{
 			{Name: "a", MemoryBytes: 8 * gib, FootprintBytes: u64(5 * gib)},
 		}},
@@ -278,7 +322,7 @@ func TestTotalsAndHeadroom(t *testing.T) {
 	for _, c := range b.Components {
 		names = append(names, c.Name)
 	}
-	if want := []string{"docker", "tart", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+	if want := []string{"docker-desktop", "tart", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
 		t.Errorf("components = %v, want %v", names, want)
 	}
 	if c := component(t, b, "host_baseline"); c.ReservedBytes != 10*gib || !usedEq(c.UsedBytes, u64(17*gib)) {
@@ -310,7 +354,7 @@ func TestUnaccounted(t *testing.T) {
 		"host used unknown":      {func(s *protocol.Snapshot) { s.Host.UsedBytes = nil }, nil},
 		"compressed unknown":     {func(s *protocol.Snapshot) { s.Host.CompressedBytes = nil }, nil},
 		"tart footprint unknown": {func(s *protocol.Snapshot) { s.Tart.VMs[0].FootprintBytes = nil }, nil},
-		"no docker reading":      {func(s *protocol.Snapshot) { s.Docker = nil }, nil},
+		"no docker reading":      {func(s *protocol.Snapshot) { s.Engines = nil }, nil},
 		"no ollama reading":      {func(s *protocol.Snapshot) { s.Ollama = nil }, nil},
 		"ollama footprint unknown": {
 			func(s *protocol.Snapshot) { s.Ollama.FootprintBytes, s.Ollama.FootprintError = nil, "boom" }, nil,
@@ -364,7 +408,7 @@ func TestPodmanVMsAreReservedAndNotUnaccounted(t *testing.T) {
 	if c := component(t, b, "podman"); c.ReservedBytes != 3*gib || !usedEq(c.UsedBytes, u64(3*gib)) {
 		t.Errorf("podman = %d used %v, want 3 GiB used 3 GiB", c.ReservedBytes, c.UsedBytes)
 	}
-	// 40 − 1 + 4 − (6 docker + 5 tart + 3 podman + 13 lmstudio + 2 ollama)
+	// 40 − 1 + 4 − (6 docker-desktop + 5 tart + 3 podman + 13 lmstudio + 2 ollama)
 	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(14*gib) {
 		t.Errorf("unaccounted = %v, want 14 GiB", b.UnaccountedBytes)
 	}
@@ -372,7 +416,7 @@ func TestPodmanVMsAreReservedAndNotUnaccounted(t *testing.T) {
 	for _, c := range b.Components {
 		names = append(names, c.Name)
 	}
-	if want := []string{"docker", "tart", "podman", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+	if want := []string{"docker-desktop", "tart", "podman", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
 		t.Errorf("components = %v, want %v", names, want)
 	}
 }
@@ -413,7 +457,7 @@ func TestOtherVMsAreReservedAndNotUnaccounted(t *testing.T) {
 	if c := component(t, b, "other_vms"); c.ReservedBytes != 3*gib || !usedEq(c.UsedBytes, u64(3*gib)) {
 		t.Errorf("other_vms = %d used %v, want 3 GiB used 3 GiB", c.ReservedBytes, c.UsedBytes)
 	}
-	// 40 − 1 + 4 − (6 docker + 5 tart + 3 podman + 3 other + 13 lmstudio + 2 ollama)
+	// 40 − 1 + 4 − (6 docker-desktop + 5 tart + 3 podman + 3 other + 13 lmstudio + 2 ollama)
 	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(11*gib) {
 		t.Errorf("unaccounted = %v, want 11 GiB", b.UnaccountedBytes)
 	}
@@ -421,7 +465,7 @@ func TestOtherVMsAreReservedAndNotUnaccounted(t *testing.T) {
 	for _, c := range b.Components {
 		names = append(names, c.Name)
 	}
-	if want := []string{"docker", "tart", "podman", "other_vms", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+	if want := []string{"docker-desktop", "tart", "podman", "other_vms", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
 		t.Errorf("components = %v, want %v", names, want)
 	}
 }

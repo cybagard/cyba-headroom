@@ -264,9 +264,9 @@ func TestGateTreatsAnOldSnapshotAsUnknown(t *testing.T) {
 func TestDeriveListsUngated(t *testing.T) {
 	book := lease.New(time.Minute, time.Now, discardLog())
 	tick := derive(book, config.Defaults("/x").Budget.Params())
-	s := &protocol.Snapshot{Docker: &protocol.Docker{Running: true}}
+	s := &protocol.Snapshot{Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}}
 	tick(s)
-	s = &protocol.Snapshot{Docker: &protocol.Docker{Running: true, Containers: []protocol.Container{{ID: "c1", Name: "testcontainers-ryuk"}}}}
+	s = &protocol.Snapshot{Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, Containers: []protocol.Container{{ID: "c1", Name: "testcontainers-ryuk"}}}}}
 	tick(s)
 	if len(s.Ungated) != 1 || s.Ungated[0].Name != "testcontainers-ryuk" {
 		t.Fatalf("ungated = %+v", s.Ungated)
@@ -293,7 +293,7 @@ func TestGateResolvesAStartsContainer(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	created := gateCheckOn(book, pol, nil, "")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
 	started := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s)
@@ -314,7 +314,7 @@ func TestGateLooksUpOnlyDockerStarts(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	created := gateCheckOn(book, pol, nil, "")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "create", Command: "docker create pg", CostBytes: 4 << 30, Labelled: true}, s)
 	insp := fakeInspector{"db": {"full-id", map[string]string{protocol.LeaseLabel: created.LeaseID}}}
 	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "podman start db", Target: "db"}, s)
@@ -336,7 +336,7 @@ func TestGateAsksDockerEveryCheck(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	running := true
 	check := gateCheckOn(book, pol, flipInspector{&running}, "/s.sock")
 	if d := check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "restart", Command: "docker restart db", Target: "db", Engine: "unix:///s.sock"}, s); d.LeaseID != "" {
@@ -355,7 +355,7 @@ func TestGateLooksUpOnlyItsOwnEngine(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	running := true
 	check := gateCheckOn(book, pol, flipInspector{&running}, "/Users/dev/.docker/run/docker.sock")
 	start := func(endpoint string) protocol.Decision {
@@ -376,7 +376,7 @@ func TestStartingARunningContainerIsNeverDenied(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	none := int64(0)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "critical"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &none}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &none}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	running := true
 	d := gateCheckOn(book, pol, flipInspector{&running}, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start",
 		Command: "docker start db", Target: "db", Engine: "unix:///s.sock"}, s)
@@ -407,7 +407,7 @@ func TestGateLooksUpEveryTarget(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	insp := mapInspector{"a": {"A", true}, "b": {"B", false}, "c": {"C", false}}
 	d := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start a",
 		Target: "a", Targets: []string{"a", "b", "c"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
@@ -611,7 +611,7 @@ func TestFollowEventsAStartOutOfOrderEndsItsLease(t *testing.T) {
 	book := lease.New(2*time.Minute, func() time.Time { return now }, slog.New(slog.NewTextHandler(&log, nil)))
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	book.Observe(s)
 	d := book.Check(policy.Request{Worktree: "w", Kind: "container", Command: "docker run x", CostBytes: 2 << 30, Labelled: true}, s, config.Defaults("/x").PolicyConfig())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -716,12 +716,12 @@ func TestFollowEventsADenseReplayKeepsAPendingStart(t *testing.T) {
 		headroom := int64(8 << 30)
 		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 			Budget:      &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
-			Docker:      &protocol.Docker{Running: true},
+			Engines:     []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}},
 			Tart:        &protocol.Tart{Installed: true},
 			Sources:     map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}},
 			CollectedAt: now}
 		if running {
-			s.Docker.Containers = []protocol.Container{{ID: "x1", Name: "x", Image: "alpine", MemoryBytes: 1 << 29}}
+			s.Engines[0].Containers = []protocol.Container{{ID: "x1", Name: "x", Image: "alpine", MemoryBytes: 1 << 29}}
 		}
 		return s
 	}
@@ -762,7 +762,7 @@ func TestGateLooksUpTheOthersWhenTheFirstIsUnknown(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	insp := mapInspector{"b": {"B", false}, "c": {"C", false}, "slow": {"", false}, "slower": {"", false}}
 	gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start slow",
 		Target: "slow", Targets: []string{"slow", "b", "c", "slower"}, MultiTarget: true, Engine: "unix:///s.sock"}, s)
@@ -787,7 +787,7 @@ func TestGateChargesNoMissingTarget(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	insp := mapInspector{"b": {"B", false}}
 	check := gateCheckOn(book, pol, insp, "/s.sock")
 	check(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start typo",
@@ -807,7 +807,7 @@ func TestGateChargesAPaddedTarget(t *testing.T) {
 	pol := config.Defaults("/x").PolicyConfig()
 	headroom := int64(64 << 30)
 	s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{}}
+		Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom}, Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{}}
 	insp := mapInspector{"b": {"B", false}}
 	if d := gateCheckOn(book, pol, insp, "/s.sock")(&protocol.CheckRequest{Worktree: "w", Kind: "container", Op: "start", Command: "docker start",
 		Target: " b", Engine: "unix:///s.sock"}, s); d.LeaseID == "" {
@@ -841,10 +841,10 @@ func TestGatePassesTheComposeDirOn(t *testing.T) {
 	snap := func(services ...string) *protocol.Snapshot {
 		headroom := int64(8 << 30)
 		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
-			Budget: &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
-			Docker: &protocol.Docker{Running: true}, Tart: &protocol.Tart{Installed: true}, CollectedAt: now}
+			Budget:  &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
+			Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}}, Tart: &protocol.Tart{Installed: true}, CollectedAt: now}
 		for _, sv := range services {
-			s.Docker.Containers = append(s.Docker.Containers, protocol.Container{ID: sv, Name: sv, MemoryBytes: 1 << 28,
+			s.Engines[0].Containers = append(s.Engines[0].Containers, protocol.Container{ID: sv, Name: sv, MemoryBytes: 1 << 28,
 				Labels: map[string]string{protocol.ComposeProjectLabel: "app", protocol.ComposeServiceLabel: sv,
 					protocol.ComposeWorkingDirLabel: "/Users/dev/project-a"}})
 		}
@@ -876,17 +876,17 @@ func TestFollowEventsALiveDieFromALaggingVMIsDatedNow(t *testing.T) {
 		headroom := int64(8 << 30)
 		s := &protocol.Snapshot{Host: &protocol.Host{TotalBytes: 64 << 30, Pressure: "normal"},
 			Budget:      &protocol.Budget{TotalBytes: 64 << 30, HeadroomBytes: &headroom},
-			Docker:      &protocol.Docker{Running: true},
+			Engines:     []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true}},
 			Tart:        &protocol.Tart{Installed: true},
 			Sources:     map[string]protocol.SourceStatus{"docker": {At: began.Add(3 * time.Second), Took: time.Second, Began: began}},
 			CollectedAt: now}
-		s.Docker.Containers = []protocol.Container{{ID: oneoff, Name: oneoff, MemoryBytes: 1 << 28, Labels: lab}}
+		s.Engines[0].Containers = []protocol.Container{{ID: oneoff, Name: oneoff, MemoryBytes: 1 << 28, Labels: lab}}
 		return s
 	}
 	composeRun := policy.Request{Worktree: "w1", Kind: "compose", Op: "run", Command: "docker compose run", CostBytes: 1 << 30, Target: "p"}
 	cfg := policy.Config{PressureGuard: "critical", DefaultContainerBytes: 1 << 30, DefaultTartBytes: 4 << 30}
 	empty := snap(t0, "")
-	empty.Docker.Containers = nil
+	empty.Engines[0].Containers = nil
 	book.Observe(empty)
 	book.Check(composeRun, empty, cfg)
 	now = t0.Add(2 * time.Second)

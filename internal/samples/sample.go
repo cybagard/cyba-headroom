@@ -161,7 +161,8 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 			SwapinsPerSec: h.SwapinsPerSec, SwapoutsPerSec: h.SwapoutsPerSec,
 		}
 	}
-	if d := s.Docker; d != nil && d.Running {
+	// Docker Desktop's engine alone: samples v1 has one Docker (#229).
+	if d := desktop(s.Engines); d != nil && d.Running {
 		out.Docker = &Docker{VMRunning: d.VMRunning, VMLimitBytes: d.VMLimitBytes, VMFootprintBytes: d.VMFootprintBytes,
 			VMUnknown: d.VMError != ""}
 		for _, c := range d.Containers {
@@ -218,4 +219,14 @@ func clone[T any](p *T) *T {
 	}
 	v := *p
 	return &v
+}
+
+// desktop returns the first Docker Desktop engine, or nil.
+func desktop(engines []protocol.Engine) *protocol.Engine {
+	for i := range engines {
+		if engines[i].Kind == protocol.EngineDockerDesktop {
+			return &engines[i]
+		}
+	}
+	return nil
 }

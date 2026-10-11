@@ -38,7 +38,7 @@ func snap() *protocol.Snapshot {
 			{ID: "w1", Name: "A", Agents: []protocol.Agent{{State: "working"}}},
 			{ID: "w2", Name: "B", Agents: []protocol.Agent{{State: "working"}}},
 		}},
-		Docker:      &protocol.Docker{Running: true, Containers: []protocol.Container{{ID: "old", Name: "old"}}},
+		Engines:     []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, Containers: []protocol.Container{{ID: "old", Name: "old"}}}},
 		Tart:        &protocol.Tart{Installed: true},
 		Attribution: &protocol.Attribution{Worktrees: []protocol.WorktreeUsage{{ID: "w1"}, {ID: "w2"}}},
 		CollectedAt: t0,
@@ -136,7 +136,7 @@ func withRun(s *protocol.Snapshot, id, wt string, mem uint64, lease string) *pro
 
 func addContainer(s *protocol.Snapshot, c protocol.Container, wt string) *protocol.Snapshot {
 	id := c.ID
-	s.Docker.Containers = append(s.Docker.Containers, c)
+	s.Engines[0].Containers = append(s.Engines[0].Containers, c)
 	if wt != "" {
 		for i := range s.Attribution.Worktrees {
 			if s.Attribution.Worktrees[i].ID == wt {
@@ -1148,7 +1148,7 @@ func TestALapsedManualComposeLeaseVouchesForNoMoreOnceSpent(t *testing.T) {
 			for _, sv := range w2 {
 				withService(s, sv, "w2")
 				if tc.dirs {
-					s.Docker.Containers[len(s.Docker.Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/src/w2/" + sv
+					s.Engines[0].Containers[len(s.Engines[0].Containers)-1].Labels[protocol.ComposeWorkingDirLabel] = "/src/w2/" + sv
 				}
 			}
 			b.Observe(s)
@@ -1393,7 +1393,7 @@ func TestALapsedComposeRunWithADirVouchesForOneOneoff(t *testing.T) {
 		b.Observe(snap())
 		c.t = t0.Add(3 * time.Minute)
 		s := oneoff("r2", "p", "w1")(oneoff("r1", "p", "w1")(snap()))
-		for _, ct := range s.Docker.Containers {
+		for _, ct := range s.Engines[0].Containers {
 			if ct.Labels != nil {
 				ct.Labels[protocol.ComposeWorkingDirLabel] = "/src/one"
 			}

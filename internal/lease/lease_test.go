@@ -2111,7 +2111,8 @@ func TestACrashLastsUntilAReadingShowsTheRestart(t *testing.T) {
 
 // A reading begun after the restart ends the crash: the container, of no
 // known worktree, missing later from readings with no event and back,
-// binds its worktree's up as any container back does.
+// binds its worktree's up as any container back does. Held: it ran all
+// along since a reading before the up's check (#190).
 func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 	b, c, log := book(t)
 	a1 := func() *protocol.Snapshot { return withComposeContainer(snap(), "a1", "", 4*gib) }
@@ -2129,11 +2130,11 @@ func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 		c.t = c.t.Add(5 * time.Second)
 		b.Observe(read(snap(), c.t))
 	}
-	b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(read(a1(), c.t))
-	if l := b.List(); len(l) != 0 || strings.Contains(log.String(), "never appeared") {
-		t.Fatalf("leases = %+v, want w1's up bound and ended\n%s", l, log)
+	if got, want := lease.Bindings(b, "a1"), []string{d.LeaseID + " (held)"}; !slices.Equal(got, want) || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("a1 is bound by %q, want %q\n%s", got, want, log)
 	}
 }
 

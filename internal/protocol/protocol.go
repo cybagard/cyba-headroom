@@ -541,6 +541,9 @@ type Engine struct {
 	Socket string `json:"socket"`
 	// ID is /info's ID: sockets that answer with one ID are one engine.
 	ID string `json:"id,omitempty"`
+	// Machine is the Podman machine whose socket reaches it (#228): its VM
+	// is that machine's.
+	Machine string `json:"machine,omitempty"`
 	// Running is false when nothing answers on the socket.
 	Running bool `json:"running"`
 	// Error is why an untrusted candidate (a Docker context's socket) could

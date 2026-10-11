@@ -1,0 +1,9 @@
+{
+ "ID": "00000000-0000-4000-8000-000000000002",
+ "MemTotal": 2037100544,
+ "OperatingSystem": "fedora",
+ "ServerVersion": "6.1.3",
+ "NCPU": 2,
+ "Containers": 1,
+ "ContainersRunning": 1
+}

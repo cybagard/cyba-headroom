@@ -119,7 +119,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			continue
 		}
 		r := &res[i]
-		r.e, r.counters, r.err = s.read(ctx, s.client(cand.Socket), cand.Socket, seen)
+		r.e, r.counters, r.err = s.read(ctx, s.client(cand.Socket), cand, seen)
 		switch {
 		case r.err == nil:
 			seen[cmp.Or(r.e.ID, r.e.Socket)] = true
@@ -140,7 +140,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		c := s.client(cand.Socket)
 		wg.Go(func() {
 			r := &res[i]
-			r.e, r.counters, r.err = s.read(uctx, c, cand.Socket, seen)
+			r.e, r.counters, r.err = s.read(uctx, c, cand, seen)
 			if r.err != nil && !errors.Is(r.err, errSeen) {
 				r.e = protocol.Engine{Socket: cand.Socket, Error: r.err.Error(), Containers: []protocol.Container{}}
 			}
@@ -151,9 +151,15 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 
 	engines := []protocol.Engine{}
 	cpu := map[string]map[string]cpuCounters{}
+	at := map[string]int{} // the index in engines of each running engine, by ID
 	for i, cand := range cands {
 		r := res[i]
 		if errors.Is(r.err, errSeen) {
+			// A machine's socket that reaches an engine seen first
+			// elsewhere (DOCKER_HOST) names that engine's machine.
+			if j, ok := at[r.e.ID]; ok && cand.Machine != "" {
+				engines[j].Machine = cmp.Or(engines[j].Machine, cand.Machine)
+			}
 			continue
 		}
 		if r.e.Running {
@@ -162,6 +168,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 				continue // an earlier untrusted one reached it
 			}
 			cpu[id] = r.counters
+			at[id] = len(engines)
 		}
 		engines = append(engines, r.e)
 	}
@@ -170,9 +177,10 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	return reading{engines}, nil
 }
 
-// read reads the engine c reaches at socket, unless an engine in seen
-// answers there.
-func (s *Source) read(ctx context.Context, c *http.Client, socket string, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
+// read reads the engine c reaches at cand's socket, unless an engine in
+// seen answers there: errSeen, with that engine's ID.
+func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
+	socket := cand.Socket
 	var info struct {
 		ID       string
 		MemTotal uint64
@@ -182,13 +190,13 @@ func (s *Source) read(ctx context.Context, c *http.Client, socket string, seen m
 	}
 	id := cmp.Or(info.ID, socket)
 	if seen[id] {
-		return protocol.Engine{}, nil, errSeen
+		return protocol.Engine{ID: id}, nil, errSeen
 	}
 	var version apiVersion
 	if err := get(ctx, c, "/version", &version); err != nil {
 		return protocol.Engine{}, nil, err
 	}
-	e := protocol.Engine{Kind: version.kind(), Socket: socket, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
+	e := protocol.Engine{Kind: version.kind(), Socket: socket, ID: info.ID, Machine: cand.Machine, Running: true, VMLimitBytes: info.MemTotal}
 	var counters map[string]cpuCounters
 	var err error
 	e.Containers, counters, err = containers(ctx, c, s.prevCPU[id])
@@ -196,32 +204,38 @@ func (s *Source) read(ctx context.Context, c *http.Client, socket string, seen m
 }
 
 // vmCost fills in each running engine's VM. Docker Desktop's VM process
-// is known (vmproc); another kind's is not, so its cost is unknown, not
-// zero. A VM read failure leaves the containers valid; it is reported
-// alongside.
+// is known (vmproc), and so is a Podman machine's, by its name (#228);
+// another engine's is not, so its cost is unknown, not zero. A VM read
+// failure leaves the containers valid; it is reported alongside.
 func (s *Source) vmCost(ctx context.Context, engines []protocol.Engine) {
-	var desktop *protocol.Engine
+	var known []*protocol.Engine
+	desktop := false
 	for i := range engines {
 		e := &engines[i]
 		switch {
 		case !e.Running:
-		case e.Kind == protocol.EngineDockerDesktop && desktop == nil:
-			desktop = e
+		case e.Kind == protocol.EngineDockerDesktop && !desktop:
+			desktop = true
+			known = append(known, e)
+		case e.Machine != "":
+			known = append(known, e)
 		default:
 			e.VMError = "the VM of a " + e.Kind + " engine is not known"
 		}
 	}
-	if desktop == nil {
+	if len(known) == 0 {
 		return
 	}
 	vms, err := s.vms.List(ctx)
-	if err != nil {
-		desktop.VMError = err.Error()
-	}
-	for _, vm := range vms {
-		if vm.Kind == vmproc.Docker {
-			desktop.VMRunning = true
-			desktop.VMFootprintBytes = vm.FootprintBytes
+	for _, e := range known {
+		if err != nil {
+			e.VMError = err.Error()
+		}
+		for _, vm := range vms {
+			if e.Machine == "" && vm.Kind == vmproc.Docker || e.Machine != "" && vm.Kind == vmproc.Podman && vm.Name == e.Machine {
+				e.VMRunning = true
+				e.VMFootprintBytes = vm.FootprintBytes
+			}
 		}
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/cybagard/cyba-headroom/internal/attribution"
+	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
@@ -251,9 +252,20 @@ func runDaemon(e Env) int {
 	} else {
 		ollamaAPI = ollama.NewHTTP(base)
 	}
+	// Podman's engine socket is read from its CLI, found as the shim finds
+	// it: never the shim itself (#228).
+	var podmanCLI docker.PodmanCLI
+	if self, err := os.Executable(); err == nil {
+		if p, err := shim.Resolve("podman", []string{self}, e.Getenv, e.withDefaults().fallbacks["podman"]); err == nil {
+			podmanCLI = binpath.Exec{Path: p}
+		}
+	}
+	podmanSocket := docker.NewPodman(podmanCLI, time.Now, log)
 	// Every engine is found afresh each tick (#227); a start is looked up
 	// on the configured one.
-	dockerSrc := docker.Discover(func() []docker.Candidate { return docker.Candidates(cfg.Docker.Socket, e.Getenv, log) }, vms)
+	dockerSrc := docker.Discover(func() []docker.Candidate {
+		return docker.Candidates(cfg.Docker.Socket, e.Getenv, log, podmanSocket.Candidates()...)
+	}, vms)
 	sources := []daemon.Source{
 		host.New(host.System{}, cfg.Daemon.TrendWindow.Duration, time.Now),
 		dockerSrc,

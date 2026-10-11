@@ -61,7 +61,7 @@ func TestCandidatesInOrder(t *testing.T) {
 	dockerContext(t, home, "colima", "unix://"+colima)
 
 	got := docker.Candidates(cfg, env(map[string]string{"HOME": home, "DOCKER_HOST": "unix://" + host}), quiet)
-	want := []docker.Candidate{{cfg, true}, {host, true}, {colima, false}, {desktop, true}}
+	want := []docker.Candidate{{Socket: cfg, Trusted: true}, {Socket: host, Trusted: true}, {Socket: colima}, {Socket: desktop, Trusted: true}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %v, want %v", got, want)
 	}
@@ -77,7 +77,7 @@ func TestCandidatesSkipMissingAndRemote(t *testing.T) {
 	dockerContext(t, home, "colima", "unix://"+colima)
 
 	got := docker.Candidates(filepath.Join(home, "none.sock"), env(map[string]string{"HOME": home, "DOCKER_HOST": "tcp://10.0.0.1:2375"}), quiet)
-	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{colima, false}}) {
+	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{Socket: colima}}) {
 		t.Fatalf("candidates = %v, want only %v (Docker Desktop's socket is missing too)", got, colima)
 	}
 }
@@ -95,16 +95,16 @@ func TestCandidatesNameASocketOnce(t *testing.T) {
 	dockerContext(t, home, "desktop-linux", "unix://"+desktop)
 
 	got := docker.Candidates(link, env(map[string]string{"HOME": home, "DOCKER_HOST": "unix://" + desktop}), quiet)
-	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{link, true}}) {
+	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{Socket: link, Trusted: true}}) {
 		t.Fatalf("candidates = %v, want only %v", got, link)
 	}
 	// A context first, then Docker Desktop's socket: one candidate, trusted.
 	got = docker.Candidates("", env(map[string]string{"HOME": home}), quiet)
-	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{desktop, true}}) {
+	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{Socket: desktop, Trusted: true}}) {
 		t.Fatalf("candidates = %v, want only %v, trusted", got, desktop)
 	}
 	got = docker.Candidates(link, env(map[string]string{"HOME": home, "DOCKER_HOST": "unix://" + desktop}), quiet)
-	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{link, true}}) {
+	if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{Socket: link, Trusted: true}}) {
 		t.Fatalf("candidates = %v, want only %v", got, link)
 	}
 }
@@ -160,7 +160,7 @@ func TestAContextFileThatIsNotRegularIsSkipped(t *testing.T) {
 			dockerContext(t, home, "colima", "unix://"+colima)
 			contextMeta(t, home, "bad", create)
 			got := candidatesWithin(t, 300*time.Millisecond, "", env(map[string]string{"HOME": home}))
-			if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{colima, false}}) {
+			if fmt.Sprint(got) != fmt.Sprint([]docker.Candidate{{Socket: colima}}) {
 				t.Fatalf("candidates = %v, want only %v", got, colima)
 			}
 		})

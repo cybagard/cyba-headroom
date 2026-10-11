@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,30 +13,35 @@ import (
 )
 
 // Candidate is a socket an engine may answer on. Trusted is false for one
-// only a Docker context names: a file anything may write (#227).
+// only a Docker context names: a file anything may write (#227). Machine is
+// the Podman machine whose socket it is, from podman machine inspect (#228).
 type Candidate struct {
 	Socket  string
 	Trusted bool
+	Machine string
 }
 
 // Candidates returns the Unix sockets an engine may answer on, in order
 // (#227): the configured socket, a unix:// DOCKER_HOST, the unix endpoint of
-// every Docker context, and Docker Desktop's per-user socket. A TCP endpoint
+// every Docker context, Docker Desktop's per-user socket, and then more
+// (Podman's, #228). A TCP endpoint
 // is a remote engine whose memory is not this Mac's. A path that does not
 // exist is left out without dialing, and a socket named twice, directly or
 // through a link, comes once, by its first name; it is trusted if any name
-// of it is. A context skipped is logged to log at debug.
-func Candidates(config string, getenv func(string) string, log *slog.Logger) []Candidate {
-	paths := []Candidate{{config, true}}
+// of it is, and of the machine any name of it is. A context skipped is
+// logged to log at debug.
+func Candidates(config string, getenv func(string) string, log *slog.Logger, more ...Candidate) []Candidate {
+	paths := []Candidate{{Socket: config, Trusted: true}}
 	if p, ok := strings.CutPrefix(getenv("DOCKER_HOST"), "unix://"); ok {
-		paths = append(paths, Candidate{p, true})
+		paths = append(paths, Candidate{Socket: p, Trusted: true})
 	}
 	if home := getenv("HOME"); home != "" {
 		for _, p := range contextSockets(filepath.Join(home, ".docker"), log) {
-			paths = append(paths, Candidate{p, false})
+			paths = append(paths, Candidate{Socket: p})
 		}
-		paths = append(paths, Candidate{filepath.Join(home, ".docker", "run", "docker.sock"), true})
+		paths = append(paths, Candidate{Socket: filepath.Join(home, ".docker", "run", "docker.sock"), Trusted: true})
 	}
+	paths = append(paths, more...)
 	var out []Candidate
 	at := map[string]int{}
 	for _, c := range paths {
@@ -48,6 +54,7 @@ func Candidates(config string, getenv func(string) string, log *slog.Logger) []C
 		}
 		if i, ok := at[resolved]; ok {
 			out[i].Trusted = out[i].Trusted || c.Trusted
+			out[i].Machine = cmp.Or(out[i].Machine, c.Machine)
 			continue
 		}
 		at[resolved] = len(out)

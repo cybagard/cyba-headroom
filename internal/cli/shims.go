@@ -103,13 +103,18 @@ func unlinkShims(dir, bin string, removeDir, onlyBin bool) (removed, kept []stri
 			kept = append(kept, n)
 			continue
 		}
-		if err := removeLink(p); err != nil {
+		switch err := removeLink(p); {
+		case errors.Is(err, fs.ErrNotExist):
+			continue // gone already: another daemon replaced it (#193)
+		case err != nil:
 			return removed, kept, err
 		}
 		removed = append(removed, n)
 	}
 	if entries, err := os.ReadDir(dir); removeDir && err == nil && len(entries) == 0 {
-		return removed, kept, os.Remove(dir)
+		if err := os.Remove(dir); !errors.Is(err, fs.ErrNotExist) {
+			return removed, kept, err
+		}
 	}
 	return removed, kept, nil
 }

@@ -86,6 +86,10 @@ type CheckRequest struct {
 	// project with, absolute, or "" when the shim cannot be sure of it
 	// (#158). An older daemon ignores it; an older shim sends none.
 	ComposeDir string `json:"compose_dir,omitempty"`
+	// Unnamed is set for a compose call whose project name the shim cannot
+	// know (a file on stdin, #122): Target is empty, and ComposeDir, which
+	// is then set, keys its lease. An older daemon sees no key.
+	Unnamed bool `json:"unnamed,omitempty"`
 }
 
 // LeaseLabel carries a gated run's lease ID on its container, so the

@@ -1056,6 +1056,38 @@ func TestARepeatStdinUpTakesTheFirstLeaseOver(t *testing.T) {
 	}
 }
 
+// A repeat stdin up whose .env names its project with a value the shim
+// cannot know sends no name but its dir (#122): the lease book takes the
+// first up's lease over, by that dir, instead of reserving again beside it.
+func TestARepeatUnnamedStdinUpTakesTheFirstLeaseOver(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w")
+	plain, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(plain) })
+	if err := os.WriteFile(filepath.Join(plain, ".env"), []byte("COMPOSE_PROJECT_NAME=$X\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	book := lease.New(time.Minute, time.Now, discardLog())
+	check := gateCheckOn(book, config.Defaults("/x").PolicyConfig(), nil, "")
+	headroom := int64(64 << 30)
+	s := &protocol.Snapshot{Budget: &protocol.Budget{HeadroomBytes: &headroom}}
+	r.ask = func(req protocol.CheckRequest) (*protocol.Decision, error) {
+		d := check(&req, s)
+		return &d, nil
+	}
+	for range 2 {
+		if code, stderr := r.run("docker", "compose", "--project-directory", plain, "-f", "-", "up", "-d"); code != 0 {
+			t.Fatalf("exit %d, %s", code, stderr)
+		}
+	}
+	if l := book.List(); len(l) != 1 || !r.asked[0].Unnamed {
+		t.Fatalf("asked %+v, leases = %+v, want the first taken over", r.asked, l)
+	}
+}
+
 // compose -f - reads its file from stdin, which the shim must not consume:
 // the project is what Compose names it then, COMPOSE_PROJECT_NAME or the
 // project directory's name (the working directory's).
@@ -1948,6 +1980,52 @@ func TestTheComposeDirIsSent(t *testing.T) {
 		r.run(tc.call...)
 		if len(r.asked) != 1 || r.asked[0].ComposeDir != tc.want {
 			t.Errorf("%s: asked %+v, want dir %q", tc.name, r.asked, tc.want)
+		}
+	}
+}
+
+// A stdin up whose env file sets COMPOSE_PROJECT_NAME to a value the shim
+// cannot know (#122) sends no name, marked unnamed, and the dir Compose
+// labels its stack with, which keys its lease: never the dir's name. A
+// known name, one Compose does not take from the file, and an unknown one
+// with no dir to send are as before.
+func TestAnUnknowableStdinNameIsSentAsUnnamed(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "ORCA_WORKTREE_ID=w")
+	r.ask = allow
+	proj := filepath.Join(r.dir, "proj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.getwd = func() (string, error) { return proj, nil }
+	pad := strings.Repeat("# padding\n", envFileMax/10+1)
+	for _, tc := range []struct {
+		name, env string
+		call      []string
+		target    string // "": unnamed
+		dir       string
+	}{
+		{"a $", "COMPOSE_PROJECT_NAME=$X\n", nil, "", proj},
+		{"a backslash in double quotes", "COMPOSE_PROJECT_NAME=\"a\\tb\"\n", nil, "", proj},
+		{"a .env past the limit", "COMPOSE_PROJECT_NAME=early\n" + pad, nil, "", proj},
+		{"a known name", "COMPOSE_PROJECT_NAME=Named\n", nil, "named", proj},
+		{"an empty name: the dir's", "COMPOSE_PROJECT_NAME=\n", nil, "proj", proj},
+		{"a missing --env-file, which Compose fails on: the dir's", "COMPOSE_PROJECT_NAME=$X\n",
+			[]string{"docker", "compose", "--project-directory", proj, "--env-file", "missing.env", "-f", "-", "up", "-d"}, "proj", proj},
+		{"no dir to send: the dir's", "COMPOSE_PROJECT_NAME=$X\n",
+			[]string{"docker", "compose", "--workdir", "/srv/api", "-f", "-", "up", "-d"}, "proj", ""},
+	} {
+		if err := os.WriteFile(filepath.Join(proj, ".env"), []byte(tc.env), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		call := tc.call
+		if call == nil {
+			call = []string{"docker", "compose", "--project-directory", proj, "-f", "-", "up", "-d"}
+		}
+		r.asked = nil
+		r.run(call...)
+		if len(r.asked) != 1 || r.asked[0].Target != tc.target || r.asked[0].Unnamed != (tc.target == "") || r.asked[0].ComposeDir != tc.dir {
+			t.Errorf("%s: asked %+v, want target %q (unnamed if none), dir %q", tc.name, r.asked, tc.target, tc.dir)
 		}
 	}
 }

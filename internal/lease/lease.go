@@ -18,8 +18,9 @@
 // holds its cost to its timeout. A headroom check sends no key, nor does
 // the shim for a call whose resource it cannot name: for example a compose
 // call with no project (podman compose without -p, or a file on stdin the
-// shim cannot name), or a start whose target follows an option the shim
-// does not know. A start is keyed by the IDs of the containers Docker
+// shim cannot name and whose dir it does not know: one whose dir it knows
+// is keyed by that dir, entry.unnamed), or a start whose target follows an
+// option the shim does not know. A start is keyed by the IDs of the containers Docker
 // resolved that it starts (entry.containerIDs), and by its first target
 // as given, a name or an ID, when Docker did not resolve it
 // (entry.target). It has neither when its first target was resolved or
@@ -153,6 +154,11 @@ type entry struct {
 	// open, it tells the call's stack from another of the same project
 	// name (keyed, #109); lapsed, it vouches for it (lapsedFor, #158).
 	dir string
+	// unnamed is set for a compose lease whose project name the shim could
+	// not know (policy.Request.Unnamed, #122): its dir is its key, whatever
+	// the project of a container Compose labelled with it (key). A later
+	// unnamed up in that dir and worktree takes it over (composeTakes).
+	unnamed bool
 	// macOS is set for a macOS VM: until its VM runs, it holds a slot (R6).
 	macOS bool
 	// pid is the tart run process, for a tart lease: if it exits before its
@@ -283,19 +289,36 @@ const stale = 2 * time.Second
 // an open lease of the same project in its own worktree, neither a compose
 // run's (its one-off container is new). Another worktree's keeps its
 // lease, against its own cap; a manual call reserves nothing. A guess takes
-// nothing over, and is taken over once it hit (entry.guessed).
+// nothing over, and is taken over once it hit (entry.guessed). An unnamed
+// call takes over an unnamed lease of its dir (entry.unnamed).
 func composeTakes(r policy.Request, o *entry) bool {
-	return r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && o.Kind == "compose" && !o.oneoff && (!o.guessed || len(o.bound) > 0) && o.project == r.Target && o.Worktree == r.Worktree
+	return r.Kind == "compose" && r.Op != "run" && !r.Guessed && o.Kind == "compose" && !o.oneoff && (!o.guessed || len(o.bound) > 0) && o.Worktree == r.Worktree &&
+		(r.Target != "" && o.project == r.Target || unnamed(r) && o.unnamed && o.dir == r.ComposeDir)
 }
 
-// downServices are the services of compose project r.Target in
-// r.Worktree, one-offs aside, whose containers the book last saw stop, die
-// or go, and that none of its containers runs: an up starts them again
-// (#112).
+// unnamed reports whether r is a compose call whose project name the shim
+// could not know, keyed by its dir (#122).
+func unnamed(r policy.Request) bool {
+	return r.Kind == "compose" && r.Unnamed && r.Target == "" && r.ComposeDir != ""
+}
+
+// ofStack reports whether a compose container of project, labelled with
+// dir, is of the stack compose call r names: its project's, or its dir's
+// when r is unnamed.
+func ofStack(r policy.Request, project, dir string) bool {
+	if unnamed(r) {
+		return dir == r.ComposeDir
+	}
+	return project == r.Target
+}
+
+// downServices are the services of r's stack (ofStack) in r.Worktree,
+// one-offs aside, whose containers the book last saw stop, die or go, and
+// that none of its containers runs: an up starts them again (#112).
 func (b *Book) downServices(r policy.Request) map[string]bool {
 	up, down := map[string]bool{}, map[string]bool{}
 	for k, v := range b.verdicts {
-		if v.project != r.Target || v.oneoff || cmp.Or(v.owner, v.lease) != r.Worktree {
+		if !ofStack(r, v.project, v.dir) || v.oneoff || cmp.Or(v.owner, v.lease) != r.Worktree {
 			continue
 		}
 		if svc := cmp.Or(v.service, k); b.runs(k, v) {
@@ -465,13 +488,14 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		b.renew(covering, now)
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}
 	}
-	// The project's running services in the caller's worktree: a compose
-	// up's lease holds them (below). Not a guess's (entry.guessed).
+	// The project's running services in the caller's worktree (an unnamed
+	// call's: its dir's): a compose up's lease holds them (below). Not a
+	// guess's (entry.guessed).
 	var stack []resource
-	if r.Kind == "compose" && r.Op != "run" && r.Target != "" && !r.Guessed && r.Worktree != "" && r.OnEngine && s != nil {
+	if r.Kind == "compose" && r.Op != "run" && (r.Target != "" || unnamed(r)) && !r.Guessed && r.Worktree != "" && r.OnEngine && s != nil {
 		for _, x := range resources(s) {
 			// Not one Docker's events said exited since (compose stop).
-			if x.kind == "compose" && !x.oneoff && x.project == r.Target && x.worktree == r.Worktree && !b.seen[x.key].gone {
+			if x.kind == "compose" && !x.oneoff && ofStack(r, x.project, x.dir) && x.worktree == r.Worktree && !b.seen[x.key].gone {
 				stack = append(stack, x)
 			}
 		}
@@ -568,7 +592,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.Kind == "compose" {
 		// Its key: the project, -p or as docker compose config names it.
 		// Compose labels each container with it.
-		e.target, e.project, e.oneoff, e.dir = "", r.Target, r.Op == "run", r.ComposeDir
+		e.target, e.project, e.oneoff, e.dir, e.unnamed = "", r.Target, r.Op == "run", r.ComposeDir, unnamed(r)
 		// compose up again for the project an open lease of this worktree
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost:
@@ -1692,15 +1716,24 @@ func (e *entry) key(r resource, based bool) bool {
 		return r.lease == e.ID && len(e.bound) == 0
 	case e.Kind == "compose" && r.kind == "compose":
 		switch {
-		case !based || e.project == "" || e.project != r.project || r.mark != "":
+		case !based || r.mark != "":
 			// mark: a shim run dressed as Compose's (its config hash and
 			// project) must not take a project's lease by its name.
+			return false
+		case e.unnamed:
+			// Its dir, whatever the project (entry.unnamed); one with no
+			// dir was labelled by hand (#109).
+			if e.dir == "" || r.dir != e.dir {
+				return false
+			}
+		case e.project == "" || e.project != r.project:
 			return false
 		case e.guessed && (r.worktree == "" || r.worktree != e.Worktree):
 			// Only its own worktree's, as the reading attributes it (an
 			// event's is unknown): entry.guessed.
 			return false
-		case r.oneoff:
+		}
+		if r.oneoff {
 			return e.oneoff && !e.hasOneoff // a compose run's own, one each
 		}
 		// A service: an up's, or a compose run's dependency, which starts
@@ -1724,7 +1757,7 @@ func (e *entry) key(r resource, based bool) bool {
 
 // hasKey reports whether e has anything a resource could match.
 func (e *entry) hasKey() bool {
-	return e.labelled || len(e.containerIDs) > 0 || e.name != "" || e.target != "" || e.project != "" || e.pid > 0
+	return e.labelled || len(e.containerIDs) > 0 || e.name != "" || e.target != "" || e.project != "" || e.unnamed || e.pid > 0
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and

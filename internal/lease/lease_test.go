@@ -3189,3 +3189,112 @@ func TestAHandLabelledContainerBindsNoComposeLeaseAtItsStart(t *testing.T) {
 		t.Fatalf("reserved = %d MiB, want w1's up's 2048 MiB: %+v", got>>20, b.List())
 	}
 }
+
+// unnamedUp is wt's stdin up in dir whose project name the shim could not
+// know (#122): its dir is its key.
+func unnamedUp(wt, dir string) policy.Request {
+	return policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: "docker compose -f - up", CostBytes: 2 * gib,
+		OnEngine: true, ComposeDir: dir, Unnamed: true}
+}
+
+// pipedLabels are a container's of project piped, which Compose labelled
+// with dir ("": none, labelled by hand).
+func pipedLabels(dir string) map[string]string {
+	l := map[string]string{protocol.ComposeProjectLabel: "piped"}
+	if dir != "" {
+		l[protocol.ComposeWorkingDirLabel] = dir
+	}
+	return l
+}
+
+// An up whose name the shim could not know is keyed by its dir alone
+// (#122): a container Compose labelled with that dir binds it, whatever its
+// project, and its reservation shrinks as the stack warms.
+func TestAnUnnamedUpBindsItsDirsStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	for _, used := range []uint64{gib / 2, gib} {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: used, Labels: pipedLabels("/src/a")}, "w1"), c.t))
+		if got := reserved(b); got != 2*gib-used {
+			t.Fatalf("a1 using %d MiB: reserved = %d MiB, want %d MiB: %+v", used>>20, got>>20, (2*gib-used)>>20, b.List())
+		}
+	}
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("ungated %+v, log: %s", u, log)
+	}
+}
+
+// A container labelled with another dir, or with none, binds no unnamed up,
+// at its start event or at a reading, even one that gives it the up's
+// worktree (#122, #109): the up's reservation stands.
+func TestAnUnnamedUpBindsNoOtherDirsContainer(t *testing.T) {
+	for _, tc := range []struct{ dir, wt string }{
+		{"/src/b", ""}, {"/src/b", "w1"}, {"", ""}, {"", "w1"},
+	} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		c.t = c.t.Add(time.Second)
+		b.ContainerEvent("start", "x1", "x1", pipedLabels(tc.dir))
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "x1", Name: "x1", MemoryBytes: gib, Labels: pipedLabels(tc.dir)}, tc.wt), c.t))
+		if got := reserved(b); got != 2*gib {
+			t.Errorf("labelled %q, in %q: reserved = %d MiB, want the up's 2048 MiB: %+v", tc.dir, tc.wt, got>>20, b.List())
+		}
+	}
+}
+
+// Two stdin ups whose name the shim could not know, in one dir and one
+// worktree, reserve once: the second takes the first over, as a repeat up
+// of a named project does (#85's R1, #122). In another dir or another
+// worktree, each reserves.
+func TestARepeatUnnamedUpTakesTheFirstOver(t *testing.T) {
+	for _, tc := range []struct {
+		name, wt, dir string
+		want          uint64
+	}{
+		{"the same dir and worktree", "w1", "/src/a", 2 * gib},
+		{"another dir", "w1", "/src/b", 4 * gib},
+		{"another worktree", "w2", "/src/a", 4 * gib},
+	} {
+		b, c, _ := book(t)
+		b.Observe(read(snap(), c.t))
+		b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+		if d := b.Check(unnamedUp(tc.wt, tc.dir), snap(), cfg); !d.Allow {
+			t.Fatalf("%s: %+v", tc.name, d)
+		}
+		if got := reserved(b); got != tc.want {
+			t.Errorf("%s: reserved = %d MiB, want %d MiB: %+v", tc.name, got>>20, tc.want>>20, b.List())
+		}
+	}
+}
+
+// A repeat stdin up whose name the shim could not know, of a stack that
+// runs once the first up's lease ended, holds the stack as a repeat up of
+// a named project does: it never warns "never appeared" (#122).
+func TestARepeatUnnamedUpHoldsItsRunningStack(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(unnamedUp("w1", "/src/a"), snap(), cfg)
+	running := func() *protocol.Snapshot {
+		s := read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: 2 * gib, Labels: pipedLabels("/src/a")}, "w1"), c.t)
+		s.CollectedAt = c.t
+		return s
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(running()) // it uses the lease's cost: the lease ends
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want the first ended", l)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Check(unnamedUp("w1", "/src/a"), running(), cfg)
+	for range 3 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(running())
+	}
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}

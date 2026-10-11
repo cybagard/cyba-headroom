@@ -168,9 +168,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		env, _ := e.envOf()
 		lookupEnv := lookupIn(env)
 		asked := h.now()
+		unnamed := false
 		if slices.Contains(c.ComposeFiles, "-") {
 			// Its file is on stdin, which the call needs: not asked.
-			req.Target = composeStdinProject(c, lookupEnv, h.getwd)
+			req.Target, unnamed = composeStdinKey(c, lookupEnv, h.getwd)
 		} else {
 			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
@@ -184,6 +185,11 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// The dir Compose labels it with, within what is left of the
 		// budget (#158).
 		req.ComposeDir = composeDir(e.Args[1:], c, lookupEnv, h.getwd, asked.Add(composeTimeout).Sub(h.now()), h.stat)
+		if unnamed && req.ComposeDir != "" {
+			// Its name is one the shim cannot know: the dir keys its
+			// lease, not the dir's name (#122).
+			req.Target, req.Unnamed = "", true
+		}
 		if getenv("HEADROOM_SHIM_DEBUG") != "" {
 			fmt.Fprintf(e.Stderr, "headroom: compose project %q in %q\n", req.Target, req.ComposeDir)
 		}
@@ -361,7 +367,7 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 		return ""
 	}
 	dir := composeWorkingDir(c, cwd)
-	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
+	if name, ok, _ := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, deadline.Sub(now())); ok {
 		return normalProject(name)
 	}
 	if dir == cwd && c.ComposeProjectDir == "" {
@@ -369,7 +375,7 @@ func composeDefaultProject(c shim.Call, lookupEnv func(string) (string, bool), g
 		if dir != cwd {
 			// The working directory's .env again, first: one that sets it
 			// to a name the shim cannot know wins too.
-			if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{cwd, dir}, deadline.Sub(now())); ok {
+			if name, ok, _ := composeEnvFileProject(c, lookupEnv, cwd, []string{cwd, dir}, deadline.Sub(now())); ok {
 				return normalProject(name)
 			}
 		}
@@ -459,7 +465,7 @@ func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool
 		key = "COMPOSE_PATH_SEPARATOR" // it splits the environment's COMPOSE_FILE
 	}
 	if key != "" {
-		if _, set, done := composeEnvFileValue(c, lookupEnv, key, cwd, []string{cwd}, left); set || !done {
+		if _, set, _, done := composeEnvFileValue(c, lookupEnv, key, cwd, []string{cwd}, left); set || !done {
 			return ""
 		}
 	}
@@ -660,37 +666,44 @@ func composeIdle(bin string, args []string, dry func(bin string, args []string) 
 	return running
 }
 
-// composeStdinProject names the project of compose -f - as Compose does
+// composeStdinKey names the project of compose -f - as Compose does
 // when its file is on stdin: -p, else COMPOSE_PROJECT_NAME from the
 // environment, else from the env files (composeEnvFileProject), else the
 // project directory's name (composeWorkingDir; with no working directory,
-// only an absolute one). A name: in the piped file is not seen:
-// that lease then does not bind, and holds its cost (failing closed).
-func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string) {
+// only an absolute one). unknown is set when an env file sets
+// COMPOSE_PROJECT_NAME to a value the shim cannot know (envFileValue): the
+// project is then the directory's, which the caller sends only when it
+// has no dir to key the lease by instead (#122). A name: in the piped file
+// is not seen: that lease then does not bind, and holds its cost (failing
+// closed).
+func composeStdinKey(c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error)) (project string, unknown bool) {
 	getenv := getenvOf(lookupEnv)
 	switch {
 	case c.Target != "":
-		return c.Target
+		return c.Target, false
 	case getenv("COMPOSE_PROJECT_NAME") != "":
-		return normalProject(getenv("COMPOSE_PROJECT_NAME"))
+		return normalProject(getenv("COMPOSE_PROJECT_NAME")), false
 	}
 	cwd, err := getwd()
 	if err != nil {
 		if dir := composeWorkingDir(c, ""); filepath.IsAbs(dir) {
 			project = normalProject(filepath.Base(dir))
 		}
-		return project
+		return project, false
 	}
 	dir := composeWorkingDir(c, cwd)
-	if name, ok := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout); ok {
-		return normalProject(name)
+	name, ok, unknown := composeEnvFileProject(c, lookupEnv, cwd, []string{dir}, composeTimeout)
+	if ok {
+		return normalProject(name), false
 	}
-	return normalProject(filepath.Base(dir))
+	return normalProject(filepath.Base(dir)), unknown
 }
 
 // composeEnvFileProject is COMPOSE_PROJECT_NAME as the env files Compose
 // loads set it (#85), read within left; ok is false when none sets it to a
-// value the shim can know, or the time ran out. The files: the call's
+// value the shim can know, or the time ran out, and unknown is set when
+// one sets it to a value the shim cannot know (envFileValue: not a file
+// Compose fails on, which starts nothing). The files: the call's
 // --env-files, else COMPOSE_ENV_FILES (comma-separated), relative to the
 // working directory cwd, a later one winning, read twice when one starts
 // with ~: first as they are (setEnvWithDotEnv, so a ~ is a directory in
@@ -714,20 +727,21 @@ func composeStdinProject(c shim.Call, lookupEnv func(string) (string, bool), get
 // COMPOSE_PROJECT_NAME set in the process environment, even empty, is kept
 // (WithOsEnv copies it so), and none is read: an empty one leaves the
 // directory's name (withNamePrecedenceLoad).
-func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), cwd string, dirs []string, left time.Duration) (string, bool) {
+func composeEnvFileProject(c shim.Call, lookupEnv func(string) (string, bool), cwd string, dirs []string, left time.Duration) (name string, ok, unknown bool) {
 	if _, set := lookupEnv("COMPOSE_PROJECT_NAME"); set {
-		return "", false
+		return "", false, false
 	}
-	name, _, done := composeEnvFileValue(c, lookupEnv, "COMPOSE_PROJECT_NAME", cwd, dirs, left)
-	return name, done && name != ""
+	name, set, known, done := composeEnvFileValue(c, lookupEnv, "COMPOSE_PROJECT_NAME", cwd, dirs, left)
+	return name, done && name != "", done && set && !known
 }
 
 // composeEnvFileValue is key's value as the env files Compose loads set it,
 // the files and their order as composeEnvFileProject has them, read within
 // left (done false when the time ran out). set is whether one sets it, or
 // may: a file Compose fails on leaves it set to a value the shim cannot
-// know (""), as does one that sets it to such a value.
-func composeEnvFileValue(c shim.Call, lookupEnv func(string) (string, bool), key, cwd string, dirs []string, left time.Duration) (value string, set, done bool) {
+// know (""), as does one that sets it to such a value; known is false for
+// the latter (envFileValue).
+func composeEnvFileValue(c shim.Call, lookupEnv func(string) (string, bool), key, cwd string, dirs []string, left time.Duration) (value string, set, known, done bool) {
 	getenv := getenvOf(lookupEnv)
 	files := c.ComposeEnvFiles
 	if len(files) == 0 {
@@ -744,38 +758,38 @@ func composeEnvFileValue(c shim.Call, lookupEnv func(string) (string, bool), key
 			pre = nil
 		}
 	} else if off, _ := strconv.ParseBool(getenv("COMPOSE_DISABLE_ENV_FILE")); off {
-		return "", false, true
+		return "", false, true, true
 	}
 	type setting struct {
-		value string
-		set   bool
+		value      string
+		set, known bool
 	}
 	found, done := within(left, func() (got setting) {
 		// The --env-files: the last that sets it, pre's beating files'.
 		preSet := false
 		for i, f := range slices.Concat(pre, files) {
-			v, set, err := envFileValue(f, key)
+			v, set, known, err := envFileValue(f, key)
 			if err != nil {
-				return setting{"", true}
+				return setting{"", true, true}
 			}
 			if set && (i < len(pre) || !preSet) {
-				got, preSet = setting{v, true}, i < len(pre)
+				got, preSet = setting{v, true, known}, i < len(pre)
 			}
 		}
 		// The .env files: the first that sets it.
 		for _, d := range dirs {
-			v, set, err := envFileValue(filepath.Join(d, ".env"), key)
+			v, set, known, err := envFileValue(filepath.Join(d, ".env"), key)
 			switch {
 			case errors.Is(err, errEnvNoFile):
 			case err != nil:
-				return setting{"", true}
+				return setting{"", true, true}
 			case set:
-				return setting{v, true}
+				return setting{v, true, known}
 			}
 		}
 		return got
 	})
-	return found.value, found.set, done
+	return found.value, found.set, found.known, done
 }
 
 // envFileMax is the most of an env file the shim reads (#85): a .env is a
@@ -783,8 +797,9 @@ func composeEnvFileValue(c shim.Call, lookupEnv func(string) (string, bool), key
 // the shim memory in its own gate.
 const envFileMax = 64 << 10
 
-// envFileValue is key's value in env file path, and whether the file sets
-// it: "" for a value the shim cannot know (envValue). A path that does not
+// envFileValue is key's value in env file path, whether the file sets
+// it, and whether the shim can know the value it sets: "" when not
+// (envValue). A path that does not
 // stat, or is a directory, is errEnvNoFile; a file that cannot be read, or
 // that envValue rejects, errEnvRejected: Compose fails on either
 // (compose-go 32d8d5d, dotenv/env.go GetEnvFromFile: "couldn't find env
@@ -793,24 +808,24 @@ const envFileMax = 64 << 10
 // (cli/options.go WithEnvFiles). One that is not a regular file (a device,
 // a FIFO: stat, unlike open, does not wait on one) sets nothing. One longer
 // than envFileMax sets a value the shim cannot know.
-func envFileValue(path, key string) (string, bool, error) {
+func envFileValue(path, key string) (value string, set, known bool, err error) {
 	switch fi, err := os.Stat(path); {
 	case err != nil, fi.IsDir():
-		return "", false, errEnvNoFile
+		return "", false, true, errEnvNoFile
 	case !fi.Mode().IsRegular():
-		return "", false, nil
+		return "", false, true, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false, errEnvRejected
+		return "", false, true, errEnvRejected
 	}
 	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, envFileMax+1))
 	switch {
 	case err != nil:
-		return "", false, errEnvRejected
+		return "", false, true, errEnvRejected
 	case len(b) > envFileMax:
-		return "", true, nil
+		return "", true, false, nil
 	}
 	return envValue(string(b), key)
 }
@@ -823,17 +838,18 @@ func envFileValue(path, key string) (string, bool, error) {
 // escape its quote with \; an unquoted one up to the line's end or " #".
 // A bare KEY looks itself up, which leaves key as it was. A value Compose
 // would interpolate ($, unquoted or in double quotes) or unescape (\ in
-// double quotes) is unknown: "". A file the parser rejects is
+// double quotes) is unknown: "", known false. A file the parser rejects is
 // errEnvRejected, as Compose then fails on it: a key with a space or a
 // character outside letters, digits and _.-[], a quote never closed, and an
 // export followed by nothing but spaces ("zero length string"; one followed
 // by a newline is a bare key, and a bare export a value of key "").
-func envValue(src, key string) (value string, set bool, err error) {
+func envValue(src, key string) (value string, set, known bool, err error) {
 	src = strings.TrimPrefix(src, "\uFEFF")
+	known = true
 	for {
 		src = strings.TrimLeftFunc(src, unicode.IsSpace)
 		if src == "" {
-			return value, set, nil
+			return value, set, known, nil
 		}
 		if src[0] == '#' {
 			_, src, _ = strings.Cut(src, "\n")
@@ -842,7 +858,7 @@ func envValue(src, key string) (value string, set bool, err error) {
 		if exportPrefix.MatchString(src) {
 			src = strings.TrimLeftFunc(strings.TrimPrefix(src, "export"), envSpace)
 			if src == "" {
-				return "", false, errEnvRejected // "zero length string"
+				return "", false, true, errEnvRejected // "zero length string"
 			}
 		}
 		// The key, up to =, : or a newline (a bare key); with none, the
@@ -853,20 +869,20 @@ func envValue(src, key string) (value string, set bool, err error) {
 				continue
 			}
 			if r != '=' && r != ':' && r != '\n' {
-				return "", false, errEnvRejected
+				return "", false, true, errEnvRejected
 			}
 			k, bare, src = src[:i], r == '\n', src[i+1:]
 			break
 		}
 		if k = strings.TrimRightFunc(k, unicode.IsSpace); strings.Contains(k, " ") {
-			return "", false, errEnvRejected
+			return "", false, true, errEnvRejected
 		}
 		src = strings.TrimLeftFunc(src, envSpace)
 		if bare {
 			continue
 		}
 		var v string
-		var known bool
+		var vKnown bool
 		if src != "" && (src[0] == '"' || src[0] == '\'') {
 			quote, closed, escaped := src[0], false, false
 			var b []byte
@@ -886,18 +902,18 @@ func envValue(src, key string) (value string, set bool, err error) {
 				}
 			}
 			if !closed {
-				return "", false, errEnvRejected
+				return "", false, true, errEnvRejected
 			}
 			v, src = string(b), src[i:]
-			known = quote == '\'' || !strings.ContainsAny(v, `$\`)
+			vKnown = quote == '\'' || !strings.ContainsAny(v, `$\`)
 		} else {
 			v, src, _ = strings.Cut(src, "\n")
 			v, _, _ = strings.Cut(v, " #")
 			v = strings.TrimRightFunc(v, unicode.IsSpace)
-			known = !strings.Contains(v, "$")
+			vKnown = !strings.Contains(v, "$")
 		}
 		if k == key {
-			value, set = v, true
+			value, set, known = v, true, vKnown
 			if !known {
 				value = ""
 			}

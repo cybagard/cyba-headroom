@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,9 +196,9 @@ func TestAContextThatIsNotDockerIsNotRunning(t *testing.T) {
 	}
 }
 
-// A context's socket that accepts and never answers holds the reading up
-// for a second at most, well within the source timeout.
-func TestAContextThatNeverAnswersIsNotRunning(t *testing.T) {
+// mute serves a socket that accepts and never answers.
+func mute(t *testing.T) string {
+	t.Helper()
 	sock := filepath.Join(shortDir(t), "mute.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -215,11 +218,87 @@ func TestAContextThatNeverAnswersIsNotRunning(t *testing.T) {
 			held = append(held, c) // read nothing, answer nothing
 		}
 	}()
-	got, took, err := collectWithin(t, docker.Candidate{Socket: sock}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
+	return sock
+}
+
+// A context's socket that accepts and never answers holds the reading up
+// for a second at most, well within the source timeout.
+func TestAContextThatNeverAnswersIsNotRunning(t *testing.T) {
+	got, took, err := collectWithin(t, docker.Candidate{Socket: mute(t)}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
 	if err != nil {
 		t.Fatalf("Collect: %v after %v, want a reading", err, took)
 	}
 	if took > 2*time.Second || len(got) != 2 || got[0].Running || !got[1].Running {
 		t.Fatalf("engines = %+v after %v, want the context's not running, quickly", got, took)
+	}
+}
+
+// Contexts share one second, however many there are and however many
+// calls each needs (#227, amendment 4): three mute ones before Docker
+// Desktop still leave a reading well inside the source timeout.
+func TestManyMuteContextsShareOneSecond(t *testing.T) {
+	got, took, err := collectWithin(t, docker.Candidate{Socket: mute(t)}, docker.Candidate{Socket: mute(t)},
+		docker.Candidate{Socket: mute(t)}, docker.Candidate{Socket: runningEngine(t), Trusted: true})
+	if err != nil {
+		t.Fatalf("Collect: %v after %v, want a reading", err, took)
+	}
+	if took > 2*time.Second || len(got) != 4 || !got[3].Running || got[0].Running || got[1].Running || got[2].Running {
+		t.Fatalf("engines = %+v after %v, want three not running and Docker Desktop's, quickly", got, took)
+	}
+}
+
+// A context whose engine answers each call just under a second, with
+// containers, is not running once the contexts' second is spent; Docker
+// Desktop's engine is read in full, well inside the source timeout.
+func TestASlowContextIsNotRunning(t *testing.T) {
+	slow := filepath.Join(shortDir(t), "slow.sock")
+	ln, err := net.Listen("unix", slow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(900 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		switch r.URL.Path {
+		case "/info":
+			_, _ = w.Write([]byte(`{"ID":"00000000-0000-4000-8000-000000000009","MemTotal":1}`))
+		case "/version":
+			_, _ = w.Write([]byte(`{"Platform":{"Name":"x"}}`))
+		case "/containers/json":
+			_, _ = w.Write([]byte(`[{"Id":"s1","Names":["/a"]},{"Id":"s2","Names":["/b"]}]`))
+		default:
+			_, _ = w.Write([]byte(`{"memory_stats":{"usage":1}}`))
+		}
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	desktop := runningEngine(t)
+	got, took, err := collectWithin(t, docker.Candidate{Socket: desktop, Trusted: true}, docker.Candidate{Socket: slow})
+	if err != nil {
+		t.Fatalf("Collect: %v after %v, want a reading", err, took)
+	}
+	if took > 2*time.Second || len(got) != 2 || got[0].Socket != desktop || !got[0].Running || len(got[0].Containers) != 1 ||
+		got[1].Socket != slow || got[1].Running || got[1].Error == "" {
+		t.Fatalf("engines = %+v after %v, want Docker Desktop's and the slow context's not running, with its error, quickly", got, took)
+	}
+}
+
+// A context that fails says why, beside not running.
+func TestAFailedContextCarriesItsError(t *testing.T) {
+	other, _ := engine(t, map[string]string{"/info": `{"hello":"world"}`})
+	got, _, err := collectWithin(t, docker.Candidate{Socket: other})
+	if err != nil || len(got) != 1 || got[0].Running || !strings.Contains(got[0].Error, "/containers/json") {
+		t.Fatalf("engines = %+v, err = %v: want one not running, with its error", got, err)
+	}
+	// A trusted socket that is only not there, or refuses, is not running,
+	// with no error: nothing failed.
+	got = engines(t, fakeVMs{}, filepath.Join(shortDir(t), "none.sock"))
+	if len(got) != 1 || got[0].Running || got[0].Error != "" {
+		t.Fatalf("engines = %+v, want one not running, with no error", got)
 	}
 }

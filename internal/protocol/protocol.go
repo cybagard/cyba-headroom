@@ -543,6 +543,9 @@ type Engine struct {
 	ID string `json:"id,omitempty"`
 	// Running is false when nothing answers on the socket.
 	Running bool `json:"running"`
+	// Error is why an untrusted candidate (a Docker context's socket) could
+	// not be read: it is then not running (#227, amendment 4).
+	Error string `json:"error,omitempty"`
 	// VMLimitBytes is the VM's configured memory (/info MemTotal): a ceiling,
 	// not a cost (spike #9).
 	VMLimitBytes uint64 `json:"vm_limit_bytes"`

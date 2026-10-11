@@ -62,20 +62,17 @@ func Discover(candidates func() []Candidate, vms vmproc.Lister) *Source {
 	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prevCPU: map[string]map[string]cpuCounters{}}
 }
 
-// untrustedLimit bounds each call to an untrusted candidate (#227,
-// amendment 3): one that never answers must not hold up the reading.
-const untrustedLimit = time.Second
+// untrustedBudget bounds the reading of every untrusted candidate, all
+// together (#227, amendment 4): however many there are, and however slow,
+// they must not hold up the reading.
+const untrustedBudget = time.Second
 
-// client returns Collect's HTTP client for a candidate, made once.
-func (s *Source) client(c Candidate) *http.Client {
-	key := fmt.Sprint(c.Trusted, " ", c.Socket)
-	h, ok := s.clients[key]
+// client returns Collect's HTTP client for socket, made once.
+func (s *Source) client(socket string) *http.Client {
+	h, ok := s.clients[socket]
 	if !ok {
-		h = dial(c.Socket)
-		if !c.Trusted {
-			h.Timeout = untrustedLimit
-		}
-		s.clients[key] = h
+		h = dial(socket)
+		s.clients[socket] = h
 	}
 	return h
 }
@@ -97,39 +94,82 @@ func (s *Source) Name() string { return "docker" }
 var errSeen = errors.New("docker: engine seen already")
 
 // Collect implements daemon.Source. Each candidate socket answers /info;
-// those that answer with one ID are one engine, by the first of them. A
-// socket that is missing or refuses is an engine that is not running, and
-// so is an untrusted one (a context's) that fails in any way: a file
-// anything may write must not hide the other engines (amendment 3). Any
-// other failure of a trusted one fails the reading: the last good one
-// stands, rather than one missing an engine's containers.
+// those that answer with one ID are one engine, by the first of them, a
+// trusted one before any other. A socket that is missing or refuses is an
+// engine that is not running. Any other failure of a trusted one fails the
+// reading: the last good one stands, rather than one missing an engine's
+// containers. The untrusted ones (a context's: a file anything may write)
+// are read after, all at once, within untrustedBudget; one that fails in
+// any way, or is not done by then, is an engine not running, with its
+// error, so it cannot hide or hold up the others (amendments 3 and 4).
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
-	engines := []protocol.Engine{}
+	cands := s.candidates()
+	type result struct {
+		e        protocol.Engine
+		counters map[string]cpuCounters
+		err      error
+	}
+	res := make([]result, len(cands))
 	seen := map[string]bool{}
-	cpu := map[string]map[string]cpuCounters{}
-	for _, cand := range s.candidates() {
-		e, counters, err := s.read(ctx, cand, seen)
-		switch {
-		case errors.Is(err, errSeen):
+	for i, cand := range cands {
+		if !cand.Trusted {
 			continue
-		case err == nil:
-			id := cmp.Or(e.ID, e.Socket)
-			seen[id], cpu[id] = true, counters
-		case notRunning(err) || !cand.Trusted:
-			e = protocol.Engine{Socket: cand.Socket, Containers: []protocol.Container{}}
-		default:
-			return nil, err
 		}
-		engines = append(engines, e)
+		r := &res[i]
+		r.e, r.counters, r.err = s.read(ctx, s.client(cand.Socket), cand.Socket, seen)
+		switch {
+		case r.err == nil:
+			seen[cmp.Or(r.e.ID, r.e.Socket)] = true
+		case errors.Is(r.err, errSeen):
+		case notRunning(r.err):
+			r.e, r.err = protocol.Engine{Socket: cand.Socket, Containers: []protocol.Container{}}, nil
+		default:
+			return nil, r.err
+		}
+	}
+	// seen is only read from here on.
+	uctx, cancel := context.WithTimeout(ctx, untrustedBudget)
+	var wg sync.WaitGroup
+	for i, cand := range cands {
+		if cand.Trusted {
+			continue
+		}
+		c := s.client(cand.Socket)
+		wg.Go(func() {
+			r := &res[i]
+			r.e, r.counters, r.err = s.read(uctx, c, cand.Socket, seen)
+			if r.err != nil && !errors.Is(r.err, errSeen) {
+				r.e = protocol.Engine{Socket: cand.Socket, Error: r.err.Error(), Containers: []protocol.Container{}}
+			}
+		})
+	}
+	wg.Wait()
+	cancel()
+
+	engines := []protocol.Engine{}
+	cpu := map[string]map[string]cpuCounters{}
+	for i, cand := range cands {
+		r := res[i]
+		if errors.Is(r.err, errSeen) {
+			continue
+		}
+		if r.e.Running {
+			id := cmp.Or(r.e.ID, r.e.Socket)
+			if !cand.Trusted && cpu[id] != nil {
+				continue // an earlier untrusted one reached it
+			}
+			cpu[id] = r.counters
+		}
+		engines = append(engines, r.e)
 	}
 	s.prevCPU = cpu // engines and containers that are gone drop out
 	s.vmCost(ctx, engines)
 	return reading{engines}, nil
 }
 
-// read reads the engine at cand, unless an engine in seen answers there.
-func (s *Source) read(ctx context.Context, cand Candidate, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
-	c := s.client(cand)
+// read reads the engine c reaches at socket, unless an engine in seen
+// answers there.
+func (s *Source) read(ctx context.Context, c *http.Client, socket string, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
 	var info struct {
 		ID       string
 		MemTotal uint64
@@ -137,7 +177,7 @@ func (s *Source) read(ctx context.Context, cand Candidate, seen map[string]bool)
 	if err := get(ctx, c, "/info", &info); err != nil {
 		return protocol.Engine{}, nil, err
 	}
-	id := cmp.Or(info.ID, cand.Socket)
+	id := cmp.Or(info.ID, socket)
 	if seen[id] {
 		return protocol.Engine{}, nil, errSeen
 	}
@@ -145,7 +185,7 @@ func (s *Source) read(ctx context.Context, cand Candidate, seen map[string]bool)
 	if err := get(ctx, c, "/version", &version); err != nil {
 		return protocol.Engine{}, nil, err
 	}
-	e := protocol.Engine{Kind: version.kind(), Socket: cand.Socket, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
+	e := protocol.Engine{Kind: version.kind(), Socket: socket, ID: info.ID, Running: true, VMLimitBytes: info.MemTotal}
 	var counters map[string]cpuCounters
 	var err error
 	e.Containers, counters, err = containers(ctx, c, s.prevCPU[id])

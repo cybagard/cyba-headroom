@@ -90,7 +90,10 @@ func (e Env) withDefaults() Env {
 		env, _ := e.envOf()
 		e.composeDry = func(bin string, args []string) ([]byte, error) { return askComposeDry(bin, args, env) }
 	}
-
+	if e.machineAsk == nil {
+		env, _ := e.envOf()
+		e.machineAsk = func(bin string, args []string) ([]byte, error) { return askMachine(bin, args, env) }
+	}
 	if e.fallbacks == nil {
 		e.fallbacks = shim.Fallbacks
 	}
@@ -123,7 +126,9 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	// the call names a context.
 	engine, remote := "", false
 	switch {
-	case c.Kind == "tart":
+	case c.Kind == "tart", c.Kind == "machine":
+		// A Tart VM or Podman machine runs on this Mac, whatever engine
+		// the call names.
 	case name == "docker":
 		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote(name, engine, getenv)
@@ -144,6 +149,17 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		notGated(e, "config: "+oneLine(err), c.Command)
 		return gated{proceed: true}
 	}
+	h := e.withDefaults()
+	if c.Kind == "machine" {
+		// The machine's own memory, and its name: the default machine's
+		// when the call names none (#230).
+		name, mem, err := machineOf(bin, c.Target, h.machineAsk)
+		if err != nil {
+			notGated(e, "podman machine inspect: "+oneLine(err), c.Command)
+			return gated{proceed: true}
+		}
+		c.Target, c.MemoryBytes = name, mem
+	}
 	if c.Kind == "container" && (c.Op == "run" || c.Op == "create") && shim.SetsLabel(e.Args[1:], protocol.LeaseLabel) {
 		// The shim's label must be the one Docker keeps: past an option it
 		// does not know, it goes first, and a later one would win and name
@@ -151,7 +167,6 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		fmt.Fprintf(e.Stderr, "headroom: refused `%s`: the label %s is headroom's own\n", c.Command, protocol.LeaseLabel)
 		return gated{code: exitDenied}
 	}
-	h := e.withDefaults()
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
@@ -268,6 +283,32 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			return interrupted(sig)
 		}
 	}
+}
+
+// machineOf is what podman machine inspect (ask, at the real binary bin)
+// says of machine name, or of the default machine when name is "": its
+// name and its memory (Resources.Memory, MiB), which its VM takes when it
+// starts.
+func machineOf(bin, name string, ask func(bin string, args []string) ([]byte, error)) (string, uint64, error) {
+	args := []string{"machine", "inspect"}
+	if name != "" {
+		args = append(args, name)
+	}
+	out, err := ask(bin, args)
+	if err != nil {
+		return "", 0, err
+	}
+	var machines []struct {
+		Name      string
+		Resources struct{ Memory uint64 }
+	}
+	if err := json.Unmarshal(out, &machines); err != nil {
+		return "", 0, err
+	}
+	if len(machines) != 1 || machines[0].Name == "" || machines[0].Resources.Memory == 0 || machines[0].Resources.Memory > 1<<30 {
+		return "", 0, errors.New("no machine's name and memory in its output")
+	}
+	return machines[0].Name, machines[0].Resources.Memory << 20, nil
 }
 
 // interrupted is a wait ended by sig: exit as the shell reports it.
@@ -995,6 +1036,16 @@ func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
+	return cmd.Output()
+}
+
+// askMachine runs podman machine inspect (args) at bin in env, within
+// composeTimeout: it reads the machine's config file.
+func askMachine(bin string, args, env []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env, cmd.WaitDelay = env, 500*time.Millisecond
 	return cmd.Output()
 }
 

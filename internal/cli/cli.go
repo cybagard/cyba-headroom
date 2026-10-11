@@ -81,6 +81,7 @@ type Env struct {
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
 	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
+	machineAsk func(bin string, args []string) ([]byte, error)                        // askMachine
 	now        func() time.Time                                                       // time.Now
 	wait       func(time.Duration) os.Signal                                          // signalWait.sleep; 0: pending?
 	raise      func(os.Signal)                                                        // reraise

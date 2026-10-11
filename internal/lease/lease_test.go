@@ -3548,3 +3548,32 @@ func TestAnUnnamedUpDoesNotHoldWhatALapsedNamedLeaseKeys(t *testing.T) {
 		t.Fatalf("the unnamed lease bound %v, want none", got)
 	}
 }
+
+// When a repeat -p q up takes q's running stack from w1's unnamed up's
+// hold, and nothing of the unnamed up's own comes, the unnamed lease
+// warns "never appeared" at its timeout: what it held was not its own
+// (#232 F3, plan amendment 1).
+func TestAnUnnamedUpWhoseHoldANamedUpTookWarnsNeverAppeared(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(qUp(), snap(), cfg)
+	l := map[string]string{protocol.ComposeProjectLabel: "q", protocol.ComposeWorkingDirLabel: "/src/a"}
+	running := func() *protocol.Snapshot {
+		s := read(addContainer(snap(), protocol.Container{ID: "q1", Name: "q1", MemoryBytes: 2 * gib, Labels: l}, "w1"), c.t)
+		s.CollectedAt = c.t
+		return s
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(running()) // it uses the lease's cost: the lease ends
+	c.t = c.t.Add(5 * time.Second)
+	u := b.Check(unnamedUp("w1", "/src/a"), running(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Check(qUp(), running(), cfg)
+	for range 4 {
+		c.t = c.t.Add(time.Minute)
+		b.Observe(running())
+	}
+	if !strings.Contains(log.String(), "lease="+u.LeaseID+" ") || !strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("the unnamed lease did not warn: %s", log)
+	}
+}

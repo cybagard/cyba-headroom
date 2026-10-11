@@ -143,8 +143,10 @@ type entry struct {
 	used        uint64
 	// found is set once it held a stack, or a start of several let one of
 	// its containers go: one it lets go of when it stops (Book.release,
-	// entry.letGo) still appeared, so the lease ends quietly.
-	found bool
+	// entry.letGo) still appeared, so the lease ends quietly. letOne is
+	// set once it let one go (entry.letGo): found then stays when a named
+	// up takes what it held (#232).
+	found, letOne bool
 	// dead are a start of several's containers that died while it waited
 	// on others, each with its deaths since a reading showed it
 	// (Book.markDead).
@@ -651,7 +653,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			for k := range o.bound {
 				e.bound[k], e.held[k] = true, o.held[k]
 			}
-			e.found = e.found || o.found
+			e.found, e.letOne = e.found || o.found, e.letOne || o.letOne
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
 			return true
 		})
@@ -698,6 +700,9 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 					if o.unnamed && o.Worktree == e.Worktree && o.held[x.key] {
 						delete(o.bound, x.key)
 						delete(o.held, x.key)
+						if len(o.bound) == 0 {
+							o.found = o.letOne // what it held was not its own
+						}
 					}
 				}
 			}
@@ -1697,7 +1702,7 @@ func (e *entry) letGo(key string) {
 		e.target = ""
 	}
 	e.containerIDs = slices.DeleteFunc(e.containerIDs, byID)
-	e.found = true
+	e.found, e.letOne = true, true
 }
 
 // live reports whether id is an open or lapsed lease's.

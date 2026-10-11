@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,7 +266,7 @@ func TestPodmanEngineWithItsContainersAndVM(t *testing.T) {
 	}
 	e := got[0]
 	if e.Kind != protocol.EnginePodman || e.Machine != "podman-machine-default" || !e.Running || e.Socket != sock ||
-		e.ID != "00000000-0000-4000-8000-000000000002" || e.VMLimitBytes != 2037100544 {
+		e.ID != "podman:podman-machine-default" || e.VMLimitBytes != 2037100544 {
 		t.Errorf("engine = %+v", e)
 	}
 	if len(e.Containers) != 1 || e.Containers[0].ID != podmanID || e.Containers[0].Name != "cache" || e.Containers[0].MemoryBytes != 1<<20 {
@@ -275,15 +277,92 @@ func TestPodmanEngineWithItsContainersAndVM(t *testing.T) {
 	}
 }
 
-// Podman's engine reached first through DOCKER_HOST's socket is one
-// engine, of the machine whose socket also reaches it.
-func TestPodmanEngineSeenFirstElsewhereKeepsItsMachine(t *testing.T) {
-	sock := podmanEngine(t, `{}`)
-	other := podmanEngine(t, `{}`) // the same /info ID: the same engine
+// randomPodman serves Podman's engine as Podman does: /info answers with
+// a new random ID on every request (review round 1, B1). It runs one
+// container whose CPU counters grow by a second in 100 each reading.
+func randomPodman(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(shortDir(t), "api.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	infos, stats := 0, 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		var body string
+		switch r.URL.RequestURI() {
+		case "/info":
+			infos++
+			body = fmt.Sprintf(`{"ID":"00000000-0000-4000-8000-%012d","MemTotal":2037100544}`, infos)
+		case "/version":
+			b, _ := os.ReadFile("testdata/version-podman.json")
+			body = string(b)
+		case "/containers/json":
+			body = `[{"Id":"` + podmanID + `","Names":["/cache"],"Image":"docker.io/library/redis:7-alpine"}]`
+		case "/containers/" + podmanID + "/stats?stream=false&one-shot=true":
+			stats++
+			body = cpuStats(uint64(stats)*1e9, uint64(stats)*100e9)
+		default:
+			http.Error(w, `{"message":"no route"}`, http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return sock
+}
+
+// Podman's engine keeps one ID though its /info's changes on every
+// request: podman:<machine>, its candidate being from inspect (#228, plan
+// amendment 2).
+func TestPodmanEngineIDIsStable(t *testing.T) {
+	sock := randomPodman(t)
 	p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
-	got := found(t, fakeVMs{podmanVM}, append([]docker.Candidate{{Socket: other, Trusted: true}}, p.Candidates()...)...)
-	if len(got) != 1 || got[0].Socket != other || got[0].Machine != "podman-machine-default" || !got[0].VMRunning {
-		t.Fatalf("engines = %+v, want one, at %s, of the machine", got, other)
+	src := docker.Discover(p.Candidates, fakeVMs{podmanVM})
+	var ids []string
+	for range 2 {
+		ids = append(ids, collect(t, src).ID)
+	}
+	if ids[0] != "podman:podman-machine-default" || ids[1] != ids[0] {
+		t.Fatalf("IDs = %q, want podman:podman-machine-default twice", ids)
+	}
+}
+
+// Reached through another name (DOCKER_HOST, a context) with no machine,
+// Podman's engine is its resolved socket path.
+func TestPodmanEngineWithoutAMachineIsItsSocket(t *testing.T) {
+	sock := randomPodman(t)
+	link := filepath.Join(shortDir(t), "link.sock")
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
+	src := docker.Discover(func() []docker.Candidate { return []docker.Candidate{{Socket: link, Trusted: true}} }, fakeVMs{})
+	resolved, err := filepath.EvalSymlinks(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if e := collect(t, src); e.ID != resolved || e.Socket != link {
+			t.Fatalf("engine = %+v, want ID %s", e, resolved)
+		}
+	}
+}
+
+// Podman's containers' CPU is computed from the previous reading's.
+func TestPodmanCPUOnTheSecondReading(t *testing.T) {
+	sock := randomPodman(t)
+	src := docker.Discover(docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet).Candidates, fakeVMs{podmanVM})
+	if c := collect(t, src).Containers; len(c) != 1 || c[0].CPUPercent != nil {
+		t.Fatalf("first reading: containers = %+v, want CPU unknown", c)
+	}
+	// 1 s in 100, on 16 CPUs
+	if c := collect(t, src).Containers; len(c) != 1 || c[0].CPUPercent == nil || *c[0].CPUPercent != 16 {
+		t.Fatalf("second reading: containers = %+v, want 16%% CPU", c)
 	}
 }
 

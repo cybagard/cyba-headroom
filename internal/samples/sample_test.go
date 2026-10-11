@@ -62,12 +62,12 @@ func TestFromSnapshotKeepsAttributionKeys(t *testing.T) {
 	if s.Budget == nil || s.Budget.ReservedBytes != 34<<30 {
 		t.Errorf("budget = %+v", s.Budget)
 	}
-	if len(s.Containers) != 1 || s.Containers[0].ComposeDir != "/Users/dev/project-a" ||
-		s.Containers[0].Mounts[0] != "/Users/dev/project-a/data" || s.Containers[0].MemoryBytes != 1<<30 {
-		t.Errorf("containers = %+v", s.Containers)
+	if len(s.Engines) != 1 || s.Engines[0].VMFootprintBytes != 4<<30 {
+		t.Fatalf("engines = %+v", s.Engines)
 	}
-	if s.Docker == nil || s.Docker.VMFootprintBytes != 4<<30 {
-		t.Errorf("docker = %+v", s.Docker)
+	if c := s.Engines[0].Containers; len(c) != 1 || c[0].ComposeDir != "/Users/dev/project-a" ||
+		c[0].Mounts[0] != "/Users/dev/project-a/data" || c[0].MemoryBytes != 1<<30 {
+		t.Errorf("containers = %+v", c)
 	}
 	if len(s.TartVMs) != 1 || s.TartVMs[0].LaunchCwd != "/Users/dev/project-b" || *s.TartVMs[0].FootprintBytes != 5<<30 {
 		t.Errorf("tart = %+v", s.TartVMs)
@@ -136,7 +136,7 @@ func TestFromSnapshotDropsLabelsAndProcessDetails(t *testing.T) {
 
 func TestFromEmptySnapshot(t *testing.T) {
 	s := samples.FromSnapshot(&protocol.Snapshot{CollectedAt: t0})
-	if s.Host != nil || s.Docker != nil || s.Containers != nil || s.Worktrees != nil {
+	if s.Host != nil || s.Engines != nil || s.Podman != nil || s.OtherVMs != nil || s.Worktrees != nil {
 		t.Fatalf("empty snapshot gave %+v", s)
 	}
 }

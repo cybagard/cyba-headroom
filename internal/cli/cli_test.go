@@ -116,7 +116,7 @@ func TestDaemonServesAllSources(t *testing.T) {
 	for {
 		m, _ := filepath.Glob(filepath.Join(dir, "samples", "*.jsonl"))
 		if len(m) == 1 {
-			if b, _ := os.ReadFile(m[0]); strings.HasPrefix(string(b), `{"v":1,`) {
+			if b, _ := os.ReadFile(m[0]); strings.HasPrefix(string(b), `{"v":2,`) {
 				return
 			}
 		}

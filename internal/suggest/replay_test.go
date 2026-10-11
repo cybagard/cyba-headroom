@@ -15,7 +15,7 @@ import (
 // A snapshot recorded as a sample and replayed gives the budget the daemon
 // computed from the original.
 func TestReplayGivesTheDaemonsBudget(t *testing.T) {
-	p := budget.Params{HostBaselineBytes: 8 * gib, DockerOverheadBytes: 2 * gib, LMStudioIdleBytes: gib / 2, OllamaIdleBytes: gib / 8}
+	p := budget.Params{HostBaselineBytes: 8 * gib, DockerOverheadBytes: 2 * gib, PodmanOverheadBytes: gib, LMStudioIdleBytes: gib / 2, OllamaIdleBytes: gib / 8}
 	snaps := map[string]*protocol.Snapshot{
 		"everything running": {
 			Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(30 * gib), CompressorBytes: u64(gib), CompressedBytes: u64(3 * gib)},
@@ -45,6 +45,33 @@ func TestReplayGivesTheDaemonsBudget(t *testing.T) {
 			Host:    &protocol.Host{TotalBytes: 64 * gib},
 			Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib}},
 			Tart:    &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
+		},
+		"engines, Podman VMs and other VMs": {
+			Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(40 * gib), CompressorBytes: u64(gib), CompressedBytes: u64(3 * gib)},
+			Engines: []protocol.Engine{
+				{Kind: protocol.EngineDockerDesktop, Socket: "/Users/dev/.docker/run/docker.sock", Running: true, VMRunning: true,
+					VMLimitBytes: 16 * gib, VMFootprintBytes: 6 * gib, Containers: []protocol.Container{{Name: "db", MemoryBytes: 5 * gib}}},
+				{Kind: protocol.EnginePodman, Socket: "/Users/dev/.local/share/containers/podman/machine/dev.sock", Machine: "dev",
+					Running: true, VMRunning: true, VMLimitBytes: 4 * gib, VMFootprintBytes: 3 * gib,
+					Containers: []protocol.Container{{Name: "cache", MemoryBytes: gib}}},
+				{Kind: protocol.EngineDocker, Socket: "/var/run/docker.sock"},
+				{Kind: protocol.EngineDocker, Socket: "/Users/dev/.colima/docker.sock", Running: true, VMError: "unknown VM",
+					Containers: []protocol.Container{{Name: "web", MemoryBytes: 2 * gib}}},
+			},
+			// dev's VM is its engine's; ci's has no engine, so it counts here.
+			Podman: &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "dev", PID: 30, FootprintBytes: 3 * gib}, {Machine: "ci", PID: 31, FootprintBytes: 2 * gib}}},
+			VMs:    &protocol.VMs{Other: []protocol.OtherVM{{PID: 40, Name: "qemu-system-aarch64", FootprintBytes: 5 * gib}}},
+			Tart:   &protocol.Tart{Installed: true}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
+		},
+		"podman and vms unknown": {
+			Host:    &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(18 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
+			Sources: map[string]protocol.SourceStatus{"podman": {}, "vms": {}},
+			Engines: []protocol.Engine{}, Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
+		},
+		"podman and vms read, none running": {
+			Host:    &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(18 * gib), CompressorBytes: u64(0), CompressedBytes: u64(0)},
+			Sources: map[string]protocol.SourceStatus{"podman": {At: day0}, "vms": {At: day0}},
+			Engines: []protocol.Engine{}, Tart: &protocol.Tart{}, LMStudio: &protocol.LMStudio{}, Ollama: &protocol.Ollama{},
 		},
 		"ollama models unknown": {
 			Host:    &protocol.Host{TotalBytes: 64 * gib},
@@ -82,7 +109,7 @@ func TestMinHeadroomFromWarnOnsets(t *testing.T) {
 	ss := threeDays(func(s *samples.Sample, i int) {
 		if fp, ok := onset[i]; ok {
 			s.Host.Pressure, s.Host.FreePercent = "warn", 38
-			s.Docker = &samples.Docker{VMRunning: true, VMFootprintBytes: fp * gib}
+			s.Engines = desktopVM(0, fp*gib)
 		}
 	})
 	r := aggregate(ss)

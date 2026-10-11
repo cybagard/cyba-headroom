@@ -33,6 +33,13 @@ func sample(at time.Time, agents []string, unaccounted uint64) samples.Sample {
 	}
 }
 
+// desktopVM is a running Docker Desktop engine whose VM has the given limit
+// and footprint, with containers cs.
+func desktopVM(limit, footprint uint64, cs ...samples.Container) []samples.Engine {
+	return []samples.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true,
+		VMLimitBytes: limit, VMFootprintBytes: footprint, Containers: cs}}
+}
+
 // series returns n samples a tick apart from start, built by f.
 func series(start time.Time, n int, f func(i int, at time.Time) samples.Sample) []samples.Sample {
 	out := make([]samples.Sample, n)

@@ -54,6 +54,11 @@ func runSuggest(e Env) int {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1
 	}
+	if st.Samples == 0 && st.Outdated > 0 {
+		fmt.Fprintf(e.Stdout, "headroom suggest: only v1 samples in %s since %s, from before schema v2; they are skipped (%d).\n",
+			cfg.SamplesDir(), from.Format("2006-01-02 15:04"), st.Outdated)
+		return 0
+	}
 	if st.Samples == 0 {
 		fmt.Fprintf(e.Stdout, "headroom suggest: no samples in %s since %s. Is the daemon recording? (`headroom install`, `headroom logs`)\n",
 			cfg.SamplesDir(), from.Format("2006-01-02 15:04"))
@@ -103,8 +108,8 @@ func printSuggestion(w io.Writer, r suggest.Result, st samples.Stats, since time
 		fmt.Fprintf(w, "%-10s  %6.1f  %8.1f  %11d  %8.1f  %8.1f  %6.1f GB\n",
 			d.Date, d.Hours, d.WorkingHours, d.PeakWorking, d.WarnMinutes, d.CritMinutes, float64(d.PeakSwap)/(1<<30))
 	}
-	fmt.Fprintf(w, "\nread %d samples (%d broken lines skipped, %d duplicates, %d unreadable files); left out of the budget maths: %d with stale inputs, %d during swap-outs\n",
-		st.Samples, st.Skipped, st.Duplicates, st.BadFiles, r.Stale, r.SwappingOut)
+	fmt.Fprintf(w, "\nread %d samples (%d broken lines skipped, %d v1 samples skipped, %d duplicates, %d unreadable files); left out of the budget maths: %d with stale inputs, %d during swap-outs\n",
+		st.Samples, st.Skipped, st.Outdated, st.Duplicates, st.BadFiles, r.Stale, r.SwappingOut)
 
 	fmt.Fprintln(w, "\n# Suggested settings. GB means GiB. Each value says how it was found.")
 	section := ""

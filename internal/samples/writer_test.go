@@ -236,7 +236,7 @@ func TestRestartAfterCrashStartsAFreshLine(t *testing.T) {
 	w.close()
 	b, _ := os.ReadFile(path)
 	ls := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(ls) != 3 || !strings.HasPrefix(ls[2], `{"v":1`) {
+	if len(ls) != 3 || !strings.HasPrefix(ls[2], `{"v":2`) {
 		t.Fatalf("file = %q, want the partial line closed and a fresh line after it", b)
 	}
 }
@@ -277,7 +277,7 @@ func TestFailedWriteStartsAFreshLineNextTime(t *testing.T) {
 	w.close()
 	b := must(os.ReadFile(path))
 	ls := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(ls) != 3 || !strings.HasPrefix(ls[2], `{"v":1,"t":"2026-10-07T12:00:10Z"`) {
+	if len(ls) != 3 || !strings.HasPrefix(ls[2], `{"v":2,"t":"2026-10-07T12:00:10Z"`) {
 		t.Fatalf("file = %q; want the fragment ended and the next sample on its own line", b)
 	}
 }

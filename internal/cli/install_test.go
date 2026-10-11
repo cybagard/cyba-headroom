@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-headroom/internal/daemon"
 )
 
 // fakeAgent stands in for launchd.Agent.
@@ -51,7 +53,8 @@ type installFixture struct {
 	in      *installer
 	agent   *fakeAgent
 	home    string
-	upPID   int // PID of whatever answers on the socket; 0 = nothing
+	cfg     string // the config dir, with a config file in it
+	upPID   int    // PID of whatever answers on the socket; 0 = nothing
 	out     bytes.Buffer
 	errb    bytes.Buffer
 	exeData []byte
@@ -61,6 +64,16 @@ func newInstallFixture(t *testing.T) *installFixture {
 	t.Helper()
 	home := t.TempDir()
 	f := &installFixture{home: home, exeData: []byte("#!binary v1")}
+	// Short: a test may hold the daemon's lock, beside its socket, here.
+	cfg, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cfg) })
+	if err := os.WriteFile(filepath.Join(cfg, "config.toml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg = cfg
 	exe := filepath.Join(t.TempDir(), "headroom")
 	if err := os.WriteFile(exe, f.exeData, 0o755); err != nil {
 		t.Fatal(err)
@@ -69,7 +82,7 @@ func newInstallFixture(t *testing.T) *installFixture {
 	f.agent.onLoad = func() { f.agent.pid = 4242; f.upPID = 4242 }
 	f.in = &installer{
 		home: home, exe: exe, bin: filepath.Join(home, ".local", "bin", "headroom"),
-		agent: f.agent,
+		agent: f.agent, socket: filepath.Join(cfg, "d.sock"),
 		ping: func(context.Context) (int, error) {
 			switch {
 			case f.upPID == -1:
@@ -80,7 +93,7 @@ func newInstallFixture(t *testing.T) *installFixture {
 			return 0, errors.New("connection refused")
 		},
 		getenv: func(k string) string {
-			return map[string]string{"HEADROOM_CONFIG_DIR": "/Users/dev/cfg", "HOME": home}[k]
+			return map[string]string{"HEADROOM_CONFIG_DIR": cfg, "HOME": home}[k]
 		},
 		out: &f.out, errw: &f.errb, wait: 200 * time.Millisecond, poll: 5 * time.Millisecond,
 		shimDir:  filepath.Join(home, "shims"),
@@ -313,7 +326,7 @@ func TestUninstallKeepsDataAndIsIdempotent(t *testing.T) {
 	if !f.agent.unloaded {
 		t.Error("agent not unloaded")
 	}
-	for _, want := range []string{"kept", "/Users/dev/cfg", "Logs/headroom"} {
+	for _, want := range []string{"kept", f.cfg, "Logs/headroom"} {
 		if !strings.Contains(f.out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, f.out.String())
 		}
@@ -360,7 +373,7 @@ func TestUninstallGoesOnWhenAShimStays(t *testing.T) {
 func TestInstallPrintsTheConfigDir(t *testing.T) {
 	f := newInstallFixture(t)
 	f.in.install(context.Background())
-	if !strings.Contains(f.out.String(), "claude: env HEADROOM_CONFIG_DIR=/Users/dev/cfg "+f.in.bin+" run -- claude") {
+	if !strings.Contains(f.out.String(), "claude: env HEADROOM_CONFIG_DIR="+f.cfg+" "+f.in.bin+" run -- claude") {
 		t.Fatalf("output:\n%s", f.out.String())
 	}
 }
@@ -489,7 +502,7 @@ func TestUninstallSaysWhatItRemoved(t *testing.T) {
 			t.Fatalf("run %d: exit %d: %s", run, code, f.errb.String())
 		}
 		before, after, ok := strings.Cut(f.out.String(), "kept:")
-		if !ok || !strings.Contains(after, "/Users/dev/cfg") {
+		if !ok || !strings.Contains(after, f.cfg) {
 			t.Fatalf("run %d: no kept list:\n%s", run, f.out.String())
 		}
 		for _, p := range removed {
@@ -582,7 +595,8 @@ func TestInstallRefusesALinkToAnotherBinary(t *testing.T) {
 	if code := f.in.install(context.Background()); code != 1 {
 		t.Fatalf("exit %d: %s", code, f.errb.String())
 	}
-	if want := `"` + link + `" install --bin "` + link + `"`; !strings.Contains(f.errb.String(), want) {
+	// It says what the command does: install the binary the link leads to (#194).
+	if want := `to install the binary it links to, run it: "` + link + `" install --bin "` + link + `"`; !strings.Contains(f.errb.String(), want) {
 		t.Errorf("message lacks %s:\n%s", want, f.errb.String())
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -720,8 +734,11 @@ func TestUninstallWithBothAgentsKeepsHomebrewsShims(t *testing.T) {
 				}
 				_, out, _ := strings.Cut(f.out.String(), "removed from launchd.")
 				removed, kept, _ := strings.Cut(out, "kept:")
-				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" (docker, podman, tart)") {
+				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" (docker, podman, tart), Homebrew's\n") {
 					t.Errorf("output does not list Homebrew's shims as kept:\n%s", out)
+				}
+				if strings.Contains(kept, "such as Homebrew's") {
+					t.Errorf("the kept shims line hedges with Homebrew's plist present (#194):\n%s", out)
 				}
 			})
 		}
@@ -744,8 +761,9 @@ func TestInstallRefusesABrokenLink(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, f.errb.String())
 	}
 	msg := f.errb.String()
-	if !strings.Contains(msg, "broken") || !strings.Contains(msg, missing) {
-		t.Errorf("message does not call the link broken or name %s:\n%s", missing, msg)
+	// The target once, not again in the stat error (#194).
+	if want := "headroom: " + f.in.bin + " is a broken link to " + missing + "; remove it or choose another --bin\n"; msg != want {
+		t.Errorf("message:\n%s\nwant:\n%s", msg, want)
 	}
 	if strings.Contains(msg, "install --bin") {
 		t.Errorf("message suggests running the broken link:\n%s", msg)
@@ -788,5 +806,230 @@ func TestPlainInstallReplacesALinkWithACopy(t *testing.T) {
 	}
 	if b, err := os.ReadFile(other); err != nil || string(b) != "#!binary dev" {
 		t.Errorf("the dev build changed: %q %v", b, err)
+	}
+}
+
+// switchToBin is a copy install, then `install --bin <link>` run from the
+// binary the link leads to, as switching to Homebrew's link is (#194). It
+// returns the default copy path and the link.
+func switchToBin(t *testing.T, f *installFixture) (copyPath, link string) {
+	t.Helper()
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("copy install: exit %d: %s", code, f.errb.String())
+	}
+	copyPath = f.in.bin
+	link, target := brewLayout(t, f.exeData)
+	f.in.exe, f.in.bin, f.in.binGiven = target, link, true
+	f.out.Reset()
+	f.errb.Reset()
+	return copyPath, link
+}
+
+// The copy a plain install left would stay first on PATH and shadow the
+// new --bin binary: install --bin removes it and says so (#194).
+func TestInstallBinRemovesTheOldCopy(t *testing.T) {
+	f := newInstallFixture(t)
+	copyPath, link := switchToBin(t, f)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Lstat(copyPath); !os.IsNotExist(err) {
+		t.Errorf("old copy stayed: %v", err)
+	}
+	if want := "removed: old copy " + copyPath + " (it would shadow " + link + " on PATH)\n"; !strings.Contains(f.out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, f.out.String())
+	}
+	if _, err := os.Stat(link); err != nil {
+		t.Errorf("the --bin binary is gone: %v", err)
+	}
+}
+
+// What a copy install did not leave at the default copy path, a link or a
+// directory, stays, with a note that it may shadow the new binary (#194).
+func TestInstallBinLeavesAnythingElseAtTheDefaultPath(t *testing.T) {
+	for _, what := range []string{"link", "directory"} {
+		t.Run(what, func(t *testing.T) {
+			f := newInstallFixture(t)
+			copyPath, link := switchToBin(t, f)
+			if err := os.Remove(copyPath); err != nil {
+				t.Fatal(err)
+			}
+			if what == "link" {
+				other := filepath.Join(t.TempDir(), "headroom") // a dev build
+				if err := os.WriteFile(other, []byte("#!binary dev"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(other, copyPath); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(copyPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			if _, err := os.Lstat(copyPath); err != nil {
+				t.Errorf("%s at the default path was removed: %v", what, err)
+			}
+			if want := copyPath + " is not a copy headroom install made: left as it is; it may shadow " + link + " on PATH"; !strings.Contains(f.errb.String(), want) {
+				t.Errorf("no note %q:\n%s", want, f.errb.String())
+			}
+			if strings.Contains(f.out.String(), "old copy") {
+				t.Errorf("says it removed the old copy:\n%s", f.out.String())
+			}
+		})
+	}
+}
+
+// The --bin target is never removed as an old copy: not when --bin names
+// the default copy path, nor when it links to the copy there (#194).
+func TestInstallBinNeverRemovesItsTarget(t *testing.T) {
+	for _, bin := range []string{"the default path", "a link to the copy"} {
+		t.Run(bin, func(t *testing.T) {
+			f := newInstallFixture(t)
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("copy install: exit %d: %s", code, f.errb.String())
+			}
+			copyPath := f.in.bin
+			f.in.exe, f.in.binGiven = copyPath, true // `~/.local/bin/headroom install --bin …`
+			if bin == "a link to the copy" {
+				f.in.bin = filepath.Join(f.home, "opt", "bin", "headroom")
+				if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(copyPath, f.in.bin); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.out.Reset()
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			if b, err := os.ReadFile(copyPath); err != nil || !bytes.Equal(b, f.exeData) {
+				t.Errorf("the --bin target was removed: %q %v", b, err)
+			}
+			if strings.Contains(f.out.String(), "old copy") {
+				t.Errorf("says it removed the old copy:\n%s", f.out.String())
+			}
+		})
+	}
+}
+
+// With the binary's dir off install's PATH, install says so and prints the
+// README's zsh line; with it on PATH, nothing (#194).
+func TestInstallNotesABinDirOffPATH(t *testing.T) {
+	const zsh = `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`
+	for name, onPATH := range map[string]bool{"off PATH": false, "on PATH": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newInstallFixture(t)
+			path := "/usr/bin:/bin"
+			if onPATH {
+				path = filepath.Join(f.home, ".local", "bin") + ":" + path
+			}
+			getenv := f.in.getenv
+			f.in.getenv = func(k string) string {
+				if k == "PATH" {
+					return path
+				}
+				return getenv(k)
+			}
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			out := f.out.String() + f.errb.String()
+			note := filepath.Join(f.home, ".local", "bin") + " is not on your PATH"
+			if got := strings.Contains(out, note) && strings.Contains(out, zsh); got == onPATH {
+				t.Errorf("note and zsh line printed: %v, want %v:\n%s", got, !onPATH, out)
+			}
+			if onPATH && strings.Contains(out, "not on your PATH") {
+				t.Errorf("a note with the dir on PATH:\n%s", out)
+			}
+		})
+	}
+}
+
+// keptConfig reports whether uninstall's output lists dir as kept config.
+func keptConfig(out, dir string) bool {
+	_, kept, _ := strings.Cut(out, "kept:")
+	return strings.Contains(kept, "config   "+dir+"\n")
+}
+
+// The lock file no daemon holds goes; a config dir left empty goes too,
+// and is not listed as kept (#194).
+func TestUninstallRemovesAnUnheldLockAndAnEmptyConfigDir(t *testing.T) {
+	f := newInstallFixture(t)
+	if err := os.Remove(filepath.Join(f.cfg, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	lock := f.in.socket + ".lock"
+	if err := os.WriteFile(lock, []byte("4242\n"), 0o600); err != nil { // a stopped daemon's
+		t.Fatal(err)
+	}
+	// What our daemon wrote when one refused it (#194, plan amendment 2).
+	if err := os.WriteFile(lock+".reported", []byte("4242\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Stat(f.cfg); !os.IsNotExist(err) {
+		t.Errorf("config dir stayed: %v", err)
+	}
+	if keptConfig(f.out.String(), f.cfg) || strings.Contains(f.out.String(), "samples") {
+		t.Errorf("config listed as kept:\n%s", f.out.String())
+	}
+}
+
+// A config dir with a config file in it stays and is listed; the unheld
+// lock beside it still goes (#194).
+func TestUninstallKeepsAConfigDirWithAConfig(t *testing.T) {
+	f := newInstallFixture(t)
+	lock := f.in.socket + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("unheld lock stayed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.cfg, "config.toml")); err != nil {
+		t.Errorf("config removed: %v", err)
+	}
+	if !keptConfig(f.out.String(), f.cfg) {
+		t.Errorf("config not listed as kept:\n%s", f.out.String())
+	}
+}
+
+// In the both state, Homebrew's daemon holds the lock: it stays, and so
+// does the config dir that holds it (#194).
+func TestUninstallKeepsALockAnotherDaemonHolds(t *testing.T) {
+	f := newInstallFixture(t)
+	if err := os.Remove(filepath.Join(f.cfg, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	f.writeBrewPlist(t, "sh.brew.headroom.plist")
+	ln, err := daemon.Listen(f.in.socket) // Homebrew's daemon
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Stat(f.in.socket + ".lock"); err != nil {
+		t.Errorf("held lock removed: %v", err)
 	}
 }

@@ -87,6 +87,10 @@ func linkOwnShims(start, dir string, log *slog.Logger) {
 // under unlinkShims (#193).
 var removeLink = os.Remove
 
+// removeShimDir removes the empty shim folder; a test replaces it to fill
+// the folder first (#194).
+var removeShimDir = os.Remove
+
 // unlinkShims removes the shim links in dir that lead to a headroom binary,
 // and, if removeDir (dir is headroom's own), dir itself once it is empty.
 // With onlyBin, it removes only the links to bin itself and keeps those to
@@ -112,7 +116,17 @@ func unlinkShims(dir, bin string, removeDir, onlyBin bool) (removed, kept []stri
 		removed = append(removed, n)
 	}
 	if entries, err := os.ReadDir(dir); removeDir && err == nil && len(entries) == 0 {
-		if err := os.Remove(dir); !errors.Is(err, fs.ErrNotExist) {
+		switch err := removeShimDir(dir); {
+		case errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST):
+			// Filled since the check: another daemon linked its shims
+			// (#194). The folder and its shims stay.
+			for _, n := range shimList() {
+				p := filepath.Join(dir, n)
+				if target, err := os.Readlink(p); err == nil && isHeadroom(p, target) && !slices.Contains(kept, n) {
+					kept = append(kept, n)
+				}
+			}
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return removed, kept, err
 		}
 	}

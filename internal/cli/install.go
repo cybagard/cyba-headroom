@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/binpath"
@@ -48,6 +50,8 @@ type installer struct {
 	// binary the installed agent runs.
 	binGiven bool
 	agent    agentControl
+	// socket is the daemon's; its lock file is beside it.
+	socket string
 	// ping returns the PID of the daemon answering on the socket.
 	ping   func(context.Context) (int, error)
 	getenv func(string) string
@@ -97,11 +101,12 @@ func (in *installer) install(ctx context.Context) int {
 	if fi, err := os.Lstat(in.bin); in.binGiven && err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		if _, err := os.Stat(in.bin); err != nil {
 			target, _ := os.Readlink(in.bin)
-			fmt.Fprintf(in.errw, "headroom: %s is a broken link to %s (%v); remove it or choose another --bin\n", in.bin, target, err)
+			// The stat error would name the target again (#194).
+			fmt.Fprintf(in.errw, "headroom: %s is a broken link to %s; remove it or choose another --bin\n", in.bin, target)
 			return 1
 		}
 		if same, _ := sameFile(in.bin, in.exe); !same {
-			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install it, run: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
+			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install the binary it links to, run it: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
 			return 1
 		}
 	}
@@ -173,7 +178,51 @@ func (in *installer) install(ctx context.Context) int {
 	fmt.Fprintf(in.out, "headroom daemon running under launchd (%s)\n  binary  %s\n  agent   %s\n  log     %s (headroom logs)\n",
 		agentLabel, bin, in.plistPath(), logPath)
 	in.installShims(bin)
+	in.removeOldCopy(bin)
+	in.notePath(filepath.Dir(bin))
 	return 0
+}
+
+// notePath says how to put dir on PATH, as the README does for zsh, if it
+// is not on install's own (#194).
+func (in *installer) notePath(dir string) {
+	if onPath(in.getenv("PATH"), dir) {
+		return
+	}
+	entry := dir
+	if rel, err := filepath.Rel(in.home, dir); err == nil && filepath.IsLocal(rel) {
+		entry = "$HOME/" + rel
+	}
+	fmt.Fprintf(in.out, "\n%s is not on your PATH. For zsh, run this and then open a new terminal:\n  echo 'export PATH=\"%s:$PATH\"' >> ~/.zprofile\n", dir, entry)
+}
+
+// defaultBin is where a plain install, without --bin, copies the binary.
+func defaultBin(home string) string { return filepath.Join(home, ".local", "bin", "headroom") }
+
+// removeOldCopy removes the copy a plain install left at the default path
+// once install --bin chose another: first on PATH, it would shadow bin
+// (#194). Anything else there stays, with a note.
+func (in *installer) removeOldCopy(bin string) {
+	old := defaultBin(in.home)
+	if !in.binGiven || old == bin {
+		return
+	}
+	fi, err := os.Lstat(old)
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err == nil && fi.Mode().IsRegular() && isHeadroom(old, old, in.exe, bin) {
+		if same, _ := sameFile(old, bin); same {
+			return
+		}
+		if err := os.Remove(old); err != nil {
+			fmt.Fprintf(in.errw, "headroom: removing the old copy %s: %v; it may shadow %s on PATH\n", old, err, bin)
+			return
+		}
+		fmt.Fprintf(in.out, "removed: old copy %s (it would shadow %s on PATH)\n", old, bin)
+		return
+	}
+	fmt.Fprintf(in.errw, "headroom: %s is not a copy headroom install made: left as it is; it may shadow %s on PATH\n", old, bin)
 }
 
 // orcaAgents are the agent CLIs whose Orca launch command install prints.
@@ -301,6 +350,14 @@ func (in *installer) uninstall(ctx context.Context) int {
 			gone = append(gone, p)
 		}
 	}
+	cfgDir, cfgErr := config.Dir(in.getenv)
+	lock := in.socket + ".lock"
+	if in.socket != "" {
+		// Ours is unloaded, so nothing of ours can be refused again; the
+		// marker goes, held lock or not (#194).
+		_ = os.Remove(lock + ".reported")
+		removeLock(lock, cfgDir)
+	}
 	fmt.Fprintln(in.out, "headroom daemon removed from launchd.")
 	if len(gone) > 0 || len(shims) > 0 {
 		fmt.Fprintln(in.out, "removed:")
@@ -320,14 +377,40 @@ func (in *installer) uninstall(ctx context.Context) int {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
 	}
 	if len(brewShims) > 0 {
-		fmt.Fprintf(in.out, "  shims    %s (%s), which lead to another headroom, such as Homebrew's\n", in.shimDir, strings.Join(brewShims, ", "))
+		whose := "another headroom's"
+		if brewPlist(in.home) != "" {
+			whose = "Homebrew's"
+		}
+		fmt.Fprintf(in.out, "  shims    %s (%s), %s\n", in.shimDir, strings.Join(brewShims, ", "), whose)
 	}
-	if dir, err := config.Dir(in.getenv); err == nil {
-		fmt.Fprintf(in.out, "  config   %s\n  samples  %s\n", dir, filepath.Join(dir, "samples"))
+	// The lock and its marker alone are not config worth listing (#194).
+	if entries, err := os.ReadDir(cfgDir); cfgErr == nil && err == nil &&
+		slices.ContainsFunc(entries, func(e fs.DirEntry) bool {
+			p := filepath.Join(cfgDir, e.Name())
+			return p != lock && p != lock+".reported"
+		}) {
+		fmt.Fprintf(in.out, "  config   %s\n  samples  %s\n", cfgDir, filepath.Join(cfgDir, "samples"))
 	}
 	dir, _, _ := logPaths(in.home)
 	fmt.Fprintf(in.out, "  logs     %s\n", dir)
 	return 0
+}
+
+// removeLock removes the daemon's lock file at path unless a daemon holds
+// it, as Homebrew's does in the both state, then dir if that was its last
+// entry (#194).
+func removeLock(path, dir string) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return
+	}
+	if err := os.Remove(path); err == nil && filepath.Dir(path) == filepath.Clean(dir) {
+		_ = os.Remove(dir) // only if empty
+	}
 }
 
 func (in *installer) fail(err error) int {
@@ -460,7 +543,7 @@ func newInstaller(e Env, bin string) (*installer, error) {
 	}
 	binGiven := bin != ""
 	if !binGiven {
-		bin = filepath.Join(home, ".local", "bin", "headroom")
+		bin = defaultBin(home)
 	}
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {
@@ -468,7 +551,8 @@ func newInstaller(e Env, bin string) (*installer, error) {
 	}
 	return &installer{
 		home: home, exe: exe, bin: bin, binGiven: binGiven,
-		agent: launchd.Agent{Label: agentLabel, UID: os.Getuid(), Run: launchd.Exec{}},
+		agent:  launchd.Agent{Label: agentLabel, UID: os.Getuid(), Run: launchd.Exec{}},
+		socket: cfg.Socket,
 		ping: func(ctx context.Context) (int, error) {
 			return client.Ping(ctx, cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
 		},

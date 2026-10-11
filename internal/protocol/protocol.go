@@ -200,7 +200,9 @@ type Snapshot struct {
 	Docker *Docker `json:"docker,omitempty"`
 	Tart   *Tart   `json:"tart,omitempty"`
 	// Podman is absent while no Podman machine runs.
-	Podman   *Podman   `json:"podman,omitempty"`
+	Podman *Podman `json:"podman,omitempty"`
+	// VMs is absent while every VM process has a known owner.
+	VMs      *VMs      `json:"vms,omitempty"`
 	Orca     *Orca     `json:"orca,omitempty"`
 	LMStudio *LMStudio `json:"lmstudio,omitempty"`
 	Ollama   *Ollama   `json:"ollama,omitempty"`
@@ -313,7 +315,8 @@ type Budget struct {
 	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
 	// Components are docker, tart, podman (while a Podman machine runs),
-	// lmstudio, ollama and host_baseline, in that order.
+	// other_vms (while a VM no known owner claims runs), lmstudio, ollama and
+	// host_baseline, in that order.
 	Components []BudgetComponent `json:"components"`
 	// Unknown names sources with no reading yet. They count as 0, so headroom
 	// is then an upper bound.
@@ -469,6 +472,21 @@ type Podman struct {
 type PodmanVM struct {
 	Machine string `json:"machine"`
 	PID     int    `json:"pid"`
+	// FootprintBytes is what the VM process costs the host (phys_footprint).
+	FootprintBytes uint64 `json:"footprint_bytes"`
+}
+
+// VMs is the VM processes no known owner (Docker Desktop, Tart, Podman)
+// claims, read from the VM process listing (internal/vmproc).
+type VMs struct {
+	Other []OtherVM `json:"other"`
+}
+
+// OtherVM is one VM process no known owner claims.
+type OtherVM struct {
+	PID int `json:"pid"`
+	// Name is the process's command name.
+	Name string `json:"name"`
 	// FootprintBytes is what the VM process costs the host (phys_footprint).
 	FootprintBytes uint64 `json:"footprint_bytes"`
 }

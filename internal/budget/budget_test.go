@@ -399,3 +399,52 @@ func TestPodmanWithNoReadingYetIsUnknown(t *testing.T) {
 		t.Errorf("stale = %v, want podman", b.Stale)
 	}
 }
+
+func TestOtherVMsAreReservedAndNotUnaccounted(t *testing.T) {
+	// Docker's, Tart's and Podman's VMs are in their own sections; only the
+	// VMs none of them owns are in vms.other, so each is counted once.
+	s := busyMac()
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "podman-machine-default", PID: 9012, FootprintBytes: 3 * gib}}}
+	s.VMs = &protocol.VMs{Other: []protocol.OtherVM{
+		{PID: 4242, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 1 * gib},
+		{PID: 4243, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 2 * gib},
+	}}
+	b := budget.Compute(s, budget.Params{})
+	if c := component(t, b, "other_vms"); c.ReservedBytes != 3*gib || !usedEq(c.UsedBytes, u64(3*gib)) {
+		t.Errorf("other_vms = %d used %v, want 3 GiB used 3 GiB", c.ReservedBytes, c.UsedBytes)
+	}
+	// 40 − 1 + 4 − (6 docker + 5 tart + 3 podman + 3 other + 13 lmstudio + 2 ollama)
+	if b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(11*gib) {
+		t.Errorf("unaccounted = %v, want 11 GiB", b.UnaccountedBytes)
+	}
+	names := []string{}
+	for _, c := range b.Components {
+		names = append(names, c.Name)
+	}
+	if want := []string{"docker", "tart", "podman", "other_vms", "lmstudio", "ollama", "host_baseline"}; !slices.Equal(names, want) {
+		t.Errorf("components = %v, want %v", names, want)
+	}
+}
+
+func TestNoOtherVMLeavesTheBudgetKnown(t *testing.T) {
+	// The vms section is omitted while every VM has an owner: that is a
+	// reading, not a missing one.
+	s := busyMac()
+	s.Sources = map[string]protocol.SourceStatus{"vms": {At: time.Unix(1, 0)}}
+	b := budget.Compute(s, budget.Params{})
+	if b.Unknown != nil || b.UnaccountedBytes == nil || *b.UnaccountedBytes != int64(17*gib) {
+		t.Fatalf("unknown = %v unaccounted = %v, want none and 17 GiB", b.Unknown, b.UnaccountedBytes)
+	}
+}
+
+func TestOtherVMsWithNoReadingYetAreUnknown(t *testing.T) {
+	s := busyMac()
+	s.Sources = map[string]protocol.SourceStatus{"vms": {Err: "timed out", Stale: true}}
+	b := budget.Compute(s, budget.Params{})
+	if !slices.Contains(b.Unknown, "vms") || b.UnaccountedBytes != nil {
+		t.Fatalf("unknown = %v unaccounted = %v, want vms unknown and unaccounted unknown", b.Unknown, b.UnaccountedBytes)
+	}
+	if !slices.Contains(b.Stale, "vms") {
+		t.Errorf("stale = %v, want vms", b.Stale)
+	}
+}

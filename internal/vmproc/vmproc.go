@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Kind is who owns a VM process.
@@ -36,8 +37,9 @@ const (
 type VM struct {
 	PID  int
 	Kind Kind
-	// Name is the Tart VM name or the Podman machine name; empty for other
-	// kinds.
+	// Name is the Tart VM name, the Podman machine name, or for an unknown VM
+	// its command name (its executable's base name, printable characters
+	// only); empty for Docker's.
 	Name string
 	// FootprintBytes is phys_footprint: what the host pays, as Activity
 	// Monitor shows it.
@@ -158,13 +160,22 @@ func (f *Finder) identify(ctx context.Context, pid int) (identity, error) {
 	return id, nil
 }
 
-// classify reads lsof -Fn output: one "n<path>" line per open file.
+// classify reads lsof -Fn output: an "f<fd>" line, then an "n<path>" line,
+// per open file. The first txt file is the executable.
 func classify(lsof []byte) identity {
+	var fd, command string
 	sc := bufio.NewScanner(bytes.NewReader(lsof))
 	for sc.Scan() {
+		if f, ok := strings.CutPrefix(sc.Text(), "f"); ok {
+			fd = f
+			continue
+		}
 		p, ok := strings.CutPrefix(sc.Text(), "n")
 		if !ok {
 			continue
+		}
+		if fd == "txt" && command == "" {
+			command = printable(path.Base(p))
 		}
 		if strings.Contains(p, "/Docker.app/") || strings.Contains(p, "/com.docker.docker/") {
 			return identity{kind: Docker}
@@ -183,7 +194,18 @@ func classify(lsof []byte) identity {
 			}
 		}
 	}
-	return identity{kind: Unknown}
+	return identity{kind: Unknown, name: command}
+}
+
+// printable drops the characters a terminal would interpret, so a command
+// name is safe to show.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 func (f *Finder) footprint(ctx context.Context, pid int) (uint64, error) {

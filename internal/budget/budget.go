@@ -60,6 +60,13 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		b.Unknown = append(b.Unknown, "podman")
 		footprintsKnown = false
 	}
+	// Likewise the vms section is absent while every VM has an owner.
+	if s.VMs != nil {
+		add(otherVMs(s.VMs))
+	} else if st, ok := s.Sources["vms"]; ok && st.At.IsZero() {
+		b.Unknown = append(b.Unknown, "vms")
+		footprintsKnown = false
+	}
 	if s.LMStudio != nil {
 		add(lmstudio(s.LMStudio, p))
 	} else {
@@ -86,7 +93,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	b.Components = append(b.Components, base)
 	b.ReservedBytes += base.ReservedBytes
 
-	for _, name := range []string{"host", "docker", "tart", "podman", "lmstudio", "ollama"} {
+	for _, name := range []string{"host", "docker", "tart", "podman", "vms", "lmstudio", "ollama"} {
 		if s.Sources[name].Stale {
 			b.Stale = append(b.Stale, name)
 		}
@@ -134,6 +141,16 @@ func podman(p *protocol.Podman) protocol.BudgetComponent {
 		fp += vm.FootprintBytes
 	}
 	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}
+}
+
+// otherVMs reserves what the VMs no known owner claims cost the host now:
+// nothing tells how far they will grow. Owned VMs are never among them.
+func otherVMs(v *protocol.VMs) protocol.BudgetComponent {
+	var fp uint64
+	for _, vm := range v.Other {
+		fp += vm.FootprintBytes
+	}
+	return protocol.BudgetComponent{Name: "other_vms", ReservedBytes: fp, UsedBytes: &fp}
 }
 
 // docker reserves what the VM already holds or what its containers need plus

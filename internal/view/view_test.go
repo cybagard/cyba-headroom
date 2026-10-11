@@ -169,6 +169,15 @@ func TestReservedLineNamesPodmanBesideTart(t *testing.T) {
 	has(t, render(t, s, view.Options{})[1], "reserved: tart 8.0 · podman 1.0 · baseline 10.0")
 }
 
+func TestReservedLineNamesOtherVMsAfterPodman(t *testing.T) {
+	s := busy()
+	s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "podman-machine-default", PID: 30, FootprintBytes: gib}}}
+	s.VMs = &protocol.VMs{Other: []protocol.OtherVM{{PID: 40, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 2 * gib}}}
+	b := budget.Compute(s, budget.Params{HostBaselineBytes: 10 * gib})
+	s.Budget = &b
+	has(t, render(t, s, view.Options{})[1], "podman 1.0 · other_vms 2.0 · ")
+}
+
 func TestReservedLineNamesOllama(t *testing.T) {
 	s := busy()
 	s.Budget.Components = slices.Insert(s.Budget.Components, 3, protocol.BudgetComponent{Name: "ollama", ReservedBytes: 2 * gib})

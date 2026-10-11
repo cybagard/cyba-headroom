@@ -41,6 +41,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/source/orca"
 	"github.com/cybagard/cyba-headroom/internal/source/podman"
 	"github.com/cybagard/cyba-headroom/internal/source/tart"
+	vmsource "github.com/cybagard/cyba-headroom/internal/source/vms"
 	"github.com/cybagard/cyba-headroom/internal/units"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
@@ -228,8 +229,8 @@ func runDaemon(e Env) int {
 	if err != nil {
 		return fail(err)
 	}
-	// Collectors register here as they land (#49). Docker, Tart and
-	// Podman share one VM process listing per tick.
+	// Collectors register here as they land (#49). Docker, Tart, Podman
+	// and the VMs no owner claims share one VM process listing per tick.
 	vms := vmproc.NewShared(vmproc.New(vmproc.Host{}), time.Second, time.Now)
 	var tartCLI tart.CLI
 	if p := tart.Locate(cfg.Tart.Path, e.Getenv); p != "" {
@@ -256,6 +257,7 @@ func runDaemon(e Env) int {
 		dockerSrc,
 		tart.New(tartCLI, vmproc.Host{}, vms, e.Getenv("HOME")),
 		podman.New(vms, log),
+		vmsource.New(vms),
 		orca.New(orcaCLI),
 		lmstudio.New(lmsCLI, vmproc.Host{}, e.Getenv("HOME")),
 		ollama.New(ollamaAPI, vmproc.Host{}, func() bool { return ollama.Installed(cfg.Ollama.Path, e.Getenv, ollama.Locations) }),

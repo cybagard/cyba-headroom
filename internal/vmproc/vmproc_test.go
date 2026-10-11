@@ -179,3 +179,24 @@ func TestPodmanVMIsNamedByItsMachine(t *testing.T) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
 }
+
+func TestUnknownVMIsNamedByItsCommand(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{1234, 5678, 4242}
+	// lsof-unknown.txt is the recorded lsof-tart.txt capture with the Tart
+	// VM's files moved to a folder no owner claims.
+	sys.files["lsof 4242"] = "lsof-unknown.txt"
+	sys.files["footprint 4242"] = "footprint.txt"
+	got, err := vmproc.New(sys).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{
+		{PID: 1234, Kind: vmproc.Docker, FootprintBytes: 1709280520},
+		{PID: 5678, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 1709280520},
+		{PID: 4242, Kind: vmproc.Unknown, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 1709280520},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}

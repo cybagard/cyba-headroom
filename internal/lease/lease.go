@@ -149,7 +149,7 @@ type waiter struct {
 
 // hold is what w holds: its cost, less what the leases it would take over
 // reserve while they are open, which every other call counts already. Once
-// one ends, its part is w's to hold again (review round 2 R2-1).
+// one ends, its part is w's to hold again (#72).
 func (b *Book) hold(w *waiter) uint64 {
 	var taken uint64
 	for _, e := range w.takes {
@@ -542,8 +542,8 @@ func (b *Book) ticket(id string) *waiter {
 // what waiting may fix keeps its ticket, w, or joins the back with a new
 // one (its ticket unknown: the daemon restarted, or it went unasked for
 // ticketTTL), and holds what this ask says it costs, less what the leases
-// it would take over, taken, reserve while open (Book.hold, review round 1
-// F1). Allowed, or denied for anything else, its ticket ends.
+// it would take over, taken, reserve while open (Book.hold).
+// Allowed, or denied for anything else, its ticket ends.
 func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken []*entry, now time.Time) {
 	if d.Allow || !d.Retry || !r.Wait || r.Worktree == "" {
 		if w != nil {

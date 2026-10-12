@@ -36,6 +36,20 @@ type Source struct {
 	// configs caches tart get per running VM: a running VM's config cannot
 	// change. Collect is never called concurrently (daemon.Tick).
 	configs map[string]vmConfig
+	// started caches each tart run's launch cwd and resolved --dir paths:
+	// they are what it was started with, while its launcher's cwd moves on
+	// (#277). An entry lives while its run pid runs its VM.
+	started map[runKey]started
+}
+
+type runKey struct {
+	name string
+	pid  int
+}
+
+type started struct {
+	cwd  string
+	dirs []string
 }
 
 type vmConfig struct {
@@ -47,7 +61,7 @@ type vmConfig struct {
 // New returns a source. A nil cli means tart is not installed; home expands
 // ~ in --dir shares.
 func New(cli CLI, procs Procs, vms vmproc.Lister, home string) *Source {
-	return &Source{cli: cli, procs: procs, vms: vms, home: home, configs: map[string]vmConfig{}}
+	return &Source{cli: cli, procs: procs, vms: vms, home: home, configs: map[string]vmConfig{}, started: map[runKey]started{}}
 }
 
 // Name implements daemon.Source.
@@ -140,6 +154,7 @@ func (s *Source) launches(ctx context.Context, running map[string]bool) (map[str
 		return nil, fmt.Errorf("tart: listing processes: %w", err)
 	}
 	out := map[string]launch{}
+	seen := map[runKey]bool{}
 	for _, p := range procs {
 		if len(p.Args) < 2 || p.Args[1] != "run" {
 			continue
@@ -148,18 +163,40 @@ func (s *Source) launches(ctx context.Context, running map[string]bool) (map[str
 		if !running[name] {
 			continue
 		}
-		l := launch{pid: p.PID, pids: append(out[name].pids, p.PID)}
-		if p.PPID > 1 { // reparented to launchd: the launcher is gone
-			l.cwd, _ = s.procs.Cwd(ctx, p.PPID)
-		}
-		for _, d := range dirs {
-			if hp := hostPath(d, s.home, l.cwd); hp != "" {
-				l.dirs = append(l.dirs, hp)
+		k := runKey{name, p.PID}
+		seen[k] = true
+		st, ok := s.started[k]
+		if !ok {
+			st, ok = s.start(ctx, p.PPID, dirs)
+			if ok {
+				s.started[k] = st
 			}
 		}
-		out[name] = l
+		out[name] = launch{pid: p.PID, pids: append(out[name].pids, p.PID), cwd: st.cwd, dirs: st.dirs}
+	}
+	for k := range s.started {
+		if !seen[k] {
+			delete(s.started, k) // exited, or its VM stopped
+		}
 	}
 	return out, nil
+}
+
+// start reads where a tart run was launched and resolves its --dir values.
+// ok is false when the launcher's cwd could not be read, so the next reading
+// tries again.
+func (s *Source) start(ctx context.Context, ppid int, dirs []string) (st started, ok bool) {
+	ok = true
+	if ppid > 1 { // reparented to launchd: the launcher is gone
+		cwd, err := s.procs.Cwd(ctx, ppid)
+		st.cwd, ok = cwd, err == nil
+	}
+	for _, d := range dirs {
+		if hp := hostPath(d, s.home, st.cwd); hp != "" {
+			st.dirs = append(st.dirs, hp)
+		}
+	}
+	return st, ok
 }
 
 // valueFlags are the tart run options that take a value (tart 2.40 --help),

@@ -194,11 +194,51 @@ func TestLaunchDetailsFromTheTartRunProcess(t *testing.T) {
 				},
 				cwds: map[int]string{500: "/Users/dev/wt/fix-login", 1: "/"},
 			}
-			vm := collect(t, tart.New(runningCLI(), procs, fakeVMs{}, home)).VMs[0]
+			src := tart.New(runningCLI(), procs, fakeVMs{}, home)
+			vm := collect(t, src).VMs[0]
 			if vm.RunPID != 900 || vm.LaunchCwd != tc.wantCwd || !slices.Equal(vm.SharedDirs, tc.wantDirs) {
 				t.Fatalf("got pid=%d cwd=%q dirs=%v, want 900 %q %v", vm.RunPID, vm.LaunchCwd, vm.SharedDirs, tc.wantCwd, tc.wantDirs)
 			}
+			// The launcher moves on (cd, or its pid's next command): what
+			// tart run was started with stays (#277).
+			procs.cwds[500] = "/Users/dev/elsewhere"
+			vm = collect(t, src).VMs[0]
+			if vm.RunPID != 900 || vm.LaunchCwd != tc.wantCwd || !slices.Equal(vm.SharedDirs, tc.wantDirs) {
+				t.Fatalf("after the launcher's cwd changed: got pid=%d cwd=%q dirs=%v, want 900 %q %v", vm.RunPID, vm.LaunchCwd, vm.SharedDirs, tc.wantCwd, tc.wantDirs)
+			}
 		})
+	}
+}
+
+// A new tart run of the VM is a new launch: its details are read afresh.
+func TestLaunchDetailsAreReadAgainForANewRunPID(t *testing.T) {
+	run := func(pid int) vmproc.Process {
+		return vmproc.Process{PID: pid, PPID: 500, Comm: "tart", Args: []string{tartBin, "run", "--dir", "src", "headroom-mac"}}
+	}
+	procs := &fakeProcs{procs: []vmproc.Process{run(900)}, cwds: map[int]string{500: "/Users/dev/wt/a"}}
+	src := tart.New(runningCLI(), procs, fakeVMs{}, home)
+	collect(t, src)
+	procs.procs, procs.cwds[500] = []vmproc.Process{run(902)}, "/Users/dev/wt/b"
+	vm := collect(t, src).VMs[0]
+	if vm.RunPID != 902 || vm.LaunchCwd != "/Users/dev/wt/b" || !slices.Equal(vm.SharedDirs, []string{"/Users/dev/wt/b/src"}) {
+		t.Fatalf("got pid=%d cwd=%q dirs=%v, want 902 /Users/dev/wt/b [/Users/dev/wt/b/src]", vm.RunPID, vm.LaunchCwd, vm.SharedDirs)
+	}
+}
+
+// A VM that stops and starts again under the same run pid is not served
+// from its old launch.
+func TestLaunchDetailsAreDroppedWhenTheVMStops(t *testing.T) {
+	cli := runningCLI()
+	procs := &fakeProcs{procs: []vmproc.Process{
+		{PID: 900, PPID: 500, Comm: "tart", Args: []string{tartBin, "run", "headroom-mac"}},
+	}, cwds: map[int]string{500: "/Users/dev/wt/a"}}
+	src := tart.New(cli, procs, fakeVMs{}, home)
+	collect(t, src)
+	cli["list --format json"] = "list-stopped.json"
+	collect(t, src)
+	cli["list --format json"], procs.cwds[500] = "list.json", "/Users/dev/wt/b"
+	if vm := collect(t, src).VMs[0]; vm.LaunchCwd != "/Users/dev/wt/b" {
+		t.Fatalf("cwd = %q, want /Users/dev/wt/b, read again after the VM stopped", vm.LaunchCwd)
 	}
 }
 

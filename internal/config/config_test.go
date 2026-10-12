@@ -204,6 +204,16 @@ func TestBudgetParams(t *testing.T) {
 	}
 }
 
+// The budget reserves a Tart VM of unknown size as the shim charges an
+// unknown tart run: [policy] default_tart_gb (#277).
+func TestBudgetParamsCarryTheDefaultTartCost(t *testing.T) {
+	c := Defaults("/x")
+	c.Policy.DefaultTartGB = 6
+	if p := c.BudgetParams(); p.DefaultTartBytes != 6<<30 || p.DockerOverheadBytes != c.Budget.Params().DockerOverheadBytes {
+		t.Fatalf("params = %+v, want default tart 6 GiB and the [budget] values", p)
+	}
+}
+
 func TestSamplesSettings(t *testing.T) {
 	d := Defaults("/x")
 	if !d.Samples.Enabled || d.Samples.Retention.Duration != 30*24*time.Hour || d.SamplesDir() != "/x/samples" {

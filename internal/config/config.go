@@ -182,6 +182,14 @@ func (b Budget) Params() budget.Params {
 	}
 }
 
+// BudgetParams returns the budget model's inputs: [budget], plus the
+// default Tart cost from [policy] for a VM of unknown size (#277).
+func (c Config) BudgetParams() budget.Params {
+	p := c.Budget.Params()
+	p.DefaultTartBytes = GiB(c.Policy.DefaultTartGB)
+	return p
+}
+
 // MaxBudgetGB bounds budget sizes well above any Mac's memory, so their sum
 // cannot overflow when converted to bytes.
 const MaxBudgetGB = 1024

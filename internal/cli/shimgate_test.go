@@ -1074,14 +1074,37 @@ func TestAnUnreadableDockerConfigIsTheDefaultContext(t *testing.T) {
 	}
 }
 
-// Podman's engine is the first of -c, --url, CONTAINER_CONNECTION,
-// CONTAINER_HOST and the default connection, as podman 6.1.3 picks it; a
-// name is its URI in the connections file, and one that file does not have
-// is unknown.
+// Podman connections for the tests: remote-a and default on another
+// machine, podman-machine-default on this Mac's Podman machine.
+const (
+	podmanFar     = "ssh://dev@198.51.100.7:22/run/podman/podman.sock"
+	podmanMachine = "ssh://core@127.0.0.1:50123/run/user/501/podman/podman.sock"
+)
+
+// podmanConnections is a podman-connections.json with those connections,
+// and def as its default.
+func podmanConnections(def string) string {
+	return `{"Connection":{"Default":"` + def + `","Connections":{` +
+		`"remote-a":{"URI":"` + podmanFar + `","Identity":"/Users/dev/.ssh/id"},` +
+		`"default":{"URI":"` + podmanFar + `"},` +
+		`"podman-machine-default":{"URI":"` + podmanMachine + `","IsMachine":true}}}}`
+}
+
+// A malformed connections file, and one with no default but a far
+// connection named "".
+const (
+	podmanMalformed = `{"Connection":`
+	podmanNameless  = `{"Connection":{"Default":"","Connections":{"":{"URI":"` + podmanFar + `"}}}}`
+)
+
+// Podman's engine is the first of -c, --url, --context (unless default),
+// CONTAINER_CONNECTION, CONTAINER_HOST and the default connection, as
+// podman 6.1.3 picks it; a name is its URI in the connections file, and
+// one that file does not have is unknown.
 func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 	const (
-		remote  = "ssh://dev@198.51.100.7:22/run/podman/podman.sock"
-		machine = "ssh://core@127.0.0.1:50123/run/user/501/podman/podman.sock"
+		remote  = podmanFar
+		machine = podmanMachine
 		url     = "tcp://198.51.100.8:8080"
 		host    = "tcp://198.51.100.9:8080"
 	)
@@ -1096,11 +1119,7 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		body := `{"Connection":{"Default":"` + def + `","Connections":{` +
-			`"remote-a":{"URI":"` + remote + `","Identity":"/Users/dev/.ssh/id"},` +
-			`"default":{"URI":"` + remote + `"},` +
-			`"podman-machine-default":{"URI":"` + machine + `","IsMachine":true}}}}`
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(podmanConnections(def)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1152,12 +1171,12 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 	write(filepath.Join(xdg, "containers", "podman-connections.json"), "remote-a")
 	write(filepath.Join(home, ".config", "containers", "podman-connections.json"), "podman-machine-default")
 	bad := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(bad, []byte(`{"Connection":`), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte(podmanMalformed), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// No default is no connection: podman never looks one up named "".
 	nameless := filepath.Join(dir, "nameless.json")
-	if err := os.WriteFile(nameless, []byte(`{"Connection":{"Default":"","Connections":{"":{"URI":"`+remote+`"}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(nameless, []byte(podmanNameless), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -2244,85 +2263,83 @@ func TestABareHostNameIsTCP(t *testing.T) {
 	}
 }
 
-// Podman's engine is the one podman picks (#71): a remote connection,
-// named with -c, CONTAINER_CONNECTION or as the default, is not asked
-// about; the machine's, or one podman cannot find, is.
-func TestARemotePodmanConnectionIsNotGated(t *testing.T) {
+// Podman's engine is the one podman picks (#71): a call to a remote
+// connection, named with -c, CONTAINER_CONNECTION or as the default, is
+// not asked about; one to the machine's, or to one podman cannot find, is.
+func TestPodmanCallsAreGatedByTheEnginePodmanPicks(t *testing.T) {
 	const (
-		far     = "ssh://dev@198.51.100.7:22/run/podman/podman.sock"
+		far     = podmanFar
 		near    = "tcp://127.0.0.1:7"
-		machine = "ssh://core@127.0.0.1:50123/run/user/501/podman/podman.sock"
+		machine = podmanMachine
+	)
+	// The connections file a call finds: PODMAN_CONNECTIONS_CONF's (the
+	// default), XDG_CONFIG_HOME's, or PODMAN_CONNECTIONS_CONF naming one
+	// that is missing, malformed or has no default.
+	type connFile int
+	const (
+		confFile connFile = iota
+		xdgFile
+		missingFile
+		malformedFile
+		namelessFile
 	)
 	for name, c := range map[string]struct {
 		args  []string
 		env   []string
+		def   string // the file's default connection
+		file  connFile
 		gated bool
 	}{
-		"-c remote-a":                          {[]string{"-c", "remote-a"}, nil, false},
-		"--connection remote-a":                {[]string{"--connection", "remote-a"}, nil, false},
-		"CONTAINER_CONNECTION":                 {nil, []string{"CONTAINER_CONNECTION=remote-a"}, false},
-		"the default connection":               {nil, []string{"DEFAULT=remote-a"}, false},
-		"the machine's default":                {nil, []string{"DEFAULT=podman-machine-default"}, true},
-		"-c the machine":                       {[]string{"-c", "podman-machine-default"}, nil, true},
-		"-c remote-a before a local --url":     {[]string{"-c", "remote-a", "--url", near}, nil, false},
-		"-c remote-a after a local --url":      {[]string{"--url", near, "-c", "remote-a"}, nil, false},
-		"-c the machine before a far --url":    {[]string{"-c", "podman-machine-default", "--url", far}, nil, true},
-		"-c the machine after a far --url":     {[]string{"--url", far, "-c", "podman-machine-default"}, nil, true},
-		"a far --url over the machine's":       {[]string{"--url", far}, []string{"CONTAINER_CONNECTION=podman-machine-default"}, false},
-		"CONTAINER_CONNECTION over the host":   {nil, []string{"CONTAINER_CONNECTION=podman-machine-default", "CONTAINER_HOST=" + far}, true},
-		"-c over CONTAINER_HOST":               {[]string{"-c", "podman-machine-default"}, []string{"CONTAINER_HOST=" + far}, true},
-		"a far CONTAINER_HOST":                 {nil, []string{"CONTAINER_HOST=" + far}, false},
-		"an unknown -c":                        {[]string{"-c", "ghost"}, []string{"CONTAINER_HOST=" + far}, true},
-		"an unknown CONTAINER_CONNECTION":      {nil, []string{"CONTAINER_CONNECTION=ghost", "CONTAINER_HOST=" + far}, true},
-		"a missing file":                       {[]string{"-c", "remote-a"}, []string{"FILE=none", "CONTAINER_HOST=" + far}, true},
-		"a malformed file":                     {[]string{"-c", "remote-a"}, []string{"FILE=bad", "CONTAINER_HOST=" + far}, true},
-		"XDG_CONFIG_HOME's file":               {nil, []string{"FILE=xdg", "DEFAULT=remote-a"}, false},
-		"no default, a far \"\" connection":    {nil, []string{"FILE=nameless"}, true},
-		"an empty --url, a far CONTAINER_HOST": {[]string{"--url="}, []string{"CONTAINER_HOST=" + far}, false},
+		"-c remote-a":                          {args: []string{"-c", "remote-a"}, gated: false},
+		"--connection remote-a":                {args: []string{"--connection", "remote-a"}, gated: false},
+		"CONTAINER_CONNECTION":                 {env: []string{"CONTAINER_CONNECTION=remote-a"}, gated: false},
+		"the default connection":               {def: "remote-a", gated: false},
+		"the machine's default":                {def: "podman-machine-default", gated: true},
+		"-c the machine":                       {args: []string{"-c", "podman-machine-default"}, gated: true},
+		"-c remote-a before a local --url":     {args: []string{"-c", "remote-a", "--url", near}, gated: false},
+		"-c remote-a after a local --url":      {args: []string{"--url", near, "-c", "remote-a"}, gated: false},
+		"-c the machine before a far --url":    {args: []string{"-c", "podman-machine-default", "--url", far}, gated: true},
+		"-c the machine after a far --url":     {args: []string{"--url", far, "-c", "podman-machine-default"}, gated: true},
+		"a far --url over the machine's":       {args: []string{"--url", far}, env: []string{"CONTAINER_CONNECTION=podman-machine-default"}, gated: false},
+		"CONTAINER_CONNECTION over the host":   {env: []string{"CONTAINER_CONNECTION=podman-machine-default", "CONTAINER_HOST=" + far}, gated: true},
+		"-c over CONTAINER_HOST":               {args: []string{"-c", "podman-machine-default"}, env: []string{"CONTAINER_HOST=" + far}, gated: true},
+		"a far CONTAINER_HOST":                 {env: []string{"CONTAINER_HOST=" + far}, gated: false},
+		"an unknown -c":                        {args: []string{"-c", "ghost"}, env: []string{"CONTAINER_HOST=" + far}, gated: true},
+		"an unknown CONTAINER_CONNECTION":      {env: []string{"CONTAINER_CONNECTION=ghost", "CONTAINER_HOST=" + far}, gated: true},
+		"a missing file":                       {args: []string{"-c", "remote-a"}, env: []string{"CONTAINER_HOST=" + far}, file: missingFile, gated: true},
+		"a malformed file":                     {args: []string{"-c", "remote-a"}, env: []string{"CONTAINER_HOST=" + far}, file: malformedFile, gated: true},
+		"XDG_CONFIG_HOME's file":               {def: "remote-a", file: xdgFile, gated: false},
+		"no default, a far \"\" connection":    {file: namelessFile, gated: true},
+		"an empty --url, a far CONTAINER_HOST": {args: []string{"--url="}, env: []string{"CONTAINER_HOST=" + far}, gated: false},
 		// Plan amendment 1's measured table.
-		"an empty --url, the machine's CONTAINER_HOST": {[]string{"--url="}, []string{"CONTAINER_CONNECTION=remote-a", "CONTAINER_HOST=" + machine}, true},
-		"an empty --url, no CONTAINER_HOST":            {[]string{"--url="}, []string{"CONTAINER_CONNECTION=remote-a"}, true},
-		"the machine's --url after --context":          {[]string{"--context", "remote-a", "--url", machine}, nil, true},
-		"the machine's --url before --context":         {[]string{"--url", machine, "--context", "remote-a"}, nil, true},
-		"--context default":                            {[]string{"--context", "default"}, []string{"DEFAULT=podman-machine-default"}, true},
-		"--context default, CONTAINER_CONNECTION":      {[]string{"--context", "default"}, []string{"CONTAINER_CONNECTION=remote-a", "DEFAULT=podman-machine-default"}, false},
-		"--context over the machine's CONTAINER_HOST":  {[]string{"--context", "remote-a"}, []string{"CONTAINER_HOST=" + machine}, false},
-		"--context over CONTAINER_CONNECTION":          {[]string{"--context", "remote-a"}, []string{"CONTAINER_CONNECTION=podman-machine-default"}, false},
-		"-c remote-a after the machine's -H":           {[]string{"-H", machine, "-c", "remote-a"}, nil, false},
+		"an empty --url, the machine's CONTAINER_HOST": {args: []string{"--url="}, env: []string{"CONTAINER_CONNECTION=remote-a", "CONTAINER_HOST=" + machine}, gated: true},
+		"an empty --url, no CONTAINER_HOST":            {args: []string{"--url="}, env: []string{"CONTAINER_CONNECTION=remote-a"}, gated: true},
+		"the machine's --url after --context":          {args: []string{"--context", "remote-a", "--url", machine}, gated: true},
+		"the machine's --url before --context":         {args: []string{"--url", machine, "--context", "remote-a"}, gated: true},
+		"--context default":                            {args: []string{"--context", "default"}, def: "podman-machine-default", gated: true},
+		"--context default, CONTAINER_CONNECTION":      {args: []string{"--context", "default"}, env: []string{"CONTAINER_CONNECTION=remote-a"}, def: "podman-machine-default", gated: false},
+		"--context over the machine's CONTAINER_HOST":  {args: []string{"--context", "remote-a"}, env: []string{"CONTAINER_HOST=" + machine}, gated: false},
+		"--context over CONTAINER_CONNECTION":          {args: []string{"--context", "remote-a"}, env: []string{"CONTAINER_CONNECTION=podman-machine-default"}, gated: false},
+		"-c remote-a after the machine's -H":           {args: []string{"-H", machine, "-c", "remote-a"}, gated: false},
 	} {
 		r := newShimRig(t)
 		r.ask = allow
-		def, file := "", "conf"
-		for _, kv := range c.env {
-			if v, ok := strings.CutPrefix(kv, "DEFAULT="); ok {
-				def = v
-			} else if v, ok := strings.CutPrefix(kv, "FILE="); ok {
-				file = v
-			} else {
-				r.env = append(r.env, kv)
-			}
-		}
-		conf := filepath.Join(r.dir, "podman-connections.json")
-		switch file {
-		case "conf":
+		r.env = append(r.env, c.env...)
+		conf, body := filepath.Join(r.dir, "podman-connections.json"), podmanConnections(c.def)
+		switch c.file {
+		case confFile:
 			r.env = append(r.env, "PODMAN_CONNECTIONS_CONF="+conf)
-		case "xdg":
+		case xdgFile:
 			conf = filepath.Join(r.dir, "xdg", "containers", "podman-connections.json")
 			r.env = append(r.env, "XDG_CONFIG_HOME="+filepath.Join(r.dir, "xdg"))
-		case "none":
+		case missingFile:
 			r.env = append(r.env, "PODMAN_CONNECTIONS_CONF="+filepath.Join(r.dir, "none.json"))
-		case "bad", "nameless":
+		case malformedFile:
 			r.env = append(r.env, "PODMAN_CONNECTIONS_CONF="+conf)
-		}
-		body := `{"Connection":{"Default":"` + def + `","Connections":{` +
-			`"remote-a":{"URI":"` + far + `"},` +
-			`"default":{"URI":"` + far + `"},` +
-			`"podman-machine-default":{"URI":"` + machine + `","IsMachine":true}}}}`
-		switch file {
-		case "bad":
-			body = `{"Connection":`
-		case "nameless":
-			body = `{"Connection":{"Default":"","Connections":{"":{"URI":"` + far + `"}}}}`
+			body = podmanMalformed
+		case namelessFile:
+			r.env = append(r.env, "PODMAN_CONNECTIONS_CONF="+conf)
+			body = podmanNameless
 		}
 		if err := os.MkdirAll(filepath.Dir(conf), 0o700); err != nil {
 			t.Fatal(err)

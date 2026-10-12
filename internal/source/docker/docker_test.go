@@ -271,14 +271,26 @@ func TestContainerStatsErrorKeepsTheContainer(t *testing.T) {
 	}
 }
 
+// withHealthy is testdata/containers.json with a second container,
+// healthy1, whose stats answer: a failure of the fixture's is partial.
+func withHealthy(t *testing.T) string {
+	t.Helper()
+	list, err := os.ReadFile("testdata/containers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSuffix(strings.TrimSpace(string(list)), "]") + `,{"Id":"healthy1","Names":["/healthy"],"Image":"alpine"}]`
+}
+
 // A container whose stats fail keeps its previous memory, tick after
 // tick, until a stats call answers again (#267). Its CPU is unknown.
 func TestContainerStatsErrorKeepsThePreviousReading(t *testing.T) {
 	stats := "/containers/" + fixtureID + "/stats?stream=false&one-shot=true"
 	sock, set := engine(t, map[string]string{
 		"/info":            "info.json",
-		"/containers/json": "containers.json",
+		"/containers/json": withHealthy(t),
 		stats:              "stats.json",
+		"/containers/healthy1/stats?stream=false&one-shot=true": cpuStats(1, 1),
 	})
 	src := docker.New(sock, fakeVMs{})
 	if c := collect(t, src).Containers[0]; c.MemoryBytes != 69210112 {
@@ -287,16 +299,38 @@ func TestContainerStatsErrorKeepsThePreviousReading(t *testing.T) {
 	set(stats, "!500")
 	for tick := 2; tick <= 3; tick++ {
 		d := collect(t, src)
-		if len(d.Containers) != 1 {
-			t.Fatalf("tick %d: containers = %+v, want the one", tick, d.Containers)
+		if len(d.Containers) != 2 {
+			t.Fatalf("tick %d: containers = %+v, want both", tick, d.Containers)
 		}
 		if c := d.Containers[0]; c.ID != fixtureID || c.MemoryBytes != 69210112 || c.CPUPercent != nil {
 			t.Fatalf("tick %d: container = %+v, want the first tick's memory and no CPU", tick, c)
+		}
+		if c := d.Containers[1]; c.ID != "healthy1" || c.MemoryBytes != 1048576 {
+			t.Fatalf("tick %d: healthy container = %+v", tick, c)
 		}
 	}
 	set(stats, cpuStats(1, 1))
 	if c := collect(t, src).Containers[0]; c.MemoryBytes != 1048576 {
 		t.Fatalf("stats back: container = %+v, want the new reading", c)
+	}
+}
+
+// An engine whose every stats call fails is likely broken itself: its
+// reading fails, so the source goes stale and says so (#267, review 1).
+func TestEveryStatsCallFailingIsAnError(t *testing.T) {
+	stats := "/containers/" + fixtureID + "/stats?stream=false&one-shot=true"
+	sock, set := engine(t, map[string]string{
+		"/info":            "info.json",
+		"/containers/json": withHealthy(t),
+		stats:              "stats.json",
+		"/containers/healthy1/stats?stream=false&one-shot=true": cpuStats(1, 1),
+	})
+	src := docker.New(sock, fakeVMs{})
+	collect(t, src)
+	set(stats, "!500")
+	set("/containers/healthy1/stats?stream=false&one-shot=true", "!500")
+	if _, err := src.Collect(context.Background()); err == nil {
+		t.Fatal("every stats call returned 500: want a Collect error")
 	}
 }
 
@@ -356,6 +390,7 @@ func TestPreviousReadingLeavesWithTheContainer(t *testing.T) {
 		"/info":            "info.json",
 		"/containers/json": "containers.json",
 		stats:              "stats.json",
+		"/containers/healthy1/stats?stream=false&one-shot=true": cpuStats(1, 1),
 	})
 	src := docker.New(sock, fakeVMs{})
 	collect(t, src)
@@ -363,11 +398,11 @@ func TestPreviousReadingLeavesWithTheContainer(t *testing.T) {
 	if d := collect(t, src); len(d.Containers) != 0 {
 		t.Fatalf("containers = %+v, want none", d.Containers)
 	}
-	set("/containers/json", "containers.json")
+	set("/containers/json", withHealthy(t))
 	set(stats, "!500")
 	d := collect(t, src)
-	if len(d.Containers) != 1 || d.Containers[0].MemoryBytes != 0 {
-		t.Fatalf("containers = %+v, want the one with no memory", d.Containers)
+	if len(d.Containers) != 2 || d.Containers[0].ID != fixtureID || d.Containers[0].MemoryBytes != 0 {
+		t.Fatalf("containers = %+v, want the fixture with no memory", d.Containers)
 	}
 }
 

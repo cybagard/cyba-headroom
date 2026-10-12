@@ -323,13 +323,17 @@ func (v apiVersion) kind() string {
 // whose stats Docker says do not exist has exited since the list call, and
 // is left out. One whose stats fail otherwise (a 5xx, a timeout, a 409 while
 // it restarts) still runs: it keeps its sample in prev, else it has no
-// memory, and its CPU is unknown (#267).
+// memory, and its CPU is unknown (#267). Only when every one fails is that
+// an error, as allStats says.
 func containers(ctx context.Context, c *http.Client, prev map[string]sample) ([]protocol.Container, map[string]sample, error) {
 	var list []apiContainer
 	if err := get(ctx, c, "/containers/json", &list); err != nil {
 		return nil, nil, err
 	}
-	stats, errs := allStats(ctx, c, list)
+	stats, errs, err := allStats(ctx, c, list)
+	if err != nil {
+		return nil, nil, err
+	}
 	out := []protocol.Container{}
 	next := make(map[string]sample, len(list))
 	for i, ct := range list {
@@ -362,8 +366,9 @@ func containers(ctx context.Context, c *http.Client, prev map[string]sample) ([]
 }
 
 // allStats fetches each container's one-shot stats concurrently. A container
-// whose stats fail gets nil, and its error.
-func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiStats, []error) {
+// whose stats fail gets nil, and its error; only when every one fails is
+// that an error, since the engine itself is then likely broken.
+func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiStats, []error, error) {
 	out := make([]*apiStats, len(list))
 	errs := make([]error, len(list))
 	sem := make(chan struct{}, statsWorkers)
@@ -379,7 +384,10 @@ func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiS
 		})
 	}
 	wg.Wait()
-	return out, errs
+	if len(list) > 0 && !slices.ContainsFunc(out, func(st *apiStats) bool { return st != nil }) {
+		return nil, nil, fmt.Errorf("docker: stats for all %d containers failed: %w", len(list), errs[0])
+	}
+	return out, errs, nil
 }
 
 // apiContainer is the part of GET /containers/json headroom reads.

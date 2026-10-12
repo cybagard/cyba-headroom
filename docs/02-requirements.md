@@ -45,7 +45,7 @@
 - [x] `BUDGET_WAIT=1` queues the request instead of denying, with a timeout (`policy.wait_timeout`), first come first (#72)
   - A queued call holds its cost, and its macOS slot, against every call after it, so a later call cannot take room an earlier one is due. A later call may go first only when there is room for both.
   - Holds count against headroom and macOS slots, never toward a worktree's cap. A deny they cause says so, and names `BUDGET_WAIT=1`.
-  - A call is allowed on its own ask. A call that stops asking loses its place within two of its slowest cycles from one ask to the next: a poll, the compose dry run and `policy.daemon_timeout` (10 s at the defaults). `headroom status --json` lists the queue
+  - A call is allowed on its own ask. A call that stops asking loses its place within two of its slowest cycles from one ask to the next: a poll, the compose dry run, the wait for its output (`ComposeWaitDelay`) and `policy.daemon_timeout` (10 s at the defaults). `headroom status --json` lists the queue.
 - [ ] Resolves `docker` aliased to `podman` to the real target
 
 **R6 — macOS VM slot gate.** Tart is gated on count first, memory second.

@@ -64,7 +64,7 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 		mu.Unlock()
 		if !ok {
 			msg := `{"message":"no route"}`
-			if strings.HasPrefix(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/json") {
+			if strings.HasPrefix(r.URL.Path, "/containers/") && r.URL.Path != "/containers/json" {
 				msg = `{"message":"No such container: x"}` // as Docker answers
 			}
 			http.Error(w, msg, http.StatusNotFound)
@@ -241,21 +241,85 @@ func TestAPIFailureIsAnError(t *testing.T) {
 	}
 }
 
-func TestContainerStatsErrorSkipsOnlyThatContainer(t *testing.T) {
+// A container whose stats fail with anything but Docker's 404 is still
+// running: it stays listed, attributed, with no memory when it has no
+// earlier reading (#267). The others are unaffected.
+func TestContainerStatsErrorKeepsTheContainer(t *testing.T) {
 	list, err := os.ReadFile("testdata/containers.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	withDying := `[{"Id":"dying1","Names":["/dying"],"Image":"alpine"},` + strings.TrimPrefix(strings.TrimSpace(string(list)), "[")
-	sock, _ := engine(t, map[string]string{
+	for _, status := range []string{"!500", "!409"} {
+		sock, _ := engine(t, map[string]string{
+			"/info":            "info.json",
+			"/containers/json": withDying,
+			"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
+			"/containers/dying1/stats?stream=false&one-shot=true":            status,
+		})
+		d := collect(t, docker.New(sock, fakeVMs{}))
+		if len(d.Containers) != 2 {
+			t.Fatalf("%s: containers = %+v, want both", status, d.Containers)
+		}
+		dying, healthy := d.Containers[0], d.Containers[1]
+		if dying.ID != "dying1" || dying.Name != "dying" || dying.MemoryBytes != 0 || dying.CPUPercent != nil {
+			t.Errorf("%s: failing container = %+v, want it listed with no memory", status, dying)
+		}
+		if healthy.ID != fixtureID || healthy.MemoryBytes != 69210112 {
+			t.Errorf("%s: healthy container = %+v", status, healthy)
+		}
+	}
+}
+
+// A container whose stats fail keeps its previous memory, tick after
+// tick, until a stats call answers again (#267). Its CPU is unknown.
+func TestContainerStatsErrorKeepsThePreviousReading(t *testing.T) {
+	stats := "/containers/" + fixtureID + "/stats?stream=false&one-shot=true"
+	sock, set := engine(t, map[string]string{
 		"/info":            "info.json",
-		"/containers/json": withDying,
-		"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
-		"/containers/dying1/stats?stream=false&one-shot=true":            "!409",
+		"/containers/json": "containers.json",
+		stats:              "stats.json",
 	})
-	d := collect(t, docker.New(sock, fakeVMs{}))
-	if len(d.Containers) != 1 || d.Containers[0].ID != fixtureID {
-		t.Fatalf("containers = %+v, want the healthy one", d.Containers)
+	src := docker.New(sock, fakeVMs{})
+	if c := collect(t, src).Containers[0]; c.MemoryBytes != 69210112 {
+		t.Fatalf("first tick = %+v", c)
+	}
+	set(stats, "!500")
+	for tick := 2; tick <= 3; tick++ {
+		d := collect(t, src)
+		if len(d.Containers) != 1 {
+			t.Fatalf("tick %d: containers = %+v, want the one", tick, d.Containers)
+		}
+		if c := d.Containers[0]; c.ID != fixtureID || c.MemoryBytes != 69210112 || c.CPUPercent != nil {
+			t.Fatalf("tick %d: container = %+v, want the first tick's memory and no CPU", tick, c)
+		}
+	}
+	set(stats, cpuStats(1, 1))
+	if c := collect(t, src).Containers[0]; c.MemoryBytes != 1048576 {
+		t.Fatalf("stats back: container = %+v, want the new reading", c)
+	}
+}
+
+// The previous readings are of the containers in the last list only: one
+// that left it and came back with failing stats has no memory (#267).
+func TestPreviousReadingLeavesWithTheContainer(t *testing.T) {
+	stats := "/containers/" + fixtureID + "/stats?stream=false&one-shot=true"
+	sock, set := engine(t, map[string]string{
+		"/info":            "info.json",
+		"/containers/json": "containers.json",
+		stats:              "stats.json",
+	})
+	src := docker.New(sock, fakeVMs{})
+	collect(t, src)
+	set("/containers/json", "[]")
+	if d := collect(t, src); len(d.Containers) != 0 {
+		t.Fatalf("containers = %+v, want none", d.Containers)
+	}
+	set("/containers/json", "containers.json")
+	set(stats, "!500")
+	d := collect(t, src)
+	if len(d.Containers) != 1 || d.Containers[0].MemoryBytes != 0 {
+		t.Fatalf("containers = %+v, want the one with no memory", d.Containers)
 	}
 }
 

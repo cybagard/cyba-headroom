@@ -596,9 +596,9 @@ type Engine struct {
 	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
 	// overhead plus the guest's high-water mark, which it does not give back.
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
-	// VMError is set when the VM process could not be read, or is not
-	// known for the engine's kind; VMRunning and VMFootprintBytes are then
-	// unknown, not zero.
+	// VMError is set when the VM process could not be read, is not known
+	// for the engine's kind, or is not found while containers run (#268);
+	// VMRunning and VMFootprintBytes are then unknown, not zero.
 	VMError    string      `json:"vm_error,omitempty"`
 	Containers []Container `json:"containers"`
 }

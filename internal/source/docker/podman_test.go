@@ -366,13 +366,23 @@ func TestPodmanCPUOnTheSecondReading(t *testing.T) {
 	}
 }
 
-// A Podman engine whose machine's VM is not listed has its VM not running;
-// one of no known machine has its VM unknown.
+// A Podman engine whose machine's VM is not listed has its VM not running
+// while no container runs, and unknown while one does (#268); one of no
+// known machine has its VM unknown.
 func TestPodmanEngineVMNotListedOrMachineUnknown(t *testing.T) {
-	sock := podmanEngine(t, `{}`)
-	got := found(t, fakeVMs{}, docker.Candidate{Socket: sock, Trusted: true, Machine: "podman-machine-default"})
+	idle, _ := engine(t, map[string]string{
+		"/info":            "info-podman.json",
+		"/version":         "version-podman.json",
+		"/containers/json": `[]`,
+	})
+	got := found(t, fakeVMs{}, docker.Candidate{Socket: idle, Trusted: true, Machine: "podman-machine-default"})
 	if len(got) != 1 || got[0].VMRunning || got[0].VMError != "" {
-		t.Errorf("listed none: engine = %+v, want its VM not running", got)
+		t.Errorf("listed none, no containers: engine = %+v, want its VM not running", got)
+	}
+	sock := podmanEngine(t, `{}`)
+	got = found(t, fakeVMs{}, docker.Candidate{Socket: sock, Trusted: true, Machine: "podman-machine-default"})
+	if len(got) != 1 || got[0].VMRunning || got[0].VMError == "" {
+		t.Errorf("listed none, containers: engine = %+v, want its VM unknown", got)
 	}
 	got = found(t, fakeVMs{podmanVM}, docker.Candidate{Socket: sock, Trusted: true})
 	if len(got) != 1 || got[0].VMRunning || got[0].VMError == "" {

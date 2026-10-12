@@ -99,6 +99,12 @@ func TestDockerReservesFootprintOrContainersPlusOverhead(t *testing.T) {
 		"resource saver":        {protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib}, 0, u64(0)},
 		"retained high water":   {running(6*gib, 1*gib), 6 * gib, u64(6 * gib)},
 		"containers + overhead": {running(3*gib, 2*gib, 1*gib), 5 * gib, u64(3 * gib)},
+		// Containers run, so the VM must: one not found is unknown (#268).
+		"containers, no VM found": {
+			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib,
+				Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
+			3 * gib, nil,
+		},
 		"VM unreadable": {
 			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib, VMError: "boom",
 				Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},

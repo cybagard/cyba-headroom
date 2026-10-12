@@ -1297,7 +1297,8 @@ func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
 }
 
 // podmanEndpointIn is the endpoint podman talks to for call c: its own
-// -c/--connection's, whatever its order with --url; else --url (c.Host);
+// -c/--connection's, whatever its order with --url; else --url's (c.Host),
+// CONTAINER_HOST if it is empty; else --context's, unless it is default;
 // else CONTAINER_CONNECTION's; else CONTAINER_HOST; else the default
 // connection's. That is podman 6.1.3's order, measured. A connection is its
 // URI in the connections file (man podman-system-connection):
@@ -1307,10 +1308,16 @@ func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
 // Connections in containers.conf are not read: they are unknown too.
 func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
 	name := c.Context
-	if name == "" {
-		if c.Host != "" { // podman reads --url "" as not given
-			return c.Host
+	if name == "" && c.HasHost {
+		if c.Host == "" {
+			return getenv("CONTAINER_HOST") // podman fills an empty --url from it
 		}
+		return c.Host
+	}
+	if name == "" && c.PodmanContext != "default" {
+		name = c.PodmanContext
+	}
+	if name == "" {
 		name = getenv("CONTAINER_CONNECTION")
 	}
 	if h := getenv("CONTAINER_HOST"); h != "" && name == "" {

@@ -926,6 +926,7 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		}
 		body := `{"Connection":{"Default":"` + def + `","Connections":{` +
 			`"remote-a":{"URI":"` + remote + `","Identity":"/Users/dev/.ssh/id"},` +
+			`"default":{"URI":"` + remote + `"},` +
 			`"podman-machine-default":{"URI":"` + machine + `","IsMachine":true}}}}`
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -950,6 +951,17 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		{"-c over CONTAINER_HOST", "-c podman-machine-default", map[string]string{"CONTAINER_HOST": host}, machine},
 		{"an unknown -c", "-c ghost", map[string]string{"CONTAINER_HOST": host}, ""},
 		{"an unknown CONTAINER_CONNECTION", "", map[string]string{"CONTAINER_CONNECTION": "ghost", "CONTAINER_HOST": host}, ""},
+		// --context is not -c: it ranks below --url, and default is no
+		// connection (Plan amendment 1, measured on podman 6.1.3).
+		{"an empty --url over CONTAINER_CONNECTION", "--url=", map[string]string{"CONTAINER_CONNECTION": "remote-a", "CONTAINER_HOST": machine}, machine},
+		{"an empty --url, no CONTAINER_HOST", "--url=", map[string]string{"CONTAINER_CONNECTION": "remote-a"}, ""},
+		{"--url after --context", "--context remote-a --url " + machine, nil, machine},
+		{"--url before --context", "--url " + machine + " --context remote-a", nil, machine},
+		{"--context default", "--context default", nil, machine},
+		{"--context default, CONTAINER_CONNECTION", "--context default", map[string]string{"CONTAINER_CONNECTION": "remote-a"}, remote},
+		{"--context over CONTAINER_HOST", "--context remote-a", map[string]string{"CONTAINER_HOST": machine}, remote},
+		{"--context over CONTAINER_CONNECTION", "--context remote-a", map[string]string{"CONTAINER_CONNECTION": "podman-machine-default"}, remote},
+		{"-c after -H", "-H " + machine + " -c remote-a", nil, remote},
 	} {
 		env := map[string]string{"PODMAN_CONNECTIONS_CONF": conf}
 		for k, v := range c.env {
@@ -2065,8 +2077,9 @@ func TestABareHostNameIsTCP(t *testing.T) {
 // about; the machine's, or one podman cannot find, is.
 func TestARemotePodmanConnectionIsNotGated(t *testing.T) {
 	const (
-		far  = "ssh://dev@198.51.100.7:22/run/podman/podman.sock"
-		near = "tcp://127.0.0.1:7"
+		far     = "ssh://dev@198.51.100.7:22/run/podman/podman.sock"
+		near    = "tcp://127.0.0.1:7"
+		machine = "ssh://core@127.0.0.1:50123/run/user/501/podman/podman.sock"
 	)
 	for name, c := range map[string]struct {
 		args  []string
@@ -2094,6 +2107,16 @@ func TestARemotePodmanConnectionIsNotGated(t *testing.T) {
 		"XDG_CONFIG_HOME's file":               {nil, []string{"FILE=xdg", "DEFAULT=remote-a"}, false},
 		"no default, a far \"\" connection":    {nil, []string{"FILE=nameless"}, true},
 		"an empty --url, a far CONTAINER_HOST": {[]string{"--url="}, []string{"CONTAINER_HOST=" + far}, false},
+		// Plan amendment 1's measured table.
+		"an empty --url, the machine's CONTAINER_HOST": {[]string{"--url="}, []string{"CONTAINER_CONNECTION=remote-a", "CONTAINER_HOST=" + machine}, true},
+		"an empty --url, no CONTAINER_HOST":            {[]string{"--url="}, []string{"CONTAINER_CONNECTION=remote-a"}, true},
+		"the machine's --url after --context":          {[]string{"--context", "remote-a", "--url", machine}, nil, true},
+		"the machine's --url before --context":         {[]string{"--url", machine, "--context", "remote-a"}, nil, true},
+		"--context default":                            {[]string{"--context", "default"}, []string{"DEFAULT=podman-machine-default"}, true},
+		"--context default, CONTAINER_CONNECTION":      {[]string{"--context", "default"}, []string{"CONTAINER_CONNECTION=remote-a", "DEFAULT=podman-machine-default"}, false},
+		"--context over the machine's CONTAINER_HOST":  {[]string{"--context", "remote-a"}, []string{"CONTAINER_HOST=" + machine}, false},
+		"--context over CONTAINER_CONNECTION":          {[]string{"--context", "remote-a"}, []string{"CONTAINER_CONNECTION=podman-machine-default"}, false},
+		"-c remote-a after the machine's -H":           {[]string{"-H", machine, "-c", "remote-a"}, nil, false},
 	} {
 		r := newShimRig(t)
 		r.ask = allow
@@ -2121,7 +2144,8 @@ func TestARemotePodmanConnectionIsNotGated(t *testing.T) {
 		}
 		body := `{"Connection":{"Default":"` + def + `","Connections":{` +
 			`"remote-a":{"URI":"` + far + `"},` +
-			`"podman-machine-default":{"URI":"ssh://core@127.0.0.1:50123/run/user/501/podman/podman.sock","IsMachine":true}}}}`
+			`"default":{"URI":"` + far + `"},` +
+			`"podman-machine-default":{"URI":"` + machine + `","IsMachine":true}}}}`
 		switch file {
 		case "bad":
 			body = `{"Connection":`

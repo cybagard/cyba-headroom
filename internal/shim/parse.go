@@ -59,10 +59,13 @@ type Call struct {
 	// Context is the one named with --context or -c/--connection. A remote
 	// engine's memory is not this Mac's. Both are raw: they may hold a user
 	// name. HostLast is whether Host was given after Context.
-	Host     string
-	HasHost  bool
-	Context  string
-	HostLast bool
+	// PodmanContext is podman's --context, which is not its -c: podman ranks
+	// it below --url (#71).
+	Host          string
+	HasHost       bool
+	Context       string
+	HostLast      bool
+	PodmanContext string
 }
 
 // Parse tells what the call name args (argv[1:]) would start. It is pure and
@@ -90,6 +93,10 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		case "-H", "--host", "--url":
 			c.Host, c.HasHost, c.HostLast = v, true, true
 		case "--context", "-c", "--connection":
+			if name == "podman" && f == "--context" {
+				c.PodmanContext = v
+				break
+			}
 			c.Context, c.HostLast = v, false
 		case "--config":
 			c.ConfigDir = v
@@ -187,7 +194,8 @@ func parsePodman(engine Call, args []string) Call {
 		return Call{}
 	}
 	cmd := args[0] + " " + args[1]
-	c := Call{Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context, HostLast: engine.HostLast, ConfigDir: engine.ConfigDir}
+	c := Call{Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context, HostLast: engine.HostLast, ConfigDir: engine.ConfigDir,
+		PodmanContext: engine.PodmanContext}
 	// start is whether it starts anything: kube play does unless
 	// --start=false, the clones and init only with their start flag.
 	start, down := true, false
@@ -434,7 +442,7 @@ func parseCompose(engine Call, words, args []string) Call {
 	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
 		ComposeEnvFiles: envFiles, ComposeDetached: detached,
 		ConfigDir: engine.ConfigDir, Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context,
-		HostLast: engine.HostLast}
+		HostLast: engine.HostLast, PodmanContext: engine.PodmanContext}
 	return c.named(append(words, op))
 }
 

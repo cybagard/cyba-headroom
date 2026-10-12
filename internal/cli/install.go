@@ -115,8 +115,11 @@ func (in *installer) install(ctx context.Context) int {
 		}
 	}
 	// The copy would replace whatever is there: a typo'd --bin must not
-	// cost someone their docker (#274).
-	if !in.ownedBinary(in.bin) {
+	// cost someone their docker (#274). A plain install renames over a link
+	// at the default path and never touches its target (#183).
+	fi, err := os.Lstat(in.bin)
+	plainLink := !in.binGiven && err == nil && fi.Mode()&fs.ModeSymlink != 0
+	if !plainLink && !in.ownedBinary(in.bin) {
 		fmt.Fprintf(in.errw, "headroom: %s is not a headroom binary; choose another --bin\n", in.bin)
 		return 1
 	}
@@ -223,7 +226,7 @@ func (in *installer) removeOldCopy(bin, prefix string, printed bool) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return
 	}
-	if err == nil && fi.Mode().IsRegular() && isHeadroom(old, old, in.exe, bin) {
+	if err == nil && fi.Mode().IsRegular() && in.ownedBinary(old) {
 		if same, _ := sameFile(old, bin); same {
 			return
 		}

@@ -1385,3 +1385,63 @@ func TestIsHeadroomBuild(t *testing.T) {
 		t.Errorf("/bin/ls is a headroom build")
 	}
 }
+
+// A plain install replaces a link at the default path, as before the
+// guard: it never judges or touches the link's target, broken or not
+// headroom's (#183, #274).
+func TestPlainInstallReplacesAnyLinkAtTheDefaultPath(t *testing.T) {
+	for _, what := range []string{"broken", "to another file"} {
+		t.Run(what, func(t *testing.T) {
+			f := newInstallFixture(t)
+			target, data := notHeadroom(t, "tool")
+			if what == "broken" {
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(f.in.bin), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, f.in.bin); err != nil {
+				t.Fatal(err)
+			}
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			if fi, err := os.Lstat(f.in.bin); err != nil || !fi.Mode().IsRegular() {
+				t.Errorf("the link was not replaced by a copy: %v %v", fi, err)
+			}
+			b, err := os.ReadFile(target)
+			if what == "broken" && !os.IsNotExist(err) {
+				t.Errorf("the broken link's target was created: %q %v", b, err)
+			}
+			if what != "broken" && (err != nil || !bytes.Equal(b, data)) {
+				t.Errorf("the link's target changed: %q %v", b, err)
+			}
+		})
+	}
+}
+
+// install --bin elsewhere leaves a file at the default path that is not
+// headroom's, whatever its name, with the note (#274).
+func TestInstallBinKeepsAFileAtTheDefaultPathThatIsNotHeadroom(t *testing.T) {
+	f := newInstallFixture(t)
+	old := f.in.bin
+	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("#!/bin/sh\nexec my-headroom-wrapper \"$@\"\n")
+	if err := os.WriteFile(old, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.in.bin, f.in.binGiven = filepath.Join(f.home, "opt", "bin", "headroom"), true
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if b, err := os.ReadFile(old); err != nil || !bytes.Equal(b, data) {
+		t.Errorf("%s removed or changed: %q %v", old, b, err)
+	}
+	if want := old + " is not a copy headroom install made"; !strings.Contains(f.errb.String(), want) {
+		t.Errorf("no note %q:\n%s", want, f.errb.String())
+	}
+}

@@ -1308,7 +1308,7 @@ func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
 func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
 	name := c.Context
 	if name == "" {
-		if c.HasHost {
+		if c.Host != "" { // podman reads --url "" as not given
 			return c.Host
 		}
 		name = getenv("CONTAINER_CONNECTION")
@@ -1342,6 +1342,9 @@ func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
 	}
 	if name == "" {
 		name = file.Connection.Default
+	}
+	if name == "" {
+		return "" // no default connection: podman looks up none named ""
 	}
 	return file.Connection.Connections[name].URI
 }

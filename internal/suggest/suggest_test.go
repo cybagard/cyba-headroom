@@ -218,6 +218,41 @@ func TestPerWorktreeCapNeedsWorktreeDays(t *testing.T) {
 	}
 }
 
+// worktreeDays is two hours of working samples on each of n days, with
+// project-a's container at mem(d) on day d.
+func worktreeDays(n int, mem func(d int) uint64) []samples.Sample {
+	var out []samples.Sample
+	for d := 0; d < n; d++ {
+		for _, s := range workingHours(d, 2, 5*gib) {
+			s.Engines = desktopVM(0, 0, samples.Container{Name: "db", MemoryBytes: mem(d), Mounts: []string{"/Users/dev/w/project-a/data"}})
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// A worktree-day whose containers report 0 bytes is not counted (#273): it
+// must not turn the cap off.
+func TestPerWorktreeCapLeavesOutZeroByteDays(t *testing.T) {
+	v := value(t, aggregate(worktreeDays(6, func(int) uint64 { return 0 })), "per_worktree_cap_gb")
+	if v.OK || !strings.Contains(v.Why, "not enough data: 0 worktree-days") {
+		t.Fatalf("cap from zero-byte days = %+v", v)
+	}
+}
+
+// Zero-byte days don't count toward the worktree-days the cap needs.
+func TestPerWorktreeCapZeroByteDaysAreNotData(t *testing.T) {
+	v := value(t, aggregate(worktreeDays(6, func(d int) uint64 {
+		if d == 5 {
+			return 4 * gib
+		}
+		return 0
+	})), "per_worktree_cap_gb")
+	if v.OK || !strings.Contains(v.Why, "not enough data: 1 worktree-days") {
+		t.Fatalf("cap from five zero-byte days and one real one = %+v", v)
+	}
+}
+
 func advice(r suggest.Result) string { return strings.Join(r.Advice, "\n") }
 
 func TestDockerLimitAdvice(t *testing.T) {

@@ -506,6 +506,9 @@ func (a *Aggregator) addWorktreeUse(s samples.Sample, date string) {
 		}
 	}
 	for id, b := range use {
+		if b == 0 { // no figure: a 0-byte day would drag the cap down (#273)
+			continue
+		}
 		k := worktreeDay{id, date}
 		a.worktreePeak[k] = max(a.worktreePeak[k], b)
 	}
@@ -544,9 +547,15 @@ func (a *Aggregator) perWorktreeCap() Value {
 		peaks = append(peaks, float64(b))
 	}
 	_, p95, top := dist(peaks)
-	v.OK, v.GB = true, roundUp(p95*1.25, 1)
-	v.Rule = fmt.Sprintf("p95 of daily per-worktree peaks (containers + Tart VMs) × 1.25 (%d worktree-days; p95 %.1f, max %.1f GB)",
+	rule := fmt.Sprintf("p95 of daily per-worktree peaks (containers + Tart VMs) × 1.25 (%d worktree-days; p95 %.1f, max %.1f GB)",
 		len(peaks), p95, top)
+	// A cap of 0 means "off": the data must never turn it off.
+	gb := roundUp(p95*1.25, 1)
+	if !(gb > 0) {
+		v.Why = "not usable: the " + rule + " is not above 0"
+		return v
+	}
+	v.OK, v.GB, v.Rule = true, gb, rule
 	return v
 }
 

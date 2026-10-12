@@ -86,7 +86,7 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 - [ ] Finds the real binary by removing its own directory from PATH; never calls itself
 - [ ] Parses global flags and long forms (`docker --context x run`, `docker container run`, `docker compose -f a.yml up`) to recognize resource-creating calls: `run`, `create`, `start`, `compose up`, `tart run`, `tart clone`
 - [ ] Everything else passes straight through without contacting the daemon
-- [ ] Resolves identity in order: `HEADROOM_WORKTREE`, git toplevel of the cwd, process ancestry; calls with no Orca worktree (a human typing `docker`) pass through and are attributed as **manual**
+- [ ] Resolves identity in order: `HEADROOM_WORKTREE`, then `ORCA_WORKTREE_ID`, then the git toplevel of the cwd, then process ancestry; calls with no Orca worktree (a human typing `docker`) pass through and are attributed as **manual**
 - [ ] On allow, replaces itself with the real binary (`exec`), so TTY, signals and exit codes behave as if the shim were not there
 - [ ] On deny, exits 75 (temporary failure) with a message written for an agent: headroom, estimated cost, and the agent's own idle resources it could reuse or stop
 - [x] `BUDGET_WAIT=1` queues the request instead of denying, with a timeout (`policy.wait_timeout`), first come first (#72)
@@ -112,7 +112,7 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 - [ ] A waiting or done agent cannot start new resources while it holds idle ones
 - [ ] Config in `~/.config/headroom`
 
-**R9 — Orca launch environment.** Every agent Orca launches starts with the shim directory first on PATH and `HEADROOM_WORKTREE` set. Variables set in the agent's own process reach its tool shells, which is more reliable than direnv or `.zshenv`.
+**R9 — Orca launch environment.** Every agent Orca launches starts through `headroom run`, which puts the shim directory first on PATH. Identity comes from `ORCA_WORKTREE_ID`, which Orca sets in every agent terminal. `HEADROOM_WORKTREE` is an optional override, for launches outside Orca. Variables set in the agent's own process reach its tool shells, which is more reliable than direnv or `.zshenv`.
 
 - [ ] Set through Orca's agent launch command or environment; fallback: a worktree setup hook that writes a small wrapper script used as the agent command
 - [ ] Given an agent launched by Orca, when it runs a tool command in a non-interactive shell, then `command -v docker` resolves to the shim
@@ -174,7 +174,7 @@ Only the gate shims change what happens: they exec the real binary on allow, or 
 
 Defense in depth: one authoritative gate; the other layers set up, warn or detect.
 
-1. **Orca launch environment (setup).** Puts the shims first on PATH and sets `HEADROOM_WORKTREE` for every agent (R9). Not a gate, but it fixes the shim's two weak spots: PATH order and identity.
+1. **Orca launch environment (setup).** `headroom run` puts the shims first on PATH for every agent (R9). Identity comes from `ORCA_WORKTREE_ID`, which Orca sets in every agent terminal; `HEADROOM_WORKTREE` is an optional override, for launches outside Orca. Not a gate, but it fixes the shim's two weak spots: PATH order and identity.
 2. **Gate shim (enforce).** The only authoritative decision, at the exec level, for every agent and however deeply nested the call (R5, R10).
 3. **Agent hooks (warn, P1).** Deny obvious cases before the agent spends effort, with the reason fed to the model, and add session-level attribution. Advisory, since they only see the command string.
 4. **Observe mode (detect).** Flags anything that got around the first three, such as direct Docker socket use, as ungated (R4).
@@ -199,7 +199,7 @@ Measure a two-week baseline with observe mode only, then two weeks with the gate
 **Blocking (answer before building)**
 
 - [ ] What exactly does `orca worktree ps --json` return: PIDs, paths, agent state? Decides whether attribution can walk the process tree or must rely on paths and labels. *(engineering, spike)*
-- [ ] Can Orca set a launch command or environment per agent, so PATH and `HEADROOM_WORKTREE` reach every agent? If not, does a wrapper script as the agent command work? *(engineering, spike)*
+- [x] Can Orca set a launch command or environment per agent, so PATH and `HEADROOM_WORKTREE` reach every agent? If not, does a wrapper script as the agent command work? *(engineering, spike)* → **Yes, and `HEADROOM_WORKTREE` isn't needed.** `agentCmdOverrides` starts each agent through `headroom run`, which puts the shims first on PATH. Orca sets `ORCA_WORKTREE_ID` in every agent terminal, and the shim reads it. `HEADROOM_WORKTREE` is an optional override, for launches outside Orca. See #7.
 - [ ] In the tool shells Claude CLI and Kilo actually spawn, does the injected PATH survive (login vs. non-login shells, `path_helper`)? *(engineering, spike)*
 - [ ] How do Docker Desktop and Podman report per-container memory on this machine, and how far does it differ from the host-side RSS of their VMs? *(engineering, measurement)*
 

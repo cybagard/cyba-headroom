@@ -5,7 +5,7 @@
 **Blocking (answer before building)**
 
 - [ ] What exactly does `orca worktree ps --json` return: PIDs, paths, agent state? Decides whether attribution can walk the process tree or must rely on paths and labels. *(engineering, spike)*
-- [ ] Can Orca set a launch command or environment per agent, so PATH and `HEADROOM_WORKTREE` reach every agent? If not, does a wrapper script as the agent command work? *(engineering, spike)*
+- [x] Can Orca set a launch command or environment per agent, so PATH and `HEADROOM_WORKTREE` reach every agent? If not, does a wrapper script as the agent command work? *(engineering, spike)* → **Yes, and `HEADROOM_WORKTREE` isn't needed.** `agentCmdOverrides` starts each agent through `headroom run`, which puts the shims first on PATH. Orca sets `ORCA_WORKTREE_ID` in every agent terminal, and the shim reads it. `HEADROOM_WORKTREE` is an optional override, for launches outside Orca. See #7.
 - [ ] In the tool shells Claude CLI and Kilo actually spawn, does the injected PATH survive (login vs. non-login shells, `path_helper`)? *(engineering, spike)*
 - [ ] How do Docker Desktop and Podman report per-container memory on this machine, and how far does it differ from the host-side RSS of their VMs? *(engineering, measurement)*
 

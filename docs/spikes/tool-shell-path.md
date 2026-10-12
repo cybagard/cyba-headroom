@@ -45,6 +45,7 @@ Kilo spawns `/bin/zsh -c` (non-login) directly from the `.kilo` process with its
 ## Decision for R9 (#31)
 
 - **Use `agentCmdOverrides`** (from #7): `{"claude": "headroom run -- claude", "kilo": "headroom run -- kilo"}`. `headroom run` prepends the shim dir (and sets `HEADROOM_WORKTREE` from `ORCA_WORKTREE_ID` if unset), then `exec`s.
+  - *Corrected 2026-10-12 (#95):* `headroom run`, as #31 built it, only prepends the shim dir. It doesn't set `HEADROOM_WORKTREE`: the shim reads `ORCA_WORKTREE_ID` itself when `HEADROOM_WORKTREE` is unset.
 - An rc-file PATH edit is **not required**. Keep it optional, mainly for a human's own terminals.
 - `headroom doctor` (#32): from inside an agent tool shell, check that `command -v docker`, `podman` and `tart` resolve to the shim dir. If not, report "agent started before headroom was installed, or not launched via `headroom run`".
 

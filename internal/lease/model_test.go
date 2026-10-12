@@ -56,6 +56,7 @@ type mwaiter struct {
 	ticket string
 	call   func() bool
 	cost   uint64    // what its last ask said it costs
+	takes  []string  // the leases that call takes over (hold)
 	polled time.Time // its last ask
 	quiet  bool      // it stopped polling: gave up, interrupted, or died
 	driven bool      // op 15 asks for it, not the readings
@@ -173,7 +174,7 @@ type model struct {
 	diff     bool                 // HEADROOM_MODEL_DIFF=1: compare guessed bookkeeping with the book's after each op (differ)
 	waiters  []*mwaiter           // the live tickets, in arrival order (#72)
 	asking   *mwaiter             // the waiter whose call is asking
-	taking   uint64               // what the leases the asking call takes over reserve
+	taking   []string             // the leases the asking call takes over
 	polled   map[string]time.Time // each ticket's last ask
 }
 
@@ -302,7 +303,7 @@ func (m *model) check(r policy.Request) protocol.Decision {
 	}
 	d := m.b.Check(r, m.snapshot(), cfg)
 	taking := m.taking
-	m.taking = 0
+	m.taking = nil
 	if !d.Allow && m.headroom == plenty {
 		m.fail("%s denied: %+v", r.Command, d)
 	}
@@ -427,7 +428,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 		if g := m.guesses[l.ID]; m.leases[l.ID] == cmd || g != nil && m.confirmed(l.ID) && g.project == project && g.wt == wt {
 			taken[l.ID] = true
 			if !idle {
-				m.taking += l.Bytes // every other call counts it: a waiting up holds only the rest
+				m.taking = append(m.taking, l.ID) // every other call counts it: a waiting up holds only the rest
 			}
 		}
 	}
@@ -1065,9 +1066,21 @@ func (m *model) holds(w *mwaiter) uint64 {
 		if o == w {
 			break
 		}
-		n += o.cost
+		n += m.hold(o)
 	}
 	return n
+}
+
+// hold is what w holds: its cost, less what the leases it takes over
+// reserve while they are open, now (review round 2 R2-1).
+func (m *model) hold(w *mwaiter) uint64 {
+	var taken uint64
+	for _, id := range w.takes {
+		if n, ok := m.reserves(id); ok {
+			taken += n
+		}
+	}
+	return w.cost - min(w.cost, taken)
 }
 
 // queued settles w after its ask was decided: allowed, it leaves the
@@ -1076,7 +1089,7 @@ func (m *model) holds(w *mwaiter) uint64 {
 // less taking, what the leases it takes over reserve: every other call
 // counts those already, and must not count them twice (review round 1 F1);
 // denied for anything else, it is dropped.
-func (m *model) queued(w *mwaiter, d protocol.Decision, taking uint64) {
+func (m *model) queued(w *mwaiter, d protocol.Decision, taking []string) {
 	live := slices.Contains(m.waiters, w)
 	switch {
 	case d.Allow:
@@ -1107,8 +1120,8 @@ func (m *model) queued(w *mwaiter, d protocol.Decision, taking uint64) {
 			m.waiters = append(m.waiters, w)
 			m.step("queued as ticket %q", w.ticket)
 		}
-		w.cost, w.polled = d.CostBytes-min(d.CostBytes, taking), m.c.t
-		if taking > 0 {
+		w.cost, w.takes, w.polled = d.CostBytes, taking, m.c.t
+		if len(taking) > 0 {
 			m.outcomes["queue: takeover held"]++
 		}
 		m.polled[w.ticket] = m.c.t
@@ -1121,7 +1134,7 @@ func (m *model) queueMatches() {
 	got := lease.Waiting(m.b)
 	var want []string
 	for _, w := range m.waiters {
-		want = append(want, fmt.Sprintf("%s:%d", w.ticket, w.cost))
+		want = append(want, fmt.Sprintf("%s:%d", w.ticket, m.hold(w)))
 	}
 	var have []string
 	for _, w := range got {

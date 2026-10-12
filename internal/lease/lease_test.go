@@ -3842,3 +3842,40 @@ func TestATicketOutlastsAWaitersSlowestCycle(t *testing.T) {
 		t.Fatalf("a live waiter lost its place: %+v", d)
 	}
 }
+
+// A waiting takeover's hold follows the lease it takes over: once that
+// lease ends before the waiter asks again, the waiter holds its whole cost,
+// and a later call cannot take the room it is due (#72, review round 2
+// R2-1). While the lease is open, the two together count its bytes once.
+func TestAWaitingTakeoverHoldsItsWholeCostOnceTheTakenLeaseEnds(t *testing.T) {
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", CostBytes: 4 * gib, OnEngine: true}
+	queued := func(t *testing.T) (*lease.Book, string) {
+		b, _, _ := book(t)
+		first := b.Check(up, room(10*gib), cfg)
+		if !first.Allow {
+			t.Fatalf("first up: %+v", first)
+		}
+		again := up
+		again.CostBytes, again.Wait = 8*gib, true
+		if d := b.Check(again, room(7*gib), cfg); d.Allow || d.Ticket == "" {
+			t.Fatalf("the up again: %+v", d)
+		}
+		return b, first.LeaseID
+	}
+	t.Run("ended", func(t *testing.T) {
+		b, id := queued(t)
+		if !b.Release(id) {
+			t.Fatal("no lease to release")
+		}
+		if d := b.Check(req("w2", 5*gib), room(10*gib), cfg); d.Allow {
+			t.Fatalf("took the room the up is due: %+v", d)
+		}
+	})
+	t.Run("open", func(t *testing.T) {
+		b, _ := queued(t)
+		// 4 GB leased and 4 GB held beside it: the up's 8.
+		if d := b.Check(req("w2", 2*gib), room(10*gib), cfg); !d.Allow {
+			t.Fatalf("the open lease counted twice: %+v", d)
+		}
+	})
+}

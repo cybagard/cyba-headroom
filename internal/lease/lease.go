@@ -141,6 +141,23 @@ type Book struct {
 type waiter struct {
 	protocol.Waiter
 	polled time.Time // its last ask
+	// cost is what it would cost, and takes the open leases it would take
+	// over: it holds cost less what those still reserve (Book.hold).
+	cost  uint64
+	takes []*entry
+}
+
+// hold is what w holds: its cost, less what the leases it would take over
+// reserve while they are open, which every other call counts already. Once
+// one ends, its part is w's to hold again (review round 2 R2-1).
+func (b *Book) hold(w *waiter) uint64 {
+	var taken uint64
+	for _, e := range w.takes {
+		if slices.Contains(b.open, e) {
+			taken += e.reserved()
+		}
+	}
+	return w.cost - min(w.cost, taken)
 }
 
 // TicketTTL is how long a ticket lasts without an ask: two of a live
@@ -488,7 +505,7 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			if o == w {
 				break
 			}
-			r.HeldBytes += o.Bytes
+			r.HeldBytes += b.hold(o)
 			if o.MacOS {
 				r.HeldMacOS++
 			}
@@ -511,11 +528,10 @@ func (b *Book) ticket(id string) *waiter {
 // queue settles r's place after decision d: a waiting call denied only for
 // what waiting may fix keeps its ticket, w, or joins the back with a new
 // one (its ticket unknown: the daemon restarted, or it went unasked for
-// ticketTTL), and holds what this ask says it costs, less taken: what the
-// leases it would take over reserve, which every other call counts already
-// (review round 1 F1). Allowed, or denied for anything else, its ticket
-// ends.
-func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken uint64, now time.Time) {
+// ticketTTL), and holds what this ask says it costs, less what the leases
+// it would take over, taken, reserve while open (Book.hold, review round 1
+// F1). Allowed, or denied for anything else, its ticket ends.
+func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken []*entry, now time.Time) {
 	if d.Allow || !d.Retry || !r.Wait || r.Worktree == "" {
 		if w != nil {
 			b.waiting = slices.DeleteFunc(b.waiting, func(o *waiter) bool { return o == w })
@@ -528,14 +544,14 @@ func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken ui
 		w = &waiter{Waiter: protocol.Waiter{Ticket: fmt.Sprintf("ticket-%s-%d", b.run, b.nextTicket), Since: now}}
 		b.waiting = append(b.waiting, w)
 	}
-	w.Worktree, w.Command, w.Bytes, w.MacOS, w.polled = r.Worktree, Summary(r.Command), d.CostBytes-min(d.CostBytes, taken), r.MacOS, now
+	w.Worktree, w.Command, w.cost, w.takes, w.MacOS, w.polled = r.Worktree, Summary(r.Command), d.CostBytes, taken, r.MacOS, now
 	d.Ticket = w.Ticket
 }
 
-// check is Check's decision, under the book's lock, and what the open
-// leases its call would take over reserve: its cost stands in for that,
-// and LeasedBytes leaves it out.
-func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Config, now time.Time) (protocol.Decision, uint64) {
+// check is Check's decision, under the book's lock, and the open leases its
+// call would take over: its cost stands in for what they reserve, and
+// LeasedBytes leaves them out.
+func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Config, now time.Time) (protocol.Decision, []*entry) {
 	if unnamed(r) {
 		r.Target = "" // its dir is its key (unnamed)
 	}
@@ -563,7 +579,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if len(starts) == 0 {
 			why = "no such container"
 		}
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (%s)", Summary(r.Command), why)}, 0
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (%s)", Summary(r.Command), why)}, nil
 	}
 	s := b.latest
 	if s == nil || (current != nil && current.CollectedAt.After(b.observed.Add(stale))) {
@@ -591,7 +607,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// Allowed, and no new lease. Not when others went unresolved:
 		// they are no lease's.
 		b.renew(covering, now)
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}, 0
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (its lease holds it)", Summary(r.Command))}, nil
 	}
 	// The project's running services in the caller's worktree (an unnamed
 	// call's: its dir's): a compose up's lease holds them (below). Not a
@@ -623,7 +639,8 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			}
 		}
 	}
-	var reservedTaken, carried, surplus, taken uint64
+	var reservedTaken, carried, surplus uint64
+	var taken []*entry
 	composeTook := false
 	carries := map[*entry]takeover{}
 	for _, e := range b.open {
@@ -635,11 +652,11 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				reservedTaken += e.reserved()
 			}
 			composeTook = true
-			taken += e.reserved()
+			taken = append(taken, e)
 			continue
 		case startTakes(r, starts, e):
 			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // that container's cost: the larger
-			taken += e.reserved()
+			taken = append(taken, e)
 			continue
 		}
 		r.LeasedBytes += e.reserved()
@@ -675,13 +692,13 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		slices.ContainsFunc(s.Podman.VMs, func(vm protocol.PodmanVM) bool { return vm.Machine == r.Target }) {
 		// Its VM runs: podman says so and starts nothing, and the VM
 		// already counts. Allowed, and no lease.
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}, 0
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}, nil
 	}
 	if r.Kind == "pod" && (r.Op == "start" || r.Op == "restart") && s != nil && podsRun(s, r.Pods) {
 		// Each of its pods runs: podman starts nothing, or restarts what
 		// already counts. Allowed, and no lease (#230, plan amendment 3;
 		// #241).
-		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}, 0
+		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (it already runs)", Summary(r.Command))}, nil
 	}
 	d := policy.Decide(r, s, c)
 	d.LeasedBytes = r.LeasedBytes
@@ -845,7 +862,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
-	return d, 0
+	return d, nil
 }
 
 // podsRun reports whether s shows a running container of each of pods
@@ -2177,7 +2194,9 @@ func (b *Book) Waiting() []protocol.Waiter {
 	defer b.mu.Unlock()
 	var out []protocol.Waiter
 	for _, w := range b.waiting {
-		out = append(out, w.Waiter)
+		v := w.Waiter
+		v.Bytes = b.hold(w)
+		out = append(out, v)
 	}
 	return out
 }

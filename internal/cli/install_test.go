@@ -1096,3 +1096,136 @@ func TestUninstallInTheBothStateKeepsAnUnheldLock(t *testing.T) {
 		t.Errorf("unheld lock removed in the both state: %v", err)
 	}
 }
+
+// notHeadroom writes a binary that is not headroom's, say a docker typed as
+// --bin, at dir/name.
+func notHeadroom(t *testing.T, name string) (path string, data []byte) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path, data = filepath.Join(dir, name), []byte("#!another tool")
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, data
+}
+
+// A --bin that is not headroom's stays; the rest of the uninstall goes on,
+// and the output names the file kept (#274).
+func TestUninstallKeepsABinThatIsNotHeadroom(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	docker, data := notHeadroom(t, "docker")
+	f.in.bin, f.in.binGiven = docker, true
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if b, err := os.ReadFile(docker); err != nil || !bytes.Equal(b, data) {
+		t.Errorf("%s removed or changed: %q %v", docker, b, err)
+	}
+	if !f.agent.unloaded {
+		t.Error("the agent was not unloaded")
+	}
+	if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+		t.Errorf("plist stayed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(f.in.shimDir, "docker")); !os.IsNotExist(err) {
+		t.Errorf("shims stayed: %v", err)
+	}
+	if want := docker + " (not a headroom binary)"; !strings.Contains(f.out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, f.out.String())
+	}
+}
+
+// Install over a --bin that is not headroom's refuses before anything
+// changes: the file stays as it was and no agent loads (#274).
+func TestInstallRefusesABinThatIsNotHeadroom(t *testing.T) {
+	f := newInstallFixture(t)
+	docker, data := notHeadroom(t, "docker")
+	f.in.bin, f.in.binGiven = docker, true
+	if code := f.in.install(context.Background()); code != 1 {
+		t.Fatalf("exit %d, want 1: %s", code, f.errb.String())
+	}
+	if b, err := os.ReadFile(docker); err != nil || !bytes.Equal(b, data) {
+		t.Errorf("%s changed: %q %v", docker, b, err)
+	}
+	if len(f.agent.calls) != 0 {
+		t.Errorf("touched launchd: %v", f.agent.calls)
+	}
+	if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+		t.Errorf("wrote the plist: %v", err)
+	}
+	if want := "headroom: " + docker + " is not a headroom binary; choose another --bin"; !strings.Contains(f.errb.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, f.errb.String())
+	}
+}
+
+// A --bin under another name, the binary the installed agent runs, is
+// still headroom's: a reinstall from a newer build replaces it, and
+// uninstall --bin removes it (#274).
+func TestACustomBinNameStaysHeadroomsThroughTheAgent(t *testing.T) {
+	f := newInstallFixture(t)
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	f.in.bin, f.in.binGiven = filepath.Join(dir, "hr"), true
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	newer := filepath.Join(t.TempDir(), "headroom") // a newer build, another file
+	if err := os.WriteFile(newer, []byte("#!binary v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.in.exe = newer
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("reinstall: exit %d: %s", code, f.errb.String())
+	}
+	if b, _ := os.ReadFile(f.in.bin); string(b) != "#!binary v2" {
+		t.Fatalf("binary = %q", b)
+	}
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	if _, err := os.Lstat(f.in.bin); !os.IsNotExist(err) {
+		t.Errorf("%s stayed: %v", f.in.bin, err)
+	}
+}
+
+// A config.toml that will not load does not block uninstall: it warns and
+// goes on from the default config, as doctor does (#274).
+func TestUninstallGoesOnWithABadConfig(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	if err := os.WriteFile(filepath.Join(f.cfg, "config.toml"), []byte("not = [toml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	e := Env{Args: []string{"headroom", "uninstall"}, Stdout: &out, Stderr: &errb, Getenv: f.in.getenv}
+	in, err := newInstaller(e, "", true)
+	if err != nil {
+		t.Fatalf("newInstaller: %v", err)
+	}
+	in.agent = f.agent // never launchd
+	if code := in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+		t.Errorf("plist stayed: %v", err)
+	}
+	if !f.agent.unloaded {
+		t.Error("the agent was not unloaded")
+	}
+	if want := filepath.Join(f.cfg, "config.toml"); !strings.Contains(errb.String(), want) || !strings.Contains(errb.String(), "defaults") {
+		t.Errorf("no warning about %s using the defaults:\n%s", want, errb.String())
+	}
+}

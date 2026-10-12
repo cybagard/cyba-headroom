@@ -26,7 +26,7 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 			t.Errorf("%s resolves to %v, want a loopback address", host, addrs)
 		}
 	}
-	if Remote("docker", "tcp://127.1:2375", func(string) string { return "" }) {
+	if Remote("tcp://127.1:2375") {
 		t.Error("tcp://127.1:2375 is remote, want this Mac's")
 	}
 }
@@ -96,8 +96,8 @@ func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
 		{"ssh://dev@build-box", false, "build-box, which ssh's config may alias"},
 		{"ssh://dev@no-such-box.invalid", false, "a name, not resolved"},
 	} {
-		if got := Remote("docker", c.endpoint, func(string) string { return "" }); got == c.thisMac {
-			t.Errorf("Remote(docker, %q) = %v, want %v: the client reaches %s", c.endpoint, got, !c.thisMac, c.reaches)
+		if got := Remote(c.endpoint); got == c.thisMac {
+			t.Errorf("Remote(%q) = %v, want %v: the client reaches %s", c.endpoint, got, !c.thisMac, c.reaches)
 		}
 	}
 }

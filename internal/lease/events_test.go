@@ -728,7 +728,7 @@ func TestAStartBeforeAnUpsCheckBindsHeld(t *testing.T) {
 		bindings    string
 		reservedMiB uint64
 	}{
-		{"started before an up's check", false, true, " (held)", 2048},
+		{"started before an up's check", false, true, " (adopted)", 2048},
 		{"started after a guessed up's check", true, false, "", 2048 - 256},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -770,7 +770,7 @@ func TestAContainerBackAfterMissedReadingsBindsHeld(t *testing.T) {
 		bindings    string
 		reservedMiB uint64
 	}{
-		{"no event", false, " (held)", 2048},
+		{"no event", false, " (adopted)", 2048},
 		{"a die between", true, "", 2048 - 256},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -64,7 +64,7 @@ func TestTheModelsTicketTTLIsTheBooks(t *testing.T) {
 type mwaiter struct {
 	ticket string
 	call   func() bool
-	cost   uint64    // what its last ask said it costs
+	cost   uint64   // what its last ask said it costs
 	takes  []string // the leases that call takes over (hold)
 	quiet  bool     // it stopped polling: gave up, interrupted, or died
 	driven bool     // op 15 asks for it, not the readings
@@ -1440,7 +1440,7 @@ func (m *model) differ() {
 		for _, l := range m.b.List() {
 			switch l.ID {
 			case x.heldBy:
-				want = append(want, l.ID+" (held)")
+				want = append(want, l.ID+" (adopted)")
 			case x.boundBy:
 				want = append(want, l.ID)
 			}

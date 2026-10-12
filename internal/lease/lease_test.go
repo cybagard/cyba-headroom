@@ -2133,7 +2133,7 @@ func TestAReadingThatShowsTheRestartEndsTheCrash(t *testing.T) {
 	d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: 2 * gib, Target: "app", OnEngine: true}, snap(), cfg)
 	c.t = c.t.Add(5 * time.Second)
 	b.Observe(read(a1(), c.t))
-	if got, want := lease.Bindings(b, "a1"), []string{d.LeaseID + " (held)"}; !slices.Equal(got, want) || strings.Contains(log.String(), "never appeared") {
+	if got, want := lease.Bindings(b, "a1"), []string{d.LeaseID + " (adopted)"}; !slices.Equal(got, want) || strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("a1 is bound by %q, want %q\n%s", got, want, log)
 	}
 }

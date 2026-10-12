@@ -300,6 +300,54 @@ func TestContainerStatsErrorKeepsThePreviousReading(t *testing.T) {
 	}
 }
 
+// A stats call still out at the reading's deadline is a failed one: that
+// container keeps its previous memory, and the others are read (#267).
+func TestContainerStatsDeadlineKeepsThePreviousReading(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slow atomic.Bool
+	release := make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/info":
+			_, _ = w.Write([]byte(`{"MemTotal":1}`))
+		case "/version":
+			_, _ = w.Write([]byte(`{}`))
+		case "/containers/json":
+			_, _ = w.Write([]byte(`[{"Id":"slow1","Names":["/slow"]},{"Id":"fast1","Names":["/fast"]}]`))
+		case "/containers/slow1/stats":
+			if slow.Load() {
+				<-release
+			}
+			_, _ = w.Write([]byte(cpuStats(1, 1)))
+		default:
+			_, _ = w.Write([]byte(`{"memory_stats":{"usage":2097152}}`))
+		}
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	src := docker.New(sock, fakeVMs{})
+	collect(t, src)
+	slow.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	r, err := src.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	var snap protocol.Snapshot
+	r.Apply(&snap)
+	if cs := snap.Engines[0].Containers; len(cs) != 2 || cs[0].MemoryBytes != 1048576 || cs[1].MemoryBytes != 2097152 {
+		t.Fatalf("containers = %+v, want the slow one's first memory and the fast one's", cs)
+	}
+}
+
 // The previous readings are of the containers in the last list only: one
 // that left it and came back with failing stats has no memory (#267).
 func TestPreviousReadingLeavesWithTheContainer(t *testing.T) {

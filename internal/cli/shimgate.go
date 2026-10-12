@@ -121,9 +121,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		return gated{proceed: true}
 	}
 	// The engine, once and first: a remote one proceeds before the config
-	// or the call's labels matter. Docker's is its CLI's (#90); an unknown
-	// one ("") is this Mac's, never DOCKER_HOST, which the CLI ignores when
-	// the call names a context.
+	// or the call's labels matter. Docker's is its CLI's (#90), Podman's
+	// podman's (#71); an unknown one ("") is this Mac's, never DOCKER_HOST
+	// or CONTAINER_HOST, which the CLI ignores when the call names a
+	// context or connection.
 	engine, remote := "", false
 	switch {
 	case c.Kind == "tart", c.Kind == "machine":
@@ -133,13 +134,8 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote(name, engine, getenv)
 	default:
-		// Podman's is the last engine flag, as before #90 (its own order
-		// is #71).
-		endpoint := c.Context
-		if c.HostLast {
-			endpoint = c.Host
-		}
-		remote = shim.Remote(name, endpoint, getenv)
+		engine = podmanEndpointIn(getenv, c)
+		remote = engine != "" && shim.Remote(name, engine, getenv)
 	}
 	if remote {
 		return gated{proceed: true}
@@ -1298,6 +1294,56 @@ func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
 		return ""
 	}
 	return meta.Endpoints["docker"].Host
+}
+
+// podmanEndpointIn is the endpoint podman talks to for call c: its own
+// -c/--connection's, whatever its order with --url; else --url (c.Host);
+// else CONTAINER_CONNECTION's; else CONTAINER_HOST; else the default
+// connection's. That is podman 6.1.3's order, measured. A connection is its
+// URI in the connections file (man podman-system-connection):
+// PODMAN_CONNECTIONS_CONF, else containers/podman-connections.json under
+// XDG_CONFIG_HOME, else under ~/.config. "" (unknown) when the name is not
+// there, or the file cannot be read or parsed, or its path is relative.
+// Connections in containers.conf are not read: they are unknown too.
+func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
+	name := c.Context
+	if name == "" {
+		if c.HasHost {
+			return c.Host
+		}
+		name = getenv("CONTAINER_CONNECTION")
+	}
+	if h := getenv("CONTAINER_HOST"); h != "" && name == "" {
+		return h
+	}
+	path := getenv("PODMAN_CONNECTIONS_CONF")
+	if path == "" {
+		dir := getenv("XDG_CONFIG_HOME")
+		if dir == "" {
+			dir = filepath.Join(getenv("HOME"), ".config")
+		}
+		path = filepath.Join(dir, "containers", "podman-connections.json")
+	}
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var file struct {
+		Connection struct {
+			Default     string
+			Connections map[string]struct{ URI string }
+		}
+	}
+	if json.Unmarshal(b, &file) != nil {
+		return ""
+	}
+	if name == "" {
+		name = file.Connection.Default
+	}
+	return file.Connection.Connections[name].URI
 }
 
 // sameSocket reports whether a Docker endpoint (unix://path) is socket.

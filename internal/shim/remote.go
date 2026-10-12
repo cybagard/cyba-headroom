@@ -11,11 +11,11 @@ import (
 
 // Remote reports whether a container call goes to an engine on another
 // machine, whose memory is not this Mac's: a tcp:// or ssh:// endpoint on
-// a host other than this one. The endpoint is the call's own
-// (the last of Call.Host and Call.Context), else the engine's variable: DOCKER_HOST for docker,
-// CONTAINER_HOST for podman. Named contexts and connections count as local,
-// and so do podman machine's ssh://…@127.0.0.1 and any host thisMac finds
-// here. The host is the one the client dials (see dialed).
+// a host other than this one. The endpoint is the one the CLI talks to, its
+// contexts and connections already resolved by the caller; "" is the
+// engine's variable: DOCKER_HOST for docker, CONTAINER_HOST for podman.
+// Podman machine's ssh://…@127.0.0.1 counts as local, and so does any host
+// thisMac finds here. The host is the one the client dials (see dialed).
 func Remote(name, endpoint string, getenv func(string) string) bool {
 	if endpoint == "" {
 		endpoint = getenv(map[string]string{"docker": "DOCKER_HOST", "podman": "CONTAINER_HOST"}[name])

@@ -52,6 +52,8 @@ func TestParse(t *testing.T) {
 		{"docker -c remote -D --host=unix:///x.sock run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine", Host: "unix:///x.sock", HasHost: true, Context: "remote", HostLast: true}},
 		{"podman --connection m1 --url=ssh://h run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Host: "ssh://h", HasHost: true, Context: "m1", HostLast: true}},
 		{"podman --url=ssh://h --connection m1 run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Host: "ssh://h", HasHost: true, Context: "m1"}},
+		{"podman --context b -c m1 run alpine", Call{Kind: "container", Op: "run", Command: "podman run alpine", Target: "alpine", Context: "m1", PodmanContext: "b"}},
+		{"podman --context b pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web", PodmanContext: "b"}},
 		// A global flag newer than the tables: boolean if a command follows it,
 		// else it takes a value.
 		{"docker --unknown run alpine", Call{Kind: "container", Op: "run", Command: "docker run alpine", Target: "alpine"}},

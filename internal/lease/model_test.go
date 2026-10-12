@@ -44,9 +44,10 @@ const lowReadings = 1
 // call (op 15) polls: it is denied, and asked again after each.
 const waitReadings = 3
 
-// ticketTTL is how long a waiting call's ticket lasts unpolled: three of
-// the shim's polls (#72).
-const ticketTTL = 3 * protocol.WaitPoll
+// ticketTTL is how long a waiting call's ticket lasts unpolled, the book
+// having no policy.daemon_timeout: two cycles of a 2 s poll and the compose
+// dry run's 2.5 s (#72, plan amendment 2).
+const ticketTTL = 9 * time.Second
 
 // mwaiter is a BUDGET_WAIT call queued with a ticket (#72). Each reading,
 // those still polling ask again, in an order that varies, until they are
@@ -172,6 +173,7 @@ type model struct {
 	diff     bool                 // HEADROOM_MODEL_DIFF=1: compare guessed bookkeeping with the book's after each op (differ)
 	waiters  []*mwaiter           // the live tickets, in arrival order (#72)
 	asking   *mwaiter             // the waiter whose call is asking
+	taking   uint64               // what the leases the asking call takes over reserve
 	polled   map[string]time.Time // each ticket's last ask
 }
 
@@ -299,6 +301,8 @@ func (m *model) check(r policy.Request) protocol.Decision {
 		r.Wait, r.Ticket, w.asked = true, w.ticket, true
 	}
 	d := m.b.Check(r, m.snapshot(), cfg)
+	taking := m.taking
+	m.taking = 0
 	if !d.Allow && m.headroom == plenty {
 		m.fail("%s denied: %+v", r.Command, d)
 	}
@@ -311,7 +315,7 @@ func (m *model) check(r policy.Request) protocol.Decision {
 		m.outcomes["queue: held back"]++ // it would fit but for the tickets ahead
 	}
 	if w != nil {
-		m.queued(w, d)
+		m.queued(w, d, taking)
 	}
 	m.queueMatches()
 	if d.Allow {
@@ -422,6 +426,9 @@ func (m *model) composeUp(st stack, guess int) bool {
 		// A guess only once it bound something (lease.go composeTakes).
 		if g := m.guesses[l.ID]; m.leases[l.ID] == cmd || g != nil && m.confirmed(l.ID) && g.project == project && g.wt == wt {
 			taken[l.ID] = true
+			if !idle {
+				m.taking += l.Bytes // every other call counts it: a waiting up holds only the rest
+			}
 		}
 	}
 	r := policy.Request{Worktree: wt, Kind: "compose", Op: "up", Command: cmd,
@@ -1065,9 +1072,11 @@ func (m *model) holds(w *mwaiter) uint64 {
 
 // queued settles w after its ask was decided: allowed, it leaves the
 // queue; denied for what waiting may fix, it keeps its ticket, or joins
-// the back with a new one if it had none the book knew; denied for
-// anything else, it is dropped.
-func (m *model) queued(w *mwaiter, d protocol.Decision) {
+// the back with a new one if it had none the book knew, and holds its cost
+// less taking, what the leases it takes over reserve: every other call
+// counts those already, and must not count them twice (review round 1 F1);
+// denied for anything else, it is dropped.
+func (m *model) queued(w *mwaiter, d protocol.Decision, taking uint64) {
 	live := slices.Contains(m.waiters, w)
 	switch {
 	case d.Allow:
@@ -1098,7 +1107,10 @@ func (m *model) queued(w *mwaiter, d protocol.Decision) {
 			m.waiters = append(m.waiters, w)
 			m.step("queued as ticket %q", w.ticket)
 		}
-		w.cost, w.polled = d.CostBytes, m.c.t
+		w.cost, w.polled = d.CostBytes-min(d.CostBytes, taking), m.c.t
+		if taking > 0 {
+			m.outcomes["queue: takeover held"]++
+		}
 		m.polled[w.ticket] = m.c.t
 	}
 }
@@ -1528,7 +1540,8 @@ func TestTheLeaseModel(t *testing.T) {
 	t.Logf("outcomes: %v", outcomes)
 	if seeds >= 300 {
 		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker",
-			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled"} {
+			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled",
+			"queue: takeover held"} {
 			if outcomes[k] == 0 {
 				t.Errorf("no %s ran: %v", k, outcomes)
 			}

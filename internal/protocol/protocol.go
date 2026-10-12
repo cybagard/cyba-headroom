@@ -103,9 +103,17 @@ type CheckRequest struct {
 	Ticket string `json:"ticket,omitempty"`
 }
 
-// WaitPoll is how often a waiting call asks again. A ticket not asked
-// with for three of them ends (#72).
+// WaitPoll is how often a waiting call asks again (#72).
 const WaitPoll = 2 * time.Second
+
+// ComposeTimeout bounds each docker compose command the shim runs before
+// it asks (its config, its dry run), and ComposeWaitDelay the wait for its
+// output after that. A waiting compose call runs the dry run before each
+// ask, so the daemon sizes a ticket's life by them (#72).
+const (
+	ComposeTimeout   = 2 * time.Second
+	ComposeWaitDelay = 500 * time.Millisecond
+)
 
 // LeaseLabel carries a gated run's lease ID on its container, so the
 // daemon tells it from one started past the shim (#33).

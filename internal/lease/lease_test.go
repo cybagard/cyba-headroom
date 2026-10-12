@@ -3724,16 +3724,19 @@ func TestAWaitingMacOSVMHoldsTheSlotThatFrees(t *testing.T) {
 }
 
 // A waiting call that stops asking (it gave up, was interrupted, or died)
-// holds its room for at most ticketTTL, three of the shim's polls (#72).
+// holds its room for at most its ticket's life: 9 s with no
+// policy.daemon_timeout set, two cycles of a 2 s poll and the compose dry
+// run's 2.5 s (#72).
 func TestATicketNotAskedWithEnds(t *testing.T) {
 	b, c, _ := book(t)
+	const ttl = 9 * time.Second
 	b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
 	s := room(8 * gib)
-	c.t = t0.Add(3*protocol.WaitPoll - time.Millisecond)
+	c.t = t0.Add(ttl - time.Millisecond)
 	if d := b.Check(req("w2", gib), s, cfg); d.Allow {
 		t.Fatalf("the hold ended early: %+v", d)
 	}
-	c.t = t0.Add(3 * protocol.WaitPoll)
+	c.t = t0.Add(ttl)
 	if d := b.Check(req("w2", gib), s, cfg); !d.Allow {
 		t.Fatalf("the hold outlived its ticket: %+v", d)
 	}
@@ -3742,7 +3745,7 @@ func TestATicketNotAskedWithEnds(t *testing.T) {
 	}
 	// A reading ends it too.
 	b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
-	c.t = c.t.Add(3 * protocol.WaitPoll)
+	c.t = c.t.Add(ttl)
 	b.Observe(s)
 	if got := tickets(b); len(got) != 0 {
 		t.Fatalf("a reading kept tickets: %q", got)
@@ -3778,5 +3781,64 @@ func TestAnUnknownTicketQueuesAtTheBack(t *testing.T) {
 	}
 	if got := tickets(b); !slices.Equal(got, []string{a.Ticket, d.Ticket}) {
 		t.Fatalf("queue %q", got)
+	}
+}
+
+// A waiting call that takes a lease over holds only what that lease does
+// not already reserve: every other call still counts the lease, so its
+// bytes are counted once (#72, review round 1 F1). A compose up of a
+// project its worktree's lease holds takes that lease over.
+func TestAWaitingComposeTakeoverHoldsOnlyWhatItAdds(t *testing.T) {
+	b, _, _ := book(t)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", CostBytes: 4 * gib, OnEngine: true}
+	if d := b.Check(up, room(10*gib), cfg); !d.Allow {
+		t.Fatalf("first up: %+v", d)
+	}
+	if d := b.Check(waits("w2", 7*gib, ""), room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("A: %+v", d)
+	}
+	again := up
+	again.Wait = true
+	if d := b.Check(again, room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("the up again: %+v", d)
+	}
+	if d := b.Check(req("w2", gib), room(12*gib), cfg); !d.Allow {
+		t.Fatalf("the up's lease counted twice: %+v", d)
+	}
+}
+
+// So does a start of a container a create made, whose lease it takes over
+// (#72, review round 1 F1).
+func TestAWaitingStartOfACreatedContainerHoldsOnlyWhatItAdds(t *testing.T) {
+	b, _, _ := book(t)
+	create := policy.Request{Worktree: "w1", Kind: "container", Op: "create", Command: "docker create -m 4g x", CostBytes: 4 * gib, Labelled: true}
+	made := b.Check(create, room(8*gib), cfg)
+	if !made.Allow {
+		t.Fatalf("create: %+v", made)
+	}
+	start := policy.Request{Worktree: "w1", Kind: "container", Op: "start", Command: "docker start x", Target: "x",
+		ContainerID: "00000000000000000000000000000000000000000000000000000000000000a1", TakesOver: made.LeaseID, OnEngine: true, Wait: true}
+	if d := b.Check(start, room(3*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("start at 3 GB: %+v", d)
+	}
+	if d := b.Check(req("w2", gib), room(8*gib+gib/2), cfg); !d.Allow {
+		t.Fatalf("the create's lease counted twice: %+v", d)
+	}
+}
+
+// A live waiter's ticket outlasts its longest cycle from one ask to the
+// next: a poll (2 s), the compose dry run (2 s, and 0.5 s for its output),
+// and the ask, at policy.daemon_timeout (#72, plan amendment 2).
+func TestATicketOutlastsAWaitersSlowestCycle(t *testing.T) {
+	b, c, _ := book(t)
+	b.SetDaemonTimeout(2 * time.Second)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	cycle := 2*time.Second + 2*time.Second + 500*time.Millisecond + 2*time.Second
+	c.t = t0.Add(cycle)
+	if d := b.Check(req("w2", gib), room(8*gib), cfg); d.Allow {
+		t.Fatalf("the hold ended within one cycle: %+v", d)
+	}
+	if d := b.Check(waits("w1", 8*gib, a.Ticket), room(3*gib), cfg); d.Ticket != a.Ticket {
+		t.Fatalf("a live waiter lost its place: %+v", d)
 	}
 }

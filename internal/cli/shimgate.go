@@ -35,8 +35,8 @@ const (
 	// one (podman-docker's `exec podman`) has the same PID and is not
 	// checked, and leased, twice; a child it starts has another PID and is.
 	shimCheckedVar = "HEADROOM_SHIM_CHECKED"
-	// waitPoll is how often a waiting call (BUDGET_WAIT=1) asks again: a
-	// ticket not asked with for three of them ends (#72).
+	// waitPoll is how often a waiting call (BUDGET_WAIT=1) asks again
+	// (#72).
 	waitPoll = protocol.WaitPoll
 )
 
@@ -1199,7 +1199,7 @@ func normalProject(s string) string {
 // composeTimeout bounds docker compose config (30-40 ms on a plain stack):
 // it reads the compose files, as the call itself is about to, and delays a
 // call that fails open by at most this much.
-const composeTimeout = 2 * time.Second
+const composeTimeout = protocol.ComposeTimeout
 
 // askCompose runs docker compose config (args) at bin in env and dir ("":
 // this process's) and returns its JSON.
@@ -1207,7 +1207,7 @@ func askCompose(bin string, args, env []string, dir string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, 500*time.Millisecond
+	cmd.Env, cmd.Dir, cmd.WaitDelay = env, dir, protocol.ComposeWaitDelay
 	return cmd.Output()
 }
 
@@ -1217,7 +1217,7 @@ func askMachine(bin string, args, env []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env, cmd.WaitDelay = env, 500*time.Millisecond
+	cmd.Env, cmd.WaitDelay = env, protocol.ComposeWaitDelay
 	return cmd.Output()
 }
 
@@ -1228,7 +1228,7 @@ func askComposeDry(bin string, args, env []string) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	// Its plan as plain lines, whatever the call's environment asks for.
-	cmd.Env, cmd.WaitDelay = append(slices.Clone(env), "COMPOSE_PROGRESS=plain", "COMPOSE_ANSI=never"), 500*time.Millisecond
+	cmd.Env, cmd.WaitDelay = append(slices.Clone(env), "COMPOSE_PROGRESS=plain", "COMPOSE_ANSI=never"), protocol.ComposeWaitDelay
 	return cmd.CombinedOutput()
 }
 

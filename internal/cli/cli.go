@@ -568,6 +568,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 	d.SetDerive(derive(book, cfg.Budget.Params()))
 	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
+	book.SetDaemonTimeout(cfg.Policy.DaemonTimeout.Duration)
 	return book
 }
 

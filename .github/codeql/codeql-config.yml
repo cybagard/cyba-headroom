@@ -1,0 +1,9 @@
+name: headroom CodeQL config
+
+queries:
+  - uses: security-extended
+
+# headroom's inputs are local: the engine sockets, Docker context and Podman
+# machine files, the environment, the shim's argv and the daemon's socket.
+# The default (remote) threat model treats almost none of them as sources.
+threat-models: local

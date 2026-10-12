@@ -4,6 +4,8 @@
 
 Report a vulnerability in private through GitHub. On the repository page, open **Security**, then **Report a vulnerability**. Do not open a public issue for a vulnerability.
 
+The form is at <https://github.com/cybagard/cyba-headroom/security/advisories/new>. [`.well-known/security.txt`](.well-known/security.txt) gives the same contact in the RFC 9116 format.
+
 ## What headroom contacts and stores
 
 headroom reads the `/api/ps` endpoint of Ollama only while an `ollama serve` process runs. It never contacts a host that is not this Mac. A host is this Mac when it is a loopback address or `localhost`.

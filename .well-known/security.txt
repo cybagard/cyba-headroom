@@ -1,0 +1,4 @@
+Contact: https://github.com/cybagard/cyba-headroom/security/advisories/new
+Expires: 2027-10-01T00:00:00.000Z
+Policy: https://github.com/cybagard/cyba-headroom/security/policy
+Preferred-Languages: en

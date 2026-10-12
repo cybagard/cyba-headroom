@@ -836,11 +836,51 @@ func TestInstallBinRemovesTheOldCopy(t *testing.T) {
 	if _, err := os.Lstat(copyPath); !os.IsNotExist(err) {
 		t.Errorf("old copy stayed: %v", err)
 	}
-	if want := "removed: old copy " + copyPath + " (it would shadow " + link + " on PATH)\n"; !strings.Contains(f.out.String(), want) {
+	if want := "removed: old copy " + copyPath + " (it would shadow " + link + " on PATH); "; !strings.Contains(f.out.String(), want) {
 		t.Errorf("output lacks %q:\n%s", want, f.out.String())
 	}
 	if _, err := os.Stat(link); err != nil {
 		t.Errorf("the --bin binary is gone: %v", err)
+	}
+}
+
+// An Orca agent command that ran the removed copy fails: the removal line
+// says which command to run instead, the Orca lines printed above or, with
+// none, the line itself (#219).
+func TestInstallBinRemovalNamesTheOrcaCommand(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		agents, conf bool
+		want         func(f *installFixture, link string) string
+	}{
+		{"an agent found", true, true, func(*installFixture, string) string {
+			return "must use the lines above"
+		}},
+		{"none found", false, false, func(_ *installFixture, link string) string {
+			return "must now run " + shellWord(link) + " run -- <agent>"
+		}},
+		{"none found, a config dir set", false, true, func(f *installFixture, link string) string {
+			return "must now run env HEADROOM_CONFIG_DIR=" + shellWord(f.cfg) + " " + shellWord(link) + " run -- <agent>"
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newInstallFixture(t)
+			copyPath, link := switchToBin(t, f)
+			if !c.agents {
+				f.in.lookPath = func(string) bool { return false }
+			}
+			if !c.conf {
+				f.in.getenv = func(k string) string { return map[string]string{"HOME": f.home}[k] }
+			}
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			want := "removed: old copy " + copyPath + " (it would shadow " + link + " on PATH); Orca agent commands that run " +
+				copyPath + " " + c.want(f, link) + "\n"
+			if !strings.Contains(f.out.String(), want) {
+				t.Errorf("output lacks %q:\n%s", want, f.out.String())
+			}
+		})
 	}
 }
 

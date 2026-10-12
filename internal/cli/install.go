@@ -177,8 +177,8 @@ func (in *installer) install(ctx context.Context) int {
 	}
 	fmt.Fprintf(in.out, "headroom daemon running under launchd (%s)\n  binary  %s\n  agent   %s\n  log     %s (headroom logs)\n",
 		agentLabel, bin, in.plistPath(), logPath)
-	in.installShims(bin)
-	in.removeOldCopy(bin)
+	prefix := in.configPrefix()
+	in.removeOldCopy(bin, prefix, in.installShims(bin, prefix))
 	in.notePath(filepath.Dir(bin))
 	return 0
 }
@@ -201,8 +201,10 @@ func defaultBin(home string) string { return filepath.Join(home, ".local", "bin"
 
 // removeOldCopy removes the copy a plain install left at the default path
 // once install --bin chose another: first on PATH, it would shadow bin
-// (#194). Anything else there stays, with a note.
-func (in *installer) removeOldCopy(bin string) {
+// (#194). Anything else there stays, with a note. An Orca agent command
+// that ran it must change: to the lines installShims printed, if it did
+// (#219).
+func (in *installer) removeOldCopy(bin, prefix string, printed bool) {
 	old := defaultBin(in.home)
 	if !in.binGiven || old == bin {
 		return
@@ -219,7 +221,11 @@ func (in *installer) removeOldCopy(bin string) {
 			fmt.Fprintf(in.errw, "headroom: removing the old copy %s: %v; it may shadow %s on PATH\n", old, err, bin)
 			return
 		}
-		fmt.Fprintf(in.out, "removed: old copy %s (it would shadow %s on PATH)\n", old, bin)
+		use := "use the lines above"
+		if !printed {
+			use = "now run " + prefix + shellWord(bin) + " run -- <agent>"
+		}
+		fmt.Fprintf(in.out, "removed: old copy %s (it would shadow %s on PATH); Orca agent commands that run %s must %s\n", old, bin, old, use)
 		return
 	}
 	fmt.Fprintf(in.errw, "headroom: %s is not a copy headroom install made: left as it is; it may shadow %s on PATH\n", old, bin)
@@ -229,10 +235,12 @@ func (in *installer) removeOldCopy(bin string) {
 var orcaAgents = []string{"claude", "codex", "kilo", "opencode", "gemini", "goose", "amp"}
 
 // installShims links the shims to bin and says how to launch Orca's agents
-// through them (R9, #31). A failure is reported, not fatal: the daemon runs.
-func (in *installer) installShims(bin string) {
+// through them (R9, #31), each command starting with prefix. A failure is
+// reported, not fatal: the daemon runs. It reports whether it printed the
+// commands.
+func (in *installer) installShims(bin, prefix string) bool {
 	if in.shimDir == "" {
-		return
+		return false
 	}
 	notes, err := linkShims(in.shimDir, bin)
 	for _, n := range notes {
@@ -240,18 +248,9 @@ func (in *installer) installShims(bin string) {
 	}
 	if err != nil {
 		fmt.Fprintf(in.errw, "headroom: linking the shims in %s: %v\n", in.shimDir, err)
-		return
+		return false
 	}
 	fmt.Fprintf(in.out, "  shims   %s (docker, podman, tart)\n", in.shimDir)
-	// A config dir other than the default must reach the agents' shims too.
-	prefix := ""
-	if in.getenv("HEADROOM_CONFIG_DIR") != "" || in.getenv("XDG_CONFIG_HOME") != "" {
-		if dir, err := config.Dir(in.getenv); err == nil {
-			if abs, err := filepath.Abs(dir); err == nil {
-				prefix = "env HEADROOM_CONFIG_DIR=" + shellWord(abs) + " "
-			}
-		}
-	}
 	var lines []string
 	for _, a := range orcaAgents {
 		if in.lookPath != nil && in.lookPath(a) {
@@ -262,6 +261,24 @@ func (in *installer) installShims(bin string) {
 		fmt.Fprintf(in.out, "\nTo gate the agents Orca launches, set each one's command in Orca → Settings → Agents:\n%s\n"+
 			"Agents already running keep their old PATH until restarted.\n", strings.Join(lines, "\n"))
 	}
+	return len(lines) > 0
+}
+
+// configPrefix is what an agent's command starts with so that its shims
+// find install's config dir, if that is not the default.
+func (in *installer) configPrefix() string {
+	if in.getenv("HEADROOM_CONFIG_DIR") == "" && in.getenv("XDG_CONFIG_HOME") == "" {
+		return ""
+	}
+	dir, err := config.Dir(in.getenv)
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	return "env HEADROOM_CONFIG_DIR=" + shellWord(abs) + " "
 }
 
 // waitUp waits until the launchd daemon itself answers on the socket.

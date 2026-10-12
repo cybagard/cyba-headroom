@@ -1,6 +1,10 @@
 package lease
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/cybagard/cyba-headroom/internal/protocol"
+)
 
 // SetAlive replaces b's process check, for tests.
 func SetAlive(b *Book, f func(pid int) bool) { b.alive = f }
@@ -41,3 +45,6 @@ func Bindings(b *Book, id string) []string {
 	}
 	return out
 }
+
+// Waiting returns b's queue of waiting calls, first come first (#72).
+func Waiting(b *Book) []protocol.Waiter { return b.Waiting() }

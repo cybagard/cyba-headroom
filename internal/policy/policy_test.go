@@ -391,3 +391,27 @@ func TestDenyNamesTheWorktreeByProject(t *testing.T) {
 		t.Fatalf("message %q", d.Message)
 	}
 }
+
+// What calls waiting ahead hold counts against headroom like a lease's
+// reservation, and the deny says so (#72); never against the worktree's
+// cap, which a hold that will clear must not turn into a deny waiting
+// cannot fix.
+func TestWaitingCallsAheadHoldTheirRoom(t *testing.T) {
+	r := req("busy", 2*gib) // 20 GiB headroom
+	r.HeldBytes, r.Waiting = 19*gib, 2
+	d := policy.Decide(r, snap(), cfg)
+	if d.Allow || !d.Retry || d.Reasons[0].Code != policy.Headroom ||
+		!strings.Contains(d.Reasons[0].Text, "19.0 GB of it held for 2 waiting calls ahead") {
+		t.Fatalf("held room taken: %+v", d)
+	}
+	r.HeldBytes = 18 * gib
+	if d := policy.Decide(r, snap(), cfg); !d.Allow {
+		t.Fatalf("fits after the holds: %+v", d)
+	}
+	c := cfg
+	c.PerWorktreeCapBytes = 5 * gib // busy uses 2 GiB
+	r.HeldBytes = 10 * gib
+	if d := policy.Decide(r, snap(), c); !d.Allow {
+		t.Fatalf("holds count toward the cap: %+v", d)
+	}
+}

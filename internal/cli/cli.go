@@ -568,6 +568,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 	d.SetDerive(derive(book, cfg.Budget.Params()))
 	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
+	book.SetDaemonTimeout(cfg.Policy.DaemonTimeout.Duration)
 	return book
 }
 
@@ -648,8 +649,9 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 }
 
 // derive fills in what each tick computes from the sources: the budget,
-// attribution, and, once leases are settled, the open leases and the
-// containers and VMs that appeared without a check (#33).
+// attribution, and, once leases are settled, the open leases, the
+// containers and VMs that appeared without a check (#33), and the calls
+// waiting for room (#72).
 func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
 	return func(s *protocol.Snapshot) {
 		b := budget.Compute(s, params)
@@ -659,6 +661,7 @@ func derive(book *lease.Book, params budget.Params) func(*protocol.Snapshot) {
 		book.Observe(s)
 		s.Leases = book.List()
 		s.Ungated = book.Ungated()
+		s.Waiting = book.Waiting()
 	}
 }
 
@@ -683,7 +686,7 @@ func gateCheckOn(book *lease.Book, pol policy.Config, docker Inspector, socket s
 		id, by := attribution.Identify(s, attribution.Caller{Worktree: r.Worktree, Cwd: r.Cwd, RealCwd: r.RealCwd, Ancestors: r.Ancestors})
 		req := policy.Request{Worktree: id, Kind: r.Kind, Command: r.Command, CostBytes: r.CostBytes, MacOS: r.MacOS, VMUnknown: r.VMUnknown, PID: r.PID,
 			Target: r.Target, Name: r.Name, Labelled: r.Labelled, Op: r.Op, Idle: r.Idle, Guessed: r.Guessed, ComposeDir: r.ComposeDir,
-			Unnamed: r.Unnamed, OnEngine: sameSocket(r.Engine, socket)}
+			Unnamed: r.Unnamed, OnEngine: sameSocket(r.Engine, socket), Wait: r.Wait, Ticket: r.Ticket}
 		if r.Kind == "container" && (r.Op == "start" || r.Op == "restart") && r.Target != "" {
 			lookUpStarts(&req, r, docker, socket)
 		}

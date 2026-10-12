@@ -173,3 +173,15 @@ func TestSlotHoldersAreNamedByProject(t *testing.T) {
 		t.Fatalf("message %q", msg)
 	}
 }
+
+// A macOS VM waiting ahead holds a slot (#72).
+func TestMacOSSlotsCountVMsWaitingAhead(t *testing.T) {
+	s := slotSnap()
+	s.Tart.MacOSRunning, s.Tart.VMs = 1, s.Tart.VMs[1:]
+	r := tartReq("busy", true)
+	r.HeldMacOS, r.Waiting = 1, 1
+	if d := policy.Decide(r, s, slotCfg); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots ||
+		!strings.Contains(d.Reasons[0].Text, "1 held for a waiting call ahead") {
+		t.Fatalf("the free slot is held: %+v", d)
+	}
+}

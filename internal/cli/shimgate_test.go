@@ -298,6 +298,44 @@ func TestShimGateWaits(t *testing.T) {
 	}
 }
 
+// A waiting call asks to wait, and carries back the ticket each deny gave
+// it, a new one replacing the last (#72). Against a daemon that gives
+// none, it still waits by asking again.
+func TestShimGateWaitsWithItsTicket(t *testing.T) {
+	r := newShimRig(t)
+	r.env = append(r.env, "BUDGET_WAIT=1")
+	tickets := []string{"ticket-a-1", "ticket-a-1", "ticket-b-1", ""}
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		if n := len(r.asked); n <= len(tickets) {
+			return &protocol.Decision{Retry: true, Ticket: tickets[n-1], Message: "headroom: not starting it: only 0.5 GB headroom",
+				Reasons: []protocol.Reason{{Code: "headroom", Text: "only 0.5 GB headroom", Retry: true}}}, nil
+		}
+		return allow(protocol.CheckRequest{})
+	}
+	code, stderr := r.run("docker", "run", "alpine")
+	if code != 0 || r.execed == "" || len(r.asked) != 5 {
+		t.Fatalf("exit %d, exec %q, asked %d, stderr %q", code, r.execed, len(r.asked), stderr)
+	}
+	var sent []string
+	for _, a := range r.asked {
+		if !a.Wait {
+			t.Fatalf("an ask without Wait: %+v", a)
+		}
+		sent = append(sent, a.Ticket)
+	}
+	if want := []string{"", "ticket-a-1", "ticket-a-1", "ticket-b-1", ""}; !slices.Equal(sent, want) {
+		t.Fatalf("tickets sent %q, want %q", sent, want)
+	}
+	// Without BUDGET_WAIT it does not ask to wait.
+	r.asked, r.env = nil, r.env[:len(r.env)-1]
+	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
+		return &protocol.Decision{Retry: true, Message: "no"}, nil
+	}
+	if code, _ := r.run("docker", "run", "alpine"); code != exitDenied || len(r.asked) != 1 || r.asked[0].Wait || r.asked[0].Ticket != "" {
+		t.Fatalf("exit %d, asked %+v", code, r.asked)
+	}
+}
+
 func TestShimGateWaitsOnlyWhenItHelps(t *testing.T) {
 	r := newShimRig(t)
 	r.env = append(r.env, "BUDGET_WAIT=1")
@@ -362,6 +400,140 @@ func TestShimGateAgainstTheDaemon(t *testing.T) {
 	slices.Sort(got)
 	if !slices.Equal(got, []int{0, exitDenied}) {
 		t.Fatalf("exit codes %v, want one run and one deny", got)
+	}
+}
+
+// roomSource is a host whose memory the test sets: growing it makes room.
+type roomSource struct {
+	mu    sync.Mutex
+	total uint64
+}
+
+func (*roomSource) Name() string { return "host" }
+func (h *roomSource) Collect(context.Context) (daemon.Reading, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return roomReading(h.total), nil
+}
+
+type roomReading uint64
+
+func (r roomReading) Apply(s *protocol.Snapshot) {
+	s.Host = &protocol.Host{TotalBytes: uint64(r), Pressure: "normal"}
+}
+
+// End to end against the daemon's own wiring: waiting calls are allowed
+// first come first (#72). A (8 GB) waits, then B and C (1 GB each), with
+// room for B alone; a call that does not wait may not take A's room. Room
+// grows in steps, and each time the later calls ask first: A runs, then
+// B, then C. status --json lists the queue.
+func TestShimGateWaitersRunInArrivalOrder(t *testing.T) {
+	host := &roomSource{total: 64 << 30}
+	cfg := config.Defaults("/x")
+	envMap, d := serveDaemonFrom(t, []daemon.Source{host}, func(d *daemon.Daemon) { wireGate(d, cfg, discardLog(), nil) })
+	minFree := int64(cfg.PolicyConfig().MinHeadroomBytes)
+	// free sets the room above min_headroom to f.
+	free := func(f int64) {
+		h := *d.Snapshot().Budget.HeadroomBytes
+		host.mu.Lock()
+		host.total = uint64(int64(host.total) + f - (h - minFree))
+		host.mu.Unlock()
+		d.Tick(context.Background())
+		if got := *d.Snapshot().Budget.HeadroomBytes - minFree; got != f {
+			t.Fatalf("free %d, want %d", got, f)
+		}
+	}
+	const gb = int64(1 << 30)
+	free(gb)
+	r := newShimRig(t)
+	env := []string{"PATH=" + r.dir, "HEADROOM_CONFIG_DIR=" + envMap["HEADROOM_CONFIG_DIR"], "HEADROOM_WORKTREE=w", "BUDGET_WAIT=1"}
+	var mu sync.Mutex
+	var ran []string
+	type waiter struct {
+		polled, again chan struct{}
+		done          chan int
+	}
+	start := func(name, mem string) *waiter {
+		w := &waiter{polled: make(chan struct{}), again: make(chan struct{}), done: make(chan int, 1)}
+		go func() {
+			w.done <- Run(Env{Args: []string{"docker", "run", "-m", mem, "alpine"}, Stdout: io.Discard, Stderr: io.Discard,
+				Getenv: func(string) string { return "" }, Environ: func() []string { return env },
+				exec: func(string, []string, []string) error {
+					mu.Lock()
+					ran = append(ran, name)
+					mu.Unlock()
+					return nil
+				},
+				wait: func(dur time.Duration) os.Signal {
+					if dur > 0 {
+						w.polled <- struct{}{}
+						<-w.again
+					}
+					return nil
+				}})
+		}()
+		return w
+	}
+	// asked waits for w's ask: whether it was allowed.
+	asked := func(w *waiter) bool {
+		select {
+		case <-w.polled:
+			return false
+		case code := <-w.done:
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			return true
+		case <-time.After(10 * time.Second):
+			t.Fatal("no ask")
+		}
+		return false
+	}
+	// asks has w ask again.
+	asks := func(w *waiter) bool {
+		w.again <- struct{}{}
+		return asked(w)
+	}
+	a := start("A", "8g")
+	var b, c *waiter
+	if asked(a) {
+		t.Fatal("A ran with 1 GB of room")
+	}
+	if b = start("B", "1g"); asked(b) {
+		t.Fatal("B took A's room")
+	}
+	if c = start("C", "1g"); asked(c) {
+		t.Fatal("C took A's room")
+	}
+	d.Tick(context.Background())
+	if q := d.Snapshot().Waiting; len(q) != 3 || q[0].Bytes != 8<<30 || q[1].Bytes != 1<<30 {
+		t.Fatalf("queue %+v", q)
+	}
+	code, out, _ := run(t, envMap, "headroom", "status", "--json")
+	if code != 0 || strings.Count(out, `"ticket"`) != 3 {
+		t.Fatalf("status --json: exit %d, %s", code, out)
+	}
+	var stderr strings.Builder
+	plain := Run(Env{Args: []string{"docker", "run", "-m", "1g", "alpine"}, Stdout: io.Discard, Stderr: &stderr,
+		Getenv: func(string) string { return "" }, Environ: func() []string { return env[:3] },
+		exec: func(string, []string, []string) error { return nil }})
+	if plain != exitDenied || !strings.Contains(stderr.String(), "held for 3 waiting calls ahead") || !strings.Contains(stderr.String(), "BUDGET_WAIT=1") {
+		t.Fatalf("a call that does not wait: exit %d, stderr %q", plain, stderr.String())
+	}
+	free(8*gb + gb/2) // A's room, not B's beside it
+	if asks(c) || asks(b) || !asks(a) {
+		t.Fatalf("with room for A alone, ran %q", ran)
+	}
+	free(9*gb + gb/2) // and B's
+	if asks(c) || !asks(b) {
+		t.Fatalf("with room for A and B, ran %q", ran)
+	}
+	free(10*gb + gb/2)
+	if !asks(c) {
+		t.Fatalf("with room for all, ran %q", ran)
+	}
+	if !slices.Equal(ran, []string{"A", "B", "C"}) {
+		t.Fatalf("ran %q, want A, B, C", ran)
 	}
 }
 

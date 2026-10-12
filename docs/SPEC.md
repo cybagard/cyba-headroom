@@ -89,7 +89,10 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 - [ ] Resolves identity in order: `HEADROOM_WORKTREE`, git toplevel of the cwd, process ancestry; calls with no Orca worktree (a human typing `docker`) pass through and are attributed as **manual**
 - [ ] On allow, replaces itself with the real binary (`exec`), so TTY, signals and exit codes behave as if the shim were not there
 - [ ] On deny, exits 75 (temporary failure) with a message written for an agent: headroom, estimated cost, and the agent's own idle resources it could reuse or stop
-- [ ] `BUDGET_WAIT=1` queues the request instead of denying, with a timeout
+- [x] `BUDGET_WAIT=1` queues the request instead of denying, with a timeout (`policy.wait_timeout`), first come first (#72)
+  - A queued call holds its cost, and its macOS slot, against every call after it, so a later call cannot take room an earlier one is due. A later call may go first only when there is room for both.
+  - Holds count against headroom and macOS slots, never toward a worktree's cap. A deny they cause says so, and names `BUDGET_WAIT=1`.
+  - A call is allowed on its own ask. A call that stops asking loses its place within two of its slowest cycles from one ask to the next: a poll, the compose dry run and `policy.daemon_timeout` (10 s at the defaults). `headroom status --json` lists the queue
 - [ ] Resolves `docker` aliased to `podman` to the real target
 
 **R6 — macOS VM slot gate.** Tart is gated on count first, memory second.

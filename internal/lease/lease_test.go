@@ -3577,3 +3577,305 @@ func TestAnUnnamedUpWhoseHoldANamedUpTookWarnsNeverAppeared(t *testing.T) {
 		t.Fatalf("the unnamed lease did not warn: %s", log)
 	}
 }
+
+// waits is a docker run with BUDGET_WAIT=1, asking with ticket (#72).
+func waits(wt string, cost uint64, ticket string) policy.Request {
+	r := req(wt, cost)
+	r.Wait, r.Ticket = true, ticket
+	return r
+}
+
+// room is snap with headroom h.
+func room(h uint64) *protocol.Snapshot {
+	s := snap()
+	s.Budget.HeadroomBytes = i64(int64(h))
+	return s
+}
+
+// tickets are b's queued tickets, first come first.
+func tickets(b *lease.Book) []string {
+	var out []string
+	for _, w := range b.Waiting() {
+		out = append(out, w.Ticket)
+	}
+	return out
+}
+
+// Waiting calls are allowed first come first (#72): A (8 GB) waits first,
+// then B and C (1 GB each). With room for B alone, B waits behind A; as
+// room grows, A is allowed first, then B, then C, whoever asks first.
+func TestWaitingCallsAreAllowedInArrivalOrder(t *testing.T) {
+	b, _, _ := book(t)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	bb := b.Check(waits("w2", gib, ""), room(3*gib), cfg)
+	cc := b.Check(waits("w1", gib, ""), room(3*gib), cfg)
+	for _, d := range []protocol.Decision{a, bb, cc} {
+		if d.Allow || !d.Retry || d.Ticket == "" {
+			t.Fatalf("with 3 GB of room: %+v", d)
+		}
+	}
+	if got := tickets(b); !slices.Equal(got, []string{a.Ticket, bb.Ticket, cc.Ticket}) {
+		t.Fatalf("queue %q", got)
+	}
+	if !strings.Contains(bb.Reasons[0].Text, "8.0 GB of it held for a waiting call ahead") {
+		t.Fatalf("B's deny does not name the hold: %q", bb.Reasons[0].Text)
+	}
+	// Room for A, and B alone, not both: B and C ask first, and wait.
+	s := room(8*gib + gib/2)
+	if d := b.Check(waits("w2", gib, bb.Ticket), s, cfg); d.Allow || d.Ticket != bb.Ticket {
+		t.Fatalf("B took A's room: %+v", d)
+	}
+	if d := b.Check(waits("w1", gib, cc.Ticket), s, cfg); d.Allow || d.Ticket != cc.Ticket {
+		t.Fatalf("C took A's room: %+v", d)
+	}
+	if d := b.Check(waits("w1", 8*gib, a.Ticket), s, cfg); !d.Allow || d.LeaseID == "" || d.Ticket != "" {
+		t.Fatalf("A, first, did not get the room: %+v", d)
+	}
+	s = room(9*gib + gib/2)
+	if d := b.Check(waits("w1", gib, cc.Ticket), s, cfg); d.Allow {
+		t.Fatalf("C took B's room: %+v", d)
+	}
+	if d := b.Check(waits("w2", gib, bb.Ticket), s, cfg); !d.Allow {
+		t.Fatalf("B, next, did not get the room: %+v", d)
+	}
+	if d := b.Check(waits("w1", gib, cc.Ticket), room(10*gib+gib/2), cfg); !d.Allow {
+		t.Fatalf("C, last, did not get the room: %+v", d)
+	}
+	if got := tickets(b); len(got) != 0 {
+		t.Fatalf("tickets left: %q", got)
+	}
+}
+
+// With room for both, a later waiting call that asks first is allowed,
+// and the room of the one ahead of it stays held for it (#72, plan
+// amendment 1).
+func TestALaterWaitingCallMayGoFirstWhenBothFit(t *testing.T) {
+	b, _, _ := book(t)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	bb := b.Check(waits("w2", gib, ""), room(3*gib), cfg)
+	s := room(9*gib + gib/2)
+	if d := b.Check(waits("w2", gib, bb.Ticket), s, cfg); !d.Allow {
+		t.Fatalf("B fits beside A: %+v", d)
+	}
+	if got := tickets(b); !slices.Equal(got, []string{a.Ticket}) {
+		t.Fatalf("queue %q", got)
+	}
+	if d := b.Check(req("w2", gib), s, cfg); d.Allow {
+		t.Fatalf("a later call took A's held room: %+v", d)
+	}
+	if d := b.Check(waits("w1", 8*gib, a.Ticket), s, cfg); !d.Allow {
+		t.Fatalf("A's room was not held: %+v", d)
+	}
+}
+
+// A call that does not wait is decided with every waiting call's room
+// held: one that fits only in that room is denied, for waiting may let it
+// through; one that fits beside it is allowed. A manual call is not gated
+// (#72).
+func TestACallThatDoesNotWaitLeavesTheHeldRoom(t *testing.T) {
+	b, _, _ := book(t)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	s := room(9 * gib)
+	d := b.Check(req("w2", 2*gib), s, cfg)
+	if d.Allow || !d.Retry || d.Ticket != "" || !strings.Contains(d.Reasons[0].Text, "held for a waiting call ahead") {
+		t.Fatalf("took the held room: %+v", d)
+	}
+	if d := b.Check(req("w2", gib), s, cfg); !d.Allow {
+		t.Fatalf("fits beside the held room: %+v", d)
+	}
+	if d := b.Check(req("", 50*gib), s, cfg); !d.Allow {
+		t.Fatalf("manual: %+v", d)
+	}
+	if got := tickets(b); !slices.Equal(got, []string{a.Ticket}) {
+		t.Fatalf("queue %q", got)
+	}
+}
+
+// A queued tart run of a macOS VM holds the slot that frees: a later one,
+// waiting or not, does not take it (#72).
+func TestAWaitingMacOSVMHoldsTheSlotThatFrees(t *testing.T) {
+	b, _, _ := book(t)
+	s := snap()
+	s.Tart = &protocol.Tart{Installed: true, MacOSRunning: 2, VMs: []protocol.TartVM{{Name: "x", OS: "darwin"}, {Name: "y", OS: "darwin"}}}
+	c := cfg
+	c.MaxMacOSVMs = 2
+	mac := func(target, ticket string, wait bool) policy.Request {
+		return policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run " + target, CostBytes: gib, MacOS: true, Target: target,
+			Wait: wait, Ticket: ticket}
+	}
+	first := b.Check(mac("m1", "", true), s, c)
+	if first.Allow || !first.Retry || first.Ticket == "" {
+		t.Fatalf("slots full: %+v", first)
+	}
+	if w := b.Waiting(); len(w) != 1 || !w[0].MacOS {
+		t.Fatalf("queue %+v", w)
+	}
+	s.Tart.MacOSRunning, s.Tart.VMs = 1, s.Tart.VMs[:1] // y stops
+	if d := b.Check(mac("m2", "", false), s, c); d.Allow || d.Reasons[0].Code != policy.VMSlots ||
+		!strings.Contains(d.Reasons[0].Text, "1 held for a waiting call ahead") {
+		t.Fatalf("a later run took the held slot: %+v", d)
+	}
+	if d := b.Check(mac("m3", "", true), s, c); d.Allow {
+		t.Fatalf("a later waiting run took the held slot: %+v", d)
+	}
+	if d := b.Check(mac("m1", first.Ticket, true), s, c); !d.Allow {
+		t.Fatalf("the first did not get its slot: %+v", d)
+	}
+}
+
+// A waiting call that stops asking (it gave up, was interrupted, or died)
+// holds its room for at most its ticket's life: 9 s with no
+// policy.daemon_timeout set, two cycles of a 2 s poll and the compose dry
+// run's 2.5 s (#72).
+func TestATicketNotAskedWithEnds(t *testing.T) {
+	b, c, _ := book(t)
+	const ttl = 9 * time.Second
+	b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	s := room(8 * gib)
+	c.t = t0.Add(ttl - time.Millisecond)
+	if d := b.Check(req("w2", gib), s, cfg); d.Allow {
+		t.Fatalf("the hold ended early: %+v", d)
+	}
+	c.t = t0.Add(ttl)
+	if d := b.Check(req("w2", gib), s, cfg); !d.Allow {
+		t.Fatalf("the hold outlived its ticket: %+v", d)
+	}
+	if got := tickets(b); len(got) != 0 {
+		t.Fatalf("tickets left: %q", got)
+	}
+	// A reading ends it too.
+	b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	c.t = c.t.Add(ttl)
+	b.Observe(s)
+	if got := tickets(b); len(got) != 0 {
+		t.Fatalf("a reading kept tickets: %q", got)
+	}
+}
+
+// A waiting call's ask denied for what waiting cannot fix ends its ticket
+// and denies the call (#72).
+func TestADenyWaitingCannotFixEndsTheTicket(t *testing.T) {
+	b, _, _ := book(t)
+	a := b.Check(waits("w1", 2*gib, ""), room(gib), cfg)
+	c := cfg
+	c.PerWorktreeCapBytes = gib
+	d := b.Check(waits("w1", 2*gib, a.Ticket), room(gib), c)
+	if d.Allow || d.Retry || d.Ticket != "" {
+		t.Fatalf("over its cap: %+v", d)
+	}
+	if got := tickets(b); len(got) != 0 {
+		t.Fatalf("tickets left: %q", got)
+	}
+}
+
+// A ticket the book does not know (the daemon restarted, or it ended
+// unasked) joins the back of the queue with a new one (#72).
+func TestAnUnknownTicketQueuesAtTheBack(t *testing.T) {
+	b, _, _ := book(t)
+	other, _, _ := book(t)
+	old := other.Check(waits("w1", gib, ""), room(0), cfg) // an earlier daemon's
+	a := b.Check(waits("w2", gib, ""), room(0), cfg)
+	d := b.Check(waits("w1", gib, old.Ticket), room(0), cfg)
+	if d.Allow || d.Ticket == "" || d.Ticket == old.Ticket {
+		t.Fatalf("unknown ticket: %+v", d)
+	}
+	if got := tickets(b); !slices.Equal(got, []string{a.Ticket, d.Ticket}) {
+		t.Fatalf("queue %q", got)
+	}
+}
+
+// A waiting call that takes a lease over holds only what that lease does
+// not already reserve: every other call still counts the lease, so its
+// bytes are counted once (#72, review round 1 F1). A compose up of a
+// project its worktree's lease holds takes that lease over.
+func TestAWaitingComposeTakeoverHoldsOnlyWhatItAdds(t *testing.T) {
+	b, _, _ := book(t)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", CostBytes: 4 * gib, OnEngine: true}
+	if d := b.Check(up, room(10*gib), cfg); !d.Allow {
+		t.Fatalf("first up: %+v", d)
+	}
+	if d := b.Check(waits("w2", 7*gib, ""), room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("A: %+v", d)
+	}
+	again := up
+	again.Wait = true
+	if d := b.Check(again, room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("the up again: %+v", d)
+	}
+	if d := b.Check(req("w2", gib), room(12*gib), cfg); !d.Allow {
+		t.Fatalf("the up's lease counted twice: %+v", d)
+	}
+}
+
+// So does a start of a container a create made, whose lease it takes over
+// (#72, review round 1 F1).
+func TestAWaitingStartOfACreatedContainerHoldsOnlyWhatItAdds(t *testing.T) {
+	b, _, _ := book(t)
+	create := policy.Request{Worktree: "w1", Kind: "container", Op: "create", Command: "docker create -m 4g x", CostBytes: 4 * gib, Labelled: true}
+	made := b.Check(create, room(8*gib), cfg)
+	if !made.Allow {
+		t.Fatalf("create: %+v", made)
+	}
+	start := policy.Request{Worktree: "w1", Kind: "container", Op: "start", Command: "docker start x", Target: "x",
+		ContainerID: "00000000000000000000000000000000000000000000000000000000000000a1", TakesOver: made.LeaseID, OnEngine: true, Wait: true}
+	if d := b.Check(start, room(3*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("start at 3 GB: %+v", d)
+	}
+	if d := b.Check(req("w2", gib), room(8*gib+gib/2), cfg); !d.Allow {
+		t.Fatalf("the create's lease counted twice: %+v", d)
+	}
+}
+
+// A live waiter's ticket outlasts its longest cycle from one ask to the
+// next: a poll (2 s), the compose dry run (2 s, and 0.5 s for its output),
+// and the ask, at policy.daemon_timeout (#72, plan amendment 2).
+func TestATicketOutlastsAWaitersSlowestCycle(t *testing.T) {
+	b, c, _ := book(t)
+	b.SetDaemonTimeout(2 * time.Second)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	cycle := 2*time.Second + 2*time.Second + 500*time.Millisecond + 2*time.Second
+	c.t = t0.Add(cycle)
+	if d := b.Check(req("w2", gib), room(8*gib), cfg); d.Allow {
+		t.Fatalf("the hold ended within one cycle: %+v", d)
+	}
+	if d := b.Check(waits("w1", 8*gib, a.Ticket), room(3*gib), cfg); d.Ticket != a.Ticket {
+		t.Fatalf("a live waiter lost its place: %+v", d)
+	}
+}
+
+// A waiting takeover's hold follows the lease it takes over: once that
+// lease ends before the waiter asks again, the waiter holds its whole cost,
+// and a later call cannot take the room it is due (#72, review round 2
+// R2-1). While the lease is open, the two together count its bytes once.
+func TestAWaitingTakeoverHoldsItsWholeCostOnceTheTakenLeaseEnds(t *testing.T) {
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", CostBytes: 4 * gib, OnEngine: true}
+	queued := func(t *testing.T) (*lease.Book, string) {
+		b, _, _ := book(t)
+		first := b.Check(up, room(10*gib), cfg)
+		if !first.Allow {
+			t.Fatalf("first up: %+v", first)
+		}
+		again := up
+		again.CostBytes, again.Wait = 8*gib, true
+		if d := b.Check(again, room(7*gib), cfg); d.Allow || d.Ticket == "" {
+			t.Fatalf("the up again: %+v", d)
+		}
+		return b, first.LeaseID
+	}
+	t.Run("ended", func(t *testing.T) {
+		b, id := queued(t)
+		if !b.Release(id) {
+			t.Fatal("no lease to release")
+		}
+		if d := b.Check(req("w2", 5*gib), room(10*gib), cfg); d.Allow {
+			t.Fatalf("took the room the up is due: %+v", d)
+		}
+	})
+	t.Run("open", func(t *testing.T) {
+		b, _ := queued(t)
+		// 4 GB leased and 4 GB held beside it: the up's 8.
+		if d := b.Check(req("w2", 2*gib), room(10*gib), cfg); !d.Allow {
+			t.Fatalf("the open lease counted twice: %+v", d)
+		}
+	})
+}

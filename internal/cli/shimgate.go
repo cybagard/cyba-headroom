@@ -35,8 +35,9 @@ const (
 	// one (podman-docker's `exec podman`) has the same PID and is not
 	// checked, and leased, twice; a child it starts has another PID and is.
 	shimCheckedVar = "HEADROOM_SHIM_CHECKED"
-	// waitPoll is how often a waiting call (BUDGET_WAIT=1) asks again.
-	waitPoll = 2 * time.Second
+	// waitPoll is how often a waiting call (BUDGET_WAIT=1) asks again: a
+	// ticket not asked with for three of them ends (#72).
+	waitPoll = protocol.WaitPoll
 )
 
 // errCannotCheck means the daemon answered but gave no decision; a
@@ -252,6 +253,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		req.PID = os.Getpid()
 	}
 	wait := shim.IsTrue(getenv("BUDGET_WAIT"))
+	// A waiting call asks to be queued, and asks again with the ticket each
+	// deny gives it, which keeps its place (#72). An older daemon gives
+	// none: it asks again as it always did.
+	req.Wait = wait
 	var deadline time.Time
 	for {
 		if idle != nil {
@@ -302,6 +307,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			fmt.Fprintf(e.Stderr, "headroom: gave up after waiting %s (policy.wait_timeout)\n", cfg.Policy.WaitTimeout.Duration)
 			return gated{code: exitDenied}
 		}
+		req.Ticket = d.Ticket
 		if sig := h.wait(waitPoll); sig != nil {
 			return interrupted(sig)
 		}

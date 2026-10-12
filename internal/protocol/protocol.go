@@ -95,7 +95,17 @@ type CheckRequest struct {
 	// lease, and Target, the dir's name, is ignored. An older daemon keys it
 	// by Target, as before.
 	Unnamed bool `json:"unnamed,omitempty"`
+	// Wait is set for a call that waits for room (BUDGET_WAIT=1): denied
+	// only for what waiting may fix, it is queued, and the decision gives
+	// it a ticket (#72). Ticket is the one its last ask was given: it keeps
+	// its place. An older daemon ignores both, and gives none.
+	Wait   bool   `json:"wait,omitempty"`
+	Ticket string `json:"ticket,omitempty"`
 }
+
+// WaitPoll is how often a waiting call asks again. A ticket not asked
+// with for three of them ends (#72).
+const WaitPoll = 2 * time.Second
 
 // LeaseLabel carries a gated run's lease ID on its container, so the
 // daemon tells it from one started past the shim (#33).
@@ -139,6 +149,21 @@ type Decision struct {
 	// LeasedBytes is what earlier allows had reserved, and not yet shown up,
 	// when this decision was made.
 	LeasedBytes uint64 `json:"leased_bytes,omitempty"`
+	// Ticket is a waiting call's place in the queue, when it was denied and
+	// queued (#72): its next ask sends it back.
+	Ticket string `json:"ticket,omitempty"`
+}
+
+// Waiter is a waiting call queued for room (#72): until it is allowed,
+// what it would cost, and its macOS slot, are held for it against every
+// call that came later.
+type Waiter struct {
+	Ticket   string    `json:"ticket"`
+	Worktree string    `json:"worktree"`
+	Command  string    `json:"command"`
+	Bytes    uint64    `json:"bytes"`
+	MacOS    bool      `json:"macos,omitempty"`
+	Since    time.Time `json:"since"`
 }
 
 // Lease reserves an allowed call's cost until its container or VM appears,
@@ -223,6 +248,8 @@ type Snapshot struct {
 	// Ungated are containers and VMs that appeared without a check (R4,
 	// #33), oldest first.
 	Ungated []Ungated `json:"ungated,omitempty"`
+	// Waiting are the calls queued for room, first come first (#72).
+	Waiting []Waiter `json:"waiting,omitempty"`
 }
 
 // Attribution is what each worktree runs (R3).

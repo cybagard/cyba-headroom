@@ -22,7 +22,11 @@ import (
 // a checked container flagged ungated, a lease of a call that started
 // something warning "never appeared", warming containers of checked calls
 // needing more than is reserved, a container started past the shim not
-// flagged, and, after each check too, a lease held for no reason.
+// flagged, and, after each check too, a lease held for no reason. Waiting
+// calls (BUDGET_WAIT=1) queue with tickets (#72): after each check and
+// reading, the book's queue must be the live tickets in arrival order, no
+// allow may take room a ticket ahead of it holds, and no ticket may outlive
+// ticketTTL unpolled.
 
 const target = gib // what each container grows to
 
@@ -39,6 +43,23 @@ const lowReadings = 1
 // waitReadings is how many readings memory stays short while a BUDGET_WAIT
 // call (op 15) polls: it is denied, and asked again after each.
 const waitReadings = 3
+
+// ticketTTL is how long a waiting call's ticket lasts unpolled: three of
+// the shim's polls (#72).
+const ticketTTL = 3 * protocol.WaitPoll
+
+// mwaiter is a BUDGET_WAIT call queued with a ticket (#72). Each reading,
+// those still polling ask again, in an order that varies, until they are
+// allowed, dropped, or stop polling (quiet).
+type mwaiter struct {
+	ticket string
+	call   func() bool
+	cost   uint64    // what its last ask said it costs
+	polled time.Time // its last ask
+	quiet  bool      // it stopped polling: gave up, interrupted, or died
+	driven bool      // op 15 asks for it, not the readings
+	asked  bool      // its call asked the book
+}
 
 type mcont struct {
 	id, project, service, wt string
@@ -143,12 +164,15 @@ type model struct {
 	trace    []string
 	last     time.Time // the last allowed call
 	ticks    int
-	headroom int64          // what the readings say is free
-	low      int            // readings left before headroom is plenty again
-	open     map[int]bool   // the open bugs whose cases run
-	several  map[string]int // a docker start's lease → the containers it waits for (lease.go entry.starts)
-	readAt   time.Time      // when the last reading was taken
-	diff     bool           // HEADROOM_MODEL_DIFF=1: compare guessed bookkeeping with the book's after each op (differ)
+	headroom int64                // what the readings say is free
+	low      int                  // readings left before headroom is plenty again
+	open     map[int]bool         // the open bugs whose cases run
+	several  map[string]int       // a docker start's lease → the containers it waits for (lease.go entry.starts)
+	readAt   time.Time            // when the last reading was taken
+	diff     bool                 // HEADROOM_MODEL_DIFF=1: compare guessed bookkeeping with the book's after each op (differ)
+	waiters  []*mwaiter           // the live tickets, in arrival order (#72)
+	asking   *mwaiter             // the waiter whose call is asking
+	polled   map[string]time.Time // each ticket's last ask
 }
 
 // openBugs are the cases that expose a bug still open, by its issue. They
@@ -268,10 +292,28 @@ func (m *model) of(project, wt string) []*mcont {
 // check asks the book about r. A denied call starts nothing; with plenty
 // of headroom, a denial is a failure.
 func (m *model) check(r policy.Request) protocol.Decision {
+	w := m.asking
+	m.prune()
+	held := m.holds(w)
+	if w != nil {
+		r.Wait, r.Ticket, w.asked = true, w.ticket, true
+	}
 	d := m.b.Check(r, m.snapshot(), cfg)
 	if !d.Allow && m.headroom == plenty {
 		m.fail("%s denied: %+v", r.Command, d)
 	}
+	if d.Allow && d.LeaseID != "" && r.Worktree != "" && d.HeadroomBytes != nil &&
+		*d.HeadroomBytes-int64(d.LeasedBytes)-int64(held)-int64(d.CostBytes) < int64(cfg.MinHeadroomBytes) {
+		m.fail("held room taken: %s (ticket %q) allowed at %d MiB headroom, %d MiB leased, %d MiB held for tickets ahead, costing %d MiB",
+			r.Command, r.Ticket, *d.HeadroomBytes>>20, d.LeasedBytes>>20, held>>20, d.CostBytes>>20)
+	}
+	if !d.Allow && held > 0 && d.HeadroomBytes != nil && *d.HeadroomBytes-int64(d.LeasedBytes)-int64(d.CostBytes) >= int64(cfg.MinHeadroomBytes) {
+		m.outcomes["queue: held back"]++ // it would fit but for the tickets ahead
+	}
+	if w != nil {
+		m.queued(w, d)
+	}
+	m.queueMatches()
 	if d.Allow {
 		m.last = m.c.t
 		if d.LeaseID != "" {
@@ -638,8 +680,8 @@ func (m *model) dockerStart(xs ...*mcont) bool {
 	return true
 }
 
-func (m *model) dockerRun(wt string) bool {
-	d := m.check(policy.Request{Worktree: wt, Kind: "container", Command: "docker run img", CostBytes: target, Labelled: true})
+func (m *model) dockerRun(wt string, cost uint64) bool {
+	d := m.check(policy.Request{Worktree: wt, Kind: "container", Command: "docker run img", CostBytes: cost, Labelled: true})
 	if !d.Allow {
 		return false
 	}
@@ -767,7 +809,10 @@ func (m *model) tick() {
 		}
 	}
 	m.invariants()
+	m.prune()
+	m.queueMatches()
 	m.heldForNothing()
+	m.pollAll()
 }
 
 // judge gives each miss's container this reading shows its verdict: its
@@ -994,10 +1039,127 @@ func (m *model) invariants() {
 	}
 }
 
+// prune drops the tickets past ticketTTL unpolled, as the book does.
+func (m *model) prune() {
+	m.waiters = slices.DeleteFunc(m.waiters, func(w *mwaiter) bool {
+		if m.c.t.Before(w.polled.Add(ticketTTL)) {
+			return false
+		}
+		m.outcomes["queue: ended unpolled"]++
+		return true
+	})
+}
+
+// holds is what the live tickets ahead of w hold: all of them for a call
+// with none (#72).
+func (m *model) holds(w *mwaiter) uint64 {
+	var n uint64
+	for _, o := range m.waiters {
+		if o == w {
+			break
+		}
+		n += o.cost
+	}
+	return n
+}
+
+// queued settles w after its ask was decided: allowed, it leaves the
+// queue; denied for what waiting may fix, it keeps its ticket, or joins
+// the back with a new one if it had none the book knew; denied for
+// anything else, it is dropped.
+func (m *model) queued(w *mwaiter, d protocol.Decision) {
+	live := slices.Contains(m.waiters, w)
+	switch {
+	case d.Allow:
+		if live {
+			m.outcomes["queue: granted"]++
+			if m.waiters[0] != w {
+				m.outcomes["queue: granted ahead"]++ // it fit with the older tickets held
+			}
+		}
+		m.waiters = slices.DeleteFunc(m.waiters, func(o *mwaiter) bool { return o == w })
+		m.step("ticket %q granted", w.ticket)
+	case !d.Retry:
+		if d.Ticket != "" {
+			m.fail("ticket kept: a deny waiting cannot fix gave ticket %q", d.Ticket)
+		}
+		m.waiters = slices.DeleteFunc(m.waiters, func(o *mwaiter) bool { return o == w })
+		w.quiet = true
+	case d.Ticket == "":
+		m.fail("no ticket: a waiting call denied for room was not queued: %+v", d)
+	case live && d.Ticket != w.ticket:
+		m.fail("lost its place: ticket %q came back as %q", w.ticket, d.Ticket)
+	default:
+		if !live {
+			if w.ticket != "" {
+				m.outcomes["queue: requeued"]++ // its ticket ended unpolled
+			}
+			w.ticket = d.Ticket
+			m.waiters = append(m.waiters, w)
+			m.step("queued as ticket %q", w.ticket)
+		}
+		w.cost, w.polled = d.CostBytes, m.c.t
+		m.polled[w.ticket] = m.c.t
+	}
+}
+
+// queueMatches fails unless the book's queue is the live tickets in
+// arrival order, each holding what its last ask cost (#72).
+func (m *model) queueMatches() {
+	got := lease.Waiting(m.b)
+	var want []string
+	for _, w := range m.waiters {
+		want = append(want, fmt.Sprintf("%s:%d", w.ticket, w.cost))
+	}
+	var have []string
+	for _, w := range got {
+		have = append(have, fmt.Sprintf("%s:%d", w.Ticket, w.Bytes))
+	}
+	if !slices.Equal(have, want) {
+		m.fail("queue differs: the book's is %q, the live tickets in arrival order are %q", have, want)
+	}
+}
+
+// poll has w ask again; a call with nothing left to ask about (its
+// containers started or removed meanwhile) stops polling.
+func (m *model) poll(w *mwaiter) bool {
+	m.asking, w.asked = w, false
+	ok := w.call()
+	m.asking = nil
+	if !w.asked {
+		w.quiet = true
+		m.step("ticket %q stopped polling: nothing to ask", w.ticket)
+	}
+	return ok
+}
+
+// pollAll has every live ticket that still polls ask again, starting at a
+// varying one: shims poll each on its own clock.
+func (m *model) pollAll() {
+	ws := slices.DeleteFunc(slices.Clone(m.waiters), func(w *mwaiter) bool { return w.quiet || w.driven })
+	if len(ws) == 0 {
+		return
+	}
+	k := (m.cur.b + m.ticks) % len(ws)
+	for _, w := range append(ws[k:], ws[:k]...) {
+		if slices.Contains(m.waiters, w) {
+			m.step("ticket %q polls", w.ticket)
+			m.poll(w)
+		}
+	}
+}
+
 // heldForNothing fails on a lease held for no reason: every lease is
 // renewed or taken by an allowed call, so none expires later than the
-// timeout after the last one. A denial extends nothing (#88).
+// timeout after the last one. A denial extends nothing (#88). Nor may a
+// ticket outlive ticketTTL unpolled (#72).
 func (m *model) heldForNothing() {
+	for _, w := range lease.Waiting(m.b) {
+		if polled, ok := m.polled[w.Ticket]; !ok || !m.c.t.Before(polled.Add(ticketTTL)) {
+			m.fail("ticket held for no reason: %s (%s) was last polled at %s, %s ago", w.Ticket, w.Command,
+				polled.Format("15:04:05.000"), m.c.t.Sub(polled))
+		}
+	}
 	for _, l := range m.b.List() {
 		if limit := m.last.Add(timeout); l.Expires.After(limit) {
 			m.fail("held for no reason: %s (%s) expires at %s, after %s, the timeout after the last allowed call",
@@ -1027,10 +1189,15 @@ func (m *model) call(kind int, o op) func() bool {
 		if y := m.pick(func(y *mcont) bool { return stopped(y) && y != x }); y != nil && o.a%3 == 0 {
 			xs = append(xs, y) // docker start a b
 		}
-		return func() bool { return m.dockerStart(xs...) }
+		return func() bool {
+			if slices.ContainsFunc(xs, func(x *mcont) bool { return x.running || x.gone }) {
+				return false // started or removed while it waited: nothing to ask
+			}
+			return m.dockerStart(xs...)
+		}
 	case 7:
 		wt := []string{"w1", "w2"}[o.a%2]
-		return func() bool { return m.dockerRun(wt) }
+		return func() bool { return m.dockerRun(wt, target) }
 	}
 	return nil
 }
@@ -1096,6 +1263,10 @@ func (m *model) run(ops []op) {
 			if call == nil {
 				break
 			}
+			// It queues with a ticket, which it asks with here: no reading
+			// polls it (mwaiter.driven). Given up, it stops asking.
+			w := &mwaiter{call: call, driven: true}
+			call = func() bool { return m.poll(w) }
 			was, wasLow := m.headroom, m.low
 			m.headroom, m.low = 0, waitReadings
 			m.step("BUDGET_WAIT, headroom 0 MiB")
@@ -1117,6 +1288,56 @@ func (m *model) run(ops []op) {
 				restore()
 				m.tick()
 			}
+		case 18:
+			// A call with BUDGET_WAIT=1 while memory runs short: denied, it
+			// queues with a ticket, and asks again after each reading (pollAll)
+			// until it is allowed, dropped or stops (#72). Memory is short
+			// for waitReadings readings, by a varying amount; a quarter of the
+			// runs are large, so smaller calls queue behind one.
+			call := m.call([]int{0, 5, 7, 7}[o.b%4], o)
+			if o.b%4 == 3 {
+				wt := []string{"w1", "w2"}[o.a%2]
+				call = func() bool { return m.dockerRun(wt, 3*target) }
+			}
+			if call == nil {
+				break
+			}
+			if m.headroom == plenty {
+				m.headroom, m.low = int64(o.a%4)*int64(gib), waitReadings
+				m.step("headroom %d MiB", m.headroom>>20)
+				m.tick()
+			}
+			m.step("BUDGET_WAIT call")
+			m.poll(&mwaiter{call: call})
+		case 19:
+			// One waiting call asks again out of turn: a shim's clock is its
+			// own.
+			if live := slices.DeleteFunc(slices.Clone(m.waiters), func(w *mwaiter) bool { return w.quiet || w.driven }); len(live) > 0 {
+				w := live[o.b%len(live)]
+				m.step("ticket %q polls out of turn", w.ticket)
+				m.poll(w)
+			}
+		case 20:
+			// A waiting call stops polling: it gave up at wait_timeout, was
+			// interrupted, or died. Its ticket must end within ticketTTL.
+			if len(m.waiters) > 0 {
+				w := m.waiters[o.b%len(m.waiters)]
+				w.quiet = true
+				m.step("ticket %q stops polling", w.ticket)
+			}
+		case 21:
+			// A call without BUDGET_WAIT while calls wait: it may not take
+			// the room they hold.
+			if len(m.waiters) > 0 {
+				if call := m.call([]int{0, 5, 7}[o.b%3], o); call != nil {
+					m.step("a call while %d wait", len(m.waiters))
+					call()
+				}
+			}
+		case 22:
+			// Time passes past ticketTTL with no reading and no poll.
+			m.c.t = m.c.t.Add(ticketTTL)
+			m.step("%s pass", ticketTTL)
 		case 16:
 			// A running container left out of one reading: its stats failed,
 			// or a restart backoff spans it. Left out of the last one too, it
@@ -1249,7 +1470,8 @@ func (m *model) reserves(id string) (uint64, bool) {
 func newModel(t *testing.T) *model {
 	b, c, log := book(t)
 	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
-		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}, several: map[string]int{}, diff: os.Getenv("HEADROOM_MODEL_DIFF") == "1"}
+		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}, several: map[string]int{}, diff: os.Getenv("HEADROOM_MODEL_DIFF") == "1",
+		polled: map[string]time.Time{}}
 	b.Observe(m.snapshot())
 	return m
 }
@@ -1282,7 +1504,7 @@ func TestTheLeaseModel(t *testing.T) {
 		rng := rand.New(rand.NewPCG(uint64(seed), 1))
 		ops := make([]op, 80)
 		for i := range ops {
-			ops[i] = op{rng.IntN(18), rng.IntN(1000), rng.IntN(1000)}
+			ops[i] = op{rng.IntN(23), rng.IntN(1000), rng.IntN(1000)}
 		}
 		f, n := playCounting(t, ops)
 		for k, v := range n {
@@ -1301,12 +1523,14 @@ func TestTheLeaseModel(t *testing.T) {
 	if len(kinds) > 0 {
 		t.Logf("failing seeds by kind: %v", kinds)
 	}
-	// Each guessed outcome ran (#120), at the default seeds.
-	t.Logf("guessed outcomes: %v", outcomes)
+	// Each guessed outcome (#120) and each queue outcome (#72) ran, at the
+	// default seeds.
+	t.Logf("outcomes: %v", outcomes)
 	if seeds >= 300 {
-		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker"} {
+		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker",
+			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled"} {
 			if outcomes[k] == 0 {
-				t.Errorf("no guessed %s ran: %v", k, outcomes)
+				t.Errorf("no %s ran: %v", k, outcomes)
 			}
 		}
 	}

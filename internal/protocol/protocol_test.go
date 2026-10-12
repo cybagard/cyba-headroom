@@ -60,3 +60,31 @@ func TestAContainersIDIsTheSameWithOneEngineOrTwo(t *testing.T) {
 		t.Fatalf("engines = %q, %q, want each container's own", two[0].Engine, two[1].Engine)
 	}
 }
+
+// A waiting check carries its wish to wait and its ticket, and a decision
+// carries the ticket back (#72); unset, neither is on the line, so an
+// older daemon reads it as ever.
+func TestAWaitingCheckCarriesItsTicket(t *testing.T) {
+	in := protocol.Request{V: protocol.Version, Op: protocol.OpCheck,
+		Check: &protocol.CheckRequest{Kind: "container", Command: "docker run x", Wait: true, Ticket: "ticket-a-1"}}
+	line, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out protocol.Request
+	if err := json.Unmarshal(line, &out); err != nil || out.Check == nil || !out.Check.Wait || out.Check.Ticket != "ticket-a-1" {
+		t.Fatalf("read back %+v from %s, %v", out.Check, line, err)
+	}
+	d, _ := json.Marshal(protocol.Decision{Retry: true, Ticket: "ticket-a-1"})
+	var back protocol.Decision
+	if err := json.Unmarshal(d, &back); err != nil || back.Ticket != "ticket-a-1" {
+		t.Fatalf("decision read back %+v from %s, %v", back, d, err)
+	}
+	in.Check.Wait, in.Check.Ticket = false, ""
+	if line, _ := json.Marshal(in); strings.Contains(string(line), "wait") || strings.Contains(string(line), "ticket") {
+		t.Errorf("not waiting, line %s", line)
+	}
+	if d, _ := json.Marshal(protocol.Decision{}); strings.Contains(string(d), "ticket") {
+		t.Errorf("no ticket, decision %s", d)
+	}
+}

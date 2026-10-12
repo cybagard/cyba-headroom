@@ -124,6 +124,16 @@ type Request struct {
 	// Pods are the Podman pods a pod start or kube play starts, by name or
 	// ID as given: its lease binds their containers (#230).
 	Pods []string
+	// Wait and Ticket are a waiting call's (protocol.CheckRequest), for the
+	// lease book's queue (#72).
+	Wait   bool
+	Ticket string
+	// HeldBytes and HeldMacOS are what Waiting calls queued ahead of this
+	// one would cost, and their macOS slots: held for them, as a lease's
+	// reservation is (#72). Not toward the worktree's cap: a hold clears.
+	HeldBytes uint64
+	HeldMacOS int
+	Waiting   int
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -156,6 +166,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	r.CostBytes = min(r.CostBytes, maxBytes)
 	r.LeasedBytes = min(r.LeasedBytes, maxBytes)
 	r.WorktreeLeasedBytes = min(r.WorktreeLeasedBytes, maxBytes)
+	r.HeldBytes = min(r.HeldBytes, maxBytes)
 	d := Decision{CostBytes: r.CostBytes}
 	if d.CostBytes == 0 {
 		d.CostBytes = c.DefaultContainerBytes
@@ -203,11 +214,18 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 		d.Reasons = append(d.Reasons, Reason{Code: WorktreeCap, Text: text})
 	}
 	if d.HeadroomBytes != nil {
-		left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(d.CostBytes)
+		left := *d.HeadroomBytes - int64(r.LeasedBytes) - int64(r.HeldBytes) - int64(d.CostBytes)
 		if left < int64(c.MinHeadroomBytes) {
 			text := fmt.Sprintf("only %s GB headroom", units.SignedGB(*d.HeadroomBytes))
+			var of []string
 			if r.LeasedBytes > 0 {
-				text += fmt.Sprintf(" (%s GB of it promised to calls still starting)", units.GB(r.LeasedBytes))
+				of = append(of, fmt.Sprintf("%s GB of it promised to calls still starting", units.GB(r.LeasedBytes)))
+			}
+			if r.HeldBytes > 0 {
+				of = append(of, fmt.Sprintf("%s GB of it held for %s", units.GB(r.HeldBytes), waitingAhead(r.Waiting)))
+			}
+			if len(of) > 0 {
+				text += " (" + strings.Join(of, ", ") + ")"
 			}
 			if c.MinHeadroomBytes > 0 {
 				text += fmt.Sprintf(", and %s GB must stay free", units.GB(c.MinHeadroomBytes))
@@ -251,6 +269,14 @@ func snapshotAge(s *protocol.Snapshot, c Config) (time.Duration, bool) {
 	return age, age > c.MaxSnapshotAge
 }
 
+// waitingAhead names n calls waiting ahead of this one (#72).
+func waitingAhead(n int) string {
+	if n == 1 {
+		return "a waiting call ahead"
+	}
+	return fmt.Sprintf("%d waiting calls ahead", n)
+}
+
 // staleText says how old the readings are.
 func staleText(age time.Duration) string {
 	return fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
@@ -272,13 +298,16 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 	if s.Tart != nil && !s.Sources["tart"].Stale {
 		running = s.Tart.MacOSRunning
 	}
-	inUse := running + r.PendingMacOS
+	inUse := running + r.PendingMacOS + r.HeldMacOS
 	if inUse < c.MaxMacOSVMs {
 		return Reason{}, false
 	}
 	text := fmt.Sprintf("the macOS VM slots are full (%d of %d in use", inUse, c.MaxMacOSVMs)
 	if r.PendingMacOS > 0 {
 		text += fmt.Sprintf(", %d starting", r.PendingMacOS)
+	}
+	if r.HeldMacOS > 0 {
+		text += fmt.Sprintf(", %d held for %s", r.HeldMacOS, waitingAhead(r.HeldMacOS))
 	}
 	text += ")"
 	if r.VMUnknown {

@@ -128,7 +128,23 @@ type Book struct {
 	// service of its stack until a timeout after it lapsed; any other is
 	// spent on its first match, until Observe drops it (lapsedFor).
 	lapsed []*entry
+	// waiting are the waiting calls (BUDGET_WAIT=1) queued for room, first
+	// come first (#72): each holds what it would cost, and its macOS slot,
+	// against every call that came later, so none of those takes its room.
+	// A call is allowed on its own ask, in the step that leases its cost.
+	waiting    []*waiter
+	nextTicket int
 }
+
+// waiter is one queued waiting call, as its last ask described it.
+type waiter struct {
+	protocol.Waiter
+	polled time.Time // its last ask
+}
+
+// ticketTTL is how long a ticket lasts without an ask: three of the
+// shim's polls. It covers a call that gave up, was interrupted, or died.
+const ticketTTL = 3 * protocol.WaitPoll
 
 type entry struct {
 	protocol.Lease
@@ -444,13 +460,72 @@ func takesCreate(r policy.Request, o *entry) bool {
 	return o.labelled && len(o.bound) == 0 && (r.Worktree != "" || o.Worktree == "")
 }
 
-// Check decides r, counting what open leases still reserve, and leases the
-// cost of a gated allow. It decides on the snapshot the leases were last
-// settled against; current is the daemon's latest, used before the first
-// Observe or when it is clearly newer (derive failing). The whole step holds
-// the book's lock: concurrent checks run one after another, and the second
-// sees the first's lease.
+// Check decides r, counting what open leases still reserve, and what the
+// calls queued ahead of it hold (#72), and leases the cost of a gated
+// allow. It decides on the snapshot the leases were last settled against;
+// current is the daemon's latest, used before the first Observe or when it
+// is clearly newer (derive failing). The whole step holds the book's lock:
+// concurrent checks run one after another, and the second sees the first's
+// lease. A waiting call denied for what waiting may fix is queued, or
+// keeps its place, and the decision carries its ticket.
 func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Config) protocol.Decision {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	b.expire(now) // settling may have stalled: expired leases and tickets must not count
+	w := b.ticket(r.Ticket)
+	if r.Worktree != "" {
+		// A ticket's call is decided with the calls ahead of it held, any
+		// other with every queued one: none takes the room of a call that
+		// came first. A manual call is not gated.
+		for _, o := range b.waiting {
+			if o == w {
+				break
+			}
+			r.HeldBytes += o.Bytes
+			if o.MacOS {
+				r.HeldMacOS++
+			}
+			r.Waiting++
+		}
+	}
+	d := b.check(r, current, c, now)
+	b.queue(r, w, &d, now)
+	return d
+}
+
+// ticket is the queued call ticket id names; nil if none is queued.
+func (b *Book) ticket(id string) *waiter {
+	if i := slices.IndexFunc(b.waiting, func(w *waiter) bool { return w.Ticket == id }); id != "" && i >= 0 {
+		return b.waiting[i]
+	}
+	return nil
+}
+
+// queue settles r's place after decision d: a waiting call denied only for
+// what waiting may fix keeps its ticket, w, or joins the back with a new
+// one (its ticket unknown: the daemon restarted, or it went unasked for
+// ticketTTL), and holds what this ask says it costs. Allowed, or denied
+// for anything else, its ticket ends.
+func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, now time.Time) {
+	if d.Allow || !d.Retry || !r.Wait || r.Worktree == "" {
+		if w != nil {
+			b.waiting = slices.DeleteFunc(b.waiting, func(o *waiter) bool { return o == w })
+			b.log.Debug("ticket ended", "ticket", w.Ticket, "allowed", d.Allow, "worktree", w.Worktree)
+		}
+		return
+	}
+	if w == nil {
+		b.nextTicket++
+		w = &waiter{Waiter: protocol.Waiter{Ticket: fmt.Sprintf("ticket-%s-%d", b.run, b.nextTicket), Since: now}}
+		b.waiting = append(b.waiting, w)
+	}
+	w.Worktree, w.Command, w.Bytes, w.MacOS, w.polled = r.Worktree, Summary(r.Command), d.CostBytes, r.MacOS, now
+	d.Ticket = w.Ticket
+}
+
+// check is Check's decision, under the book's lock.
+func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Config, now time.Time) protocol.Decision {
 	if unnamed(r) {
 		r.Target = "" // its dir is its key (unnamed)
 	}
@@ -480,14 +555,10 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 		return protocol.Decision{Allow: true, Message: fmt.Sprintf("headroom: allowed `%s` (%s)", Summary(r.Command), why)}
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	s := b.latest
 	if s == nil || (current != nil && current.CollectedAt.After(b.observed.Add(stale))) {
 		s = current
 	}
-	now := b.now()
-	b.expire(now) // settling may have stalled: expired leases must not count
 	// The containers this start's lease is keyed by and costs: not those
 	// that run, nor those a worktree's open lease has bound (not as
 	// entry.held) or lists in its containerIDs (covered; docker stop &&
@@ -1463,8 +1534,16 @@ func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels ma
 }
 
 // expire drops leases past their timeout: quietly if they bound their
-// resource, logged if it never appeared (R10).
+// resource, logged if it never appeared (R10). It drops tickets not asked
+// with for ticketTTL (#72).
 func (b *Book) expire(now time.Time) {
+	b.waiting = slices.DeleteFunc(b.waiting, func(w *waiter) bool {
+		if now.Before(w.polled.Add(ticketTTL)) {
+			return false
+		}
+		b.log.Debug("ticket ended: its call stopped asking", "ticket", w.Ticket, "worktree", w.Worktree, "command", w.Command)
+		return true
+	})
 	b.open = slices.DeleteFunc(b.open, func(e *entry) bool {
 		switch {
 		case now.Before(e.Expires):
@@ -2078,4 +2157,15 @@ func Summary(cmd string) string {
 		words = append(words, w)
 	}
 	return strings.Join(words, " ")
+}
+
+// Waiting returns the calls queued for room, first come first (#72).
+func (b *Book) Waiting() []protocol.Waiter {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []protocol.Waiter
+	for _, w := range b.waiting {
+		out = append(out, w.Waiter)
+	}
+	return out
 }

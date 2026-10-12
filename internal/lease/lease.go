@@ -135,6 +135,9 @@ type Book struct {
 	waiting    []*waiter
 	nextTicket int
 	ticketTTL  time.Duration // TicketTTL at policy.daemon_timeout (SetDaemonTimeout)
+	// tartDefault is what a Tart VM of unknown size uses, as the budget
+	// reserves it (SetDefaultTartBytes, #277).
+	tartDefault uint64
 }
 
 // waiter is one queued waiting call, as its last ask described it.
@@ -614,7 +617,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	// guess's (entry.guessed).
 	var stack []resource
 	if r.Kind == "compose" && r.Op != "run" && (r.Target != "" || unnamed(r)) && !r.Guessed && r.Worktree != "" && r.OnEngine && s != nil {
-		for _, x := range resources(s) {
+		for _, x := range resources(s, b.tartDefault) {
 			// Not one Docker's events said exited since (compose stop).
 			if x.kind == "compose" && !x.oneoff && ofStack(r, x.project, x.dir) && x.worktree == r.Worktree && !b.seen[x.key].gone &&
 				(!unnamed(r) || !b.namedKeys(r.Worktree, x)) {
@@ -634,7 +637,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	if r.Kind == "compose" && r.Op != "run" && !idle {
 		down = b.downServices(r)
 		if s != nil {
-			for _, x := range resources(s) {
+			for _, x := range resources(s, b.tartDefault) {
 				use[x.key] = x.bytes
 			}
 		}
@@ -824,7 +827,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// starts nothing new, and never logs "never appeared".
 		e.target, e.pods = "", slices.DeleteFunc(slices.Clone(r.Pods), func(p string) bool { return p == "" })
 		if s != nil && len(e.pods) > 0 {
-			for _, x := range resources(s) {
+			for _, x := range resources(s, b.tartDefault) {
 				if x.kind == "container" && e.inPods(x) && !b.boundAnywhere(x.key) {
 					e.bind(x)
 					e.held[x.key], e.found = true, true
@@ -868,7 +871,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 // podsRun reports whether s shows a running container of each of pods
 // (podIs); false for none.
 func podsRun(s *protocol.Snapshot, pods []string) bool {
-	res := resources(s)
+	res := resources(s, 0) // pods only: VM sizes do not matter
 	return len(pods) > 0 && !slices.ContainsFunc(pods, func(p string) bool {
 		return !slices.ContainsFunc(res, func(r resource) bool { return podIs(p, r) })
 	})
@@ -928,8 +931,9 @@ func (r resource) runs() []int {
 
 // resources lists s's containers and VMs. Their worktree is the evidence's
 // alone: a lease's placement (attribution.ByLease) is for status and
-// policy, and never feeds back into binding (#74).
-func resources(s *protocol.Snapshot) []resource {
+// policy, and never feeds back into binding (#74). A Tart VM of unknown size
+// uses tartDefault, as the budget reserves it (#277).
+func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 	owner := map[string]string{}
 	if a := s.Attribution; a != nil {
 		for _, w := range a.Worktrees {
@@ -965,7 +969,11 @@ func resources(s *protocol.Snapshot) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.MemoryBytes, os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
+			bytes := vm.MemoryBytes
+			if bytes == 0 && vm.FootprintBytes == nil {
+				bytes = tartDefault
+			}
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: bytes, os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
 		}
 	}
 	return out
@@ -1026,7 +1034,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	res := resources(s)
+	res := resources(s, b.tartDefault)
 	// The reading is the word on what runs, for events before it began.
 	began, current := readingBegan(s)
 	// When each container that runs, by the events, last started: kept for
@@ -1609,7 +1617,7 @@ func (b *Book) expire(now time.Time) {
 // baseline adds the resources of each source s has a fresh reading of,
 // and no baseline yet, to prev.
 func (b *Book) baseline(s *protocol.Snapshot) {
-	for _, r := range resources(s) {
+	for _, r := range resources(s, b.tartDefault) {
 		if !b.based[source(r.kind)] && readable(s, r.kind) {
 			b.prev[r.key] = true
 		}
@@ -2199,6 +2207,14 @@ func (b *Book) Waiting() []protocol.Waiter {
 		out = append(out, v)
 	}
 	return out
+}
+
+// SetDefaultTartBytes sets the cost of a Tart VM whose configured memory
+// and footprint are unknown: budget.Params.DefaultTartBytes (#277).
+func (b *Book) SetDefaultTartBytes(n uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tartDefault = n
 }
 
 // SetDaemonTimeout sets policy.daemon_timeout, which bounds a waiting

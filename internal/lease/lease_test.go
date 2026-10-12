@@ -184,6 +184,21 @@ func TestTartLeasesWaitForAVM(t *testing.T) {
 	}
 }
 
+// A VM whose config and footprint are unknown costs the default Tart size,
+// as the budget reserves it: binding it settles the lease, which is not held
+// beside the budget's reservation until it expires (#277).
+func TestAVMOfUnknownSizeSettlesItsTartLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.SetDefaultTartBytes(4 * gib)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: 4 * gib, Target: "vm"}, snap(), cfg)
+	s := snap()
+	s.Tart.VMs = []protocol.TartVM{{Name: "vm"}} // tart get failed, no VM process read
+	b.Observe(s)
+	if len(b.List()) != 0 {
+		t.Fatalf("the binding reading did not settle the Tart lease: %+v", b.List())
+	}
+}
+
 func TestOneResourceSettlesOneLease(t *testing.T) {
 	b, _, _ := book(t)
 	d := b.Check(req("w1", gib), snap(), cfg)

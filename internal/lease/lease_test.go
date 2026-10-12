@@ -3807,8 +3807,31 @@ func TestAWaitingComposeTakeoverHoldsOnlyWhatItAdds(t *testing.T) {
 	}
 }
 
+// A headroom deny counts only the calls ahead that hold bytes, as the slot
+// text counts only those that hold a slot (#260): a takeover waiter whose
+// taken lease reserves its whole cost holds none.
+func TestAHeadroomDenyCountsOnlyTheCallsAheadThatHoldBytes(t *testing.T) {
+	b, _, _ := book(t)
+	up := policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", CostBytes: 4 * gib, OnEngine: true}
+	if d := b.Check(up, room(10*gib), cfg); !d.Allow {
+		t.Fatalf("first up: %+v", d)
+	}
+	if d := b.Check(waits("w2", 7*gib, ""), room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("A: %+v", d)
+	}
+	again := up
+	again.Wait = true
+	if d := b.Check(again, room(10*gib), cfg); d.Allow || d.Ticket == "" {
+		t.Fatalf("the up again: %+v", d)
+	}
+	d := b.Check(req("w2", 2*gib), room(12*gib), cfg)
+	if d.Allow || len(d.Reasons) == 0 || !strings.Contains(d.Reasons[0].Text, "7.0 GB of it held for a waiting call ahead") {
+		t.Fatalf("want the 7 GB held for the one call that holds bytes: %+v", d)
+	}
+}
+
 // So does a start of a container a create made, whose lease it takes over
-// (#72, review round 1 F1).
+// (#72).
 func TestAWaitingStartOfACreatedContainerHoldsOnlyWhatItAdds(t *testing.T) {
 	b, _, _ := book(t)
 	create := policy.Request{Worktree: "w1", Kind: "container", Op: "create", Command: "docker create -m 4g x", CostBytes: 4 * gib, Labelled: true}

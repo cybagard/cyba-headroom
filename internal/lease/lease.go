@@ -501,25 +501,38 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// A ticket's call is decided with the calls ahead of it held, any
 		// other with every queued one: none takes the room of a call that
 		// came first. A manual call is not gated.
-		for _, o := range b.waiting {
-			if o == w {
-				break
-			}
-			r.HeldBytes += b.hold(o)
-			if o.MacOS {
-				r.HeldMacOS++
-			}
-			r.Waiting++
-		}
+		r.HeldBytes, r.HeldMacOS, r.CallsAhead = b.heldAhead(w)
 	}
 	d, taken := b.check(r, current, c, now)
 	b.queue(r, w, &d, taken, now)
 	return d
 }
 
+// heldAhead is what the calls queued ahead of w hold, all of them for a
+// call with no ticket: their bytes, their macOS slots, and how many of
+// them hold bytes (policy.Request.CallsAhead).
+func (b *Book) heldAhead(w *waiter) (bytes uint64, macOS, calls int) {
+	for _, o := range b.waiting {
+		if o == w {
+			break
+		}
+		if n := b.hold(o); n > 0 {
+			bytes += n
+			calls++
+		}
+		if o.MacOS {
+			macOS++
+		}
+	}
+	return bytes, macOS, calls
+}
+
 // ticket is the queued call ticket id names; nil if none is queued.
 func (b *Book) ticket(id string) *waiter {
-	if i := slices.IndexFunc(b.waiting, func(w *waiter) bool { return w.Ticket == id }); id != "" && i >= 0 {
+	if id == "" {
+		return nil
+	}
+	if i := slices.IndexFunc(b.waiting, func(w *waiter) bool { return w.Ticket == id }); i >= 0 {
 		return b.waiting[i]
 	}
 	return nil

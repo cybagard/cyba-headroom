@@ -398,7 +398,7 @@ func TestDenyNamesTheWorktreeByProject(t *testing.T) {
 // cannot fix.
 func TestWaitingCallsAheadHoldTheirRoom(t *testing.T) {
 	r := req("busy", 2*gib) // 20 GiB headroom
-	r.HeldBytes, r.Waiting = 19*gib, 2
+	r.HeldBytes, r.CallsAhead = 19*gib, 2
 	d := policy.Decide(r, snap(), cfg)
 	if d.Allow || !d.Retry || d.Reasons[0].Code != policy.Headroom ||
 		!strings.Contains(d.Reasons[0].Text, "19.0 GB of it held for 2 waiting calls ahead") {
@@ -413,5 +413,16 @@ func TestWaitingCallsAheadHoldTheirRoom(t *testing.T) {
 	r.HeldBytes = 10 * gib
 	if d := policy.Decide(r, snap(), c); !d.Allow {
 		t.Fatalf("holds count toward the cap: %+v", d)
+	}
+}
+
+// The headroom deny names the calls ahead that hold bytes, CallsAhead, as
+// the lease book counts them (#260).
+func TestAHeadroomDenyNamesTheCallsAheadThatHoldBytes(t *testing.T) {
+	r := req("busy", 2*gib) // 20 GiB headroom
+	r.HeldBytes, r.HeldMacOS, r.CallsAhead = 19*gib, 2, 1
+	d := policy.Decide(r, snap(), cfg)
+	if d.Allow || !strings.Contains(d.Reasons[0].Text, "19.0 GB of it held for a waiting call ahead") {
+		t.Fatalf("want one call ahead named: %+v", d)
 	}
 }

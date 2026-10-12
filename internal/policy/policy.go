@@ -128,12 +128,14 @@ type Request struct {
 	// lease book's queue (#72).
 	Wait   bool
 	Ticket string
-	// HeldBytes and HeldMacOS are what Waiting calls queued ahead of this
-	// one would cost, and their macOS slots: held for them, as a lease's
-	// reservation is (#72). Not toward the worktree's cap: a hold clears.
-	HeldBytes uint64
-	HeldMacOS int
-	Waiting   int
+	// HeldBytes and HeldMacOS are what the waiting calls queued ahead of
+	// this one would cost, and their macOS slots: held for them, as a
+	// lease's reservation is (#72). Not toward the worktree's cap: a hold
+	// clears. CallsAhead counts those calls that hold bytes, for the
+	// headroom deny's text, as HeldMacOS counts those that hold a slot.
+	HeldBytes  uint64
+	HeldMacOS  int
+	CallsAhead int
 }
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
@@ -222,7 +224,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 				of = append(of, fmt.Sprintf("%s GB of it promised to calls still starting", units.GB(r.LeasedBytes)))
 			}
 			if r.HeldBytes > 0 {
-				of = append(of, fmt.Sprintf("%s GB of it held for %s", units.GB(r.HeldBytes), waitingAhead(r.Waiting)))
+				of = append(of, fmt.Sprintf("%s GB of it held for %s", units.GB(r.HeldBytes), waitingAhead(r.CallsAhead)))
 			}
 			if len(of) > 0 {
 				text += " (" + strings.Join(of, ", ") + ")"

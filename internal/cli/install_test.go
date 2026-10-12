@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
+	"github.com/cybagard/cyba-headroom/internal/launchd"
 )
 
 // fakeAgent stands in for launchd.Agent.
@@ -98,6 +99,12 @@ func newInstallFixture(t *testing.T) *installFixture {
 		out: &f.out, errw: &f.errb, wait: 200 * time.Millisecond, poll: 5 * time.Millisecond,
 		shimDir:  filepath.Join(home, "shims"),
 		lookPath: func(name string) bool { return name == "claude" || name == "kilo" },
+		// The fixture's builds are scripts: one starting "#!binary" stands
+		// for a headroom build.
+		headroomBuild: func(p string) bool {
+			b, err := os.ReadFile(p)
+			return err == nil && bytes.HasPrefix(b, []byte("#!binary"))
+		},
 	}
 	return f
 }
@@ -1166,10 +1173,9 @@ func TestInstallRefusesABinThatIsNotHeadroom(t *testing.T) {
 	}
 }
 
-// A --bin under another name, the binary the installed agent runs, is
-// still headroom's: a reinstall from a newer build replaces it, and
-// uninstall --bin removes it (#274).
-func TestACustomBinNameStaysHeadroomsThroughTheAgent(t *testing.T) {
+// A --bin under another name is still headroom's: a reinstall from a newer
+// build replaces it, and uninstall --bin removes it (#274).
+func TestACustomBinNameStaysHeadroomsAcrossAReinstall(t *testing.T) {
 	f := newInstallFixture(t)
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
@@ -1227,5 +1233,155 @@ func TestUninstallGoesOnWithABadConfig(t *testing.T) {
 	}
 	if want := filepath.Join(f.cfg, "config.toml"); !strings.Contains(errb.String(), want) || !strings.Contains(errb.String(), "defaults") {
 		t.Errorf("no warning about %s using the defaults:\n%s", want, errb.String())
+	}
+	// The config's own shim_dir and socket, if it set them, are unknown:
+	// the warning says their shims and socket may remain.
+	for _, want := range []string{"shim_dir", "socket", "may remain"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("warning lacks %q:\n%s", want, errb.String())
+		}
+	}
+}
+
+// A stale or edited plist naming a file that is not headroom's does not
+// make it headroom's: a plain uninstall keeps it, and install --bin over it
+// refuses (#274).
+func TestAPlistDoesNotMakeAFileHeadrooms(t *testing.T) {
+	for _, cmd := range []string{"uninstall", "install --bin"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newInstallFixture(t)
+			if code := f.in.install(context.Background()); code != 0 {
+				t.Fatalf("install: exit %d: %s", code, f.errb.String())
+			}
+			docker, data := notHeadroom(t, "docker")
+			plist := launchd.Plist(launchd.Spec{Label: agentLabel, Args: []string{docker, "daemon"}})
+			if err := os.WriteFile(f.plistPath(), plist, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f.out.Reset()
+			f.errb.Reset()
+			if cmd == "uninstall" {
+				if code := f.in.uninstall(context.Background()); code != 0 {
+					t.Fatalf("exit %d: %s", code, f.errb.String())
+				}
+				if want := docker + " (not a headroom binary)"; !strings.Contains(f.out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, f.out.String())
+				}
+			} else {
+				f.in.bin, f.in.binGiven = docker, true
+				if code := f.in.install(context.Background()); code != 1 {
+					t.Fatalf("exit %d, want 1: %s", code, f.errb.String())
+				}
+			}
+			if b, err := os.ReadFile(docker); err != nil || !bytes.Equal(b, data) {
+				t.Errorf("%s removed or changed: %q %v", docker, b, err)
+			}
+		})
+	}
+}
+
+// A directory at --bin is no binary, whatever its name: uninstall keeps it
+// and finishes (#274).
+func TestUninstallKeepsADirectoryNamedHeadroom(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	bin := filepath.Join(dir, "headroom")
+	if err := os.MkdirAll(filepath.Join(bin, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.in.bin, f.in.binGiven = bin, true
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	if fi, err := os.Stat(bin); err != nil || !fi.IsDir() {
+		t.Errorf("%s removed: %v", bin, err)
+	}
+	if _, err := os.Stat(f.plistPath()); !os.IsNotExist(err) {
+		t.Errorf("plist stayed: %v", err)
+	}
+	if want := bin + " (not a headroom binary)"; !strings.Contains(f.out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, f.out.String())
+	}
+}
+
+// headroomCopy copies the test binary, which is built from headroom's
+// module, to a temp dir under name: a headroom build under any name.
+func headroomCopy(t *testing.T, name string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// A headroom build under another name, which no plist names, is known by
+// its build info: install --bin replaces it and uninstall --bin removes it
+// (#274).
+func TestACustomNameCopyIsKnownByItsBuildInfo(t *testing.T) {
+	for _, cmd := range []string{"install --bin", "uninstall --bin"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newInstallFixture(t)
+			f.in.headroomBuild = isHeadroomBuild
+			if cmd == "uninstall --bin" {
+				if code := f.in.install(context.Background()); code != 0 {
+					t.Fatalf("install: exit %d: %s", code, f.errb.String())
+				}
+			}
+			f.in.bin, f.in.binGiven = headroomCopy(t, "hr"), true
+			if cmd == "install --bin" {
+				if code := f.in.install(context.Background()); code != 0 {
+					t.Fatalf("exit %d: %s", code, f.errb.String())
+				}
+				if b, _ := os.ReadFile(f.in.bin); !bytes.Equal(b, f.exeData) {
+					t.Errorf("the copy was not replaced")
+				}
+				return
+			}
+			if code := f.in.uninstall(context.Background()); code != 0 {
+				t.Fatalf("exit %d: %s", code, f.errb.String())
+			}
+			if _, err := os.Lstat(f.in.bin); !os.IsNotExist(err) {
+				t.Errorf("%s stayed: %v\n%s", f.in.bin, err, f.out.String())
+			}
+		})
+	}
+}
+
+// isHeadroomBuild knows headroom's module by the file's build info alone;
+// a directory or another program is not one (#274).
+func TestIsHeadroomBuild(t *testing.T) {
+	if p := headroomCopy(t, "hr"); !isHeadroomBuild(p) {
+		t.Errorf("a copy of a headroom build is not one")
+	}
+	if isHeadroomBuild(filepath.Dir(headroomCopy(t, "x"))) {
+		t.Errorf("a directory is a headroom build")
+	}
+	if script, _ := notHeadroom(t, "headroom"); isHeadroomBuild(script) {
+		t.Errorf("a script named headroom is a headroom build")
+	}
+	if isHeadroomBuild("/bin/ls") {
+		t.Errorf("/bin/ls is a headroom build")
 	}
 }

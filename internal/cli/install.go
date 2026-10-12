@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,9 @@ type installer struct {
 	lookPath func(name string) bool
 	// How long install waits for the daemon to answer, and how often it asks.
 	wait, poll time.Duration
+	// headroomBuild reports whether the file at p was built from headroom's
+	// module; isHeadroomBuild does it.
+	headroomBuild func(p string) bool
 }
 
 func (in *installer) plistPath() string { return agentPlist(in.home) }
@@ -447,26 +451,30 @@ func removeLock(path, dir string) {
 }
 
 // ownedBinary reports whether install may write p and uninstall may remove
-// it: p is missing, is a headroom binary (the running one, or one isHeadroom
-// knows), or is the binary the installed agent runs, whatever its name
-// (#274). A typo'd --bin such as a docker is not.
+// it: p is missing, is the running binary, or was built from headroom's
+// module, whatever its name (#274). Neither its name nor a plist naming it
+// makes it headroom's: a typo'd --bin such as a docker, or a directory, is
+// not.
 func (in *installer) ownedBinary(p string) bool {
 	if _, err := os.Lstat(p); err != nil {
 		return errors.Is(err, fs.ErrNotExist)
 	}
-	if isHeadroom(p, p, in.exe) {
+	if same, _ := sameFile(p, in.exe); same {
 		return true
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	plist, err := os.ReadFile(in.plistPath())
-	if err != nil {
-		return false
-	}
-	bin, err := launchd.ProgramPath(plist)
-	return err == nil && bin == abs
+	return in.headroomBuild(p)
+}
+
+// headroomModule is headroom's Go module, as go.mod names it.
+const headroomModule = "github.com/cybagard/cyba-headroom"
+
+// isHeadroomBuild reports whether the file at p is a Go binary built from
+// headroom's module, whatever its name: an older copy, a custom --bin, a
+// Homebrew build. It reads the file and never runs it; a directory, a
+// script or another Go program is not one.
+func isHeadroomBuild(p string) bool {
+	bi, err := buildinfo.ReadFile(p)
+	return err == nil && bi.Main.Path == headroomModule
 }
 
 func (in *installer) fail(err error) int {
@@ -609,7 +617,7 @@ func newInstaller(e Env, bin string, uninstall bool) (*installer, error) {
 		if !uninstall || derr != nil {
 			return nil, err
 		}
-		fmt.Fprintf(e.Stderr, "headroom: %v; uninstalling with the defaults\n", err)
+		fmt.Fprintf(e.Stderr, "headroom: %v; uninstalling with the defaults: a shim_dir or socket it sets cannot be read, so those shims and that socket may remain\n", err)
 		cfg = config.Defaults(dir)
 	}
 	return &installer{
@@ -621,8 +629,9 @@ func newInstaller(e Env, bin string, uninstall bool) (*installer, error) {
 		},
 		getenv: e.Getenv, out: e.Stdout, errw: e.Stderr,
 		wait: 10 * time.Second, poll: 200 * time.Millisecond,
-		shimDir:  cfg.ShimDir,
-		lookPath: func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
+		shimDir:       cfg.ShimDir,
+		lookPath:      func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
+		headroomBuild: isHeadroomBuild,
 	}, nil
 }
 

@@ -130,19 +130,16 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 
 // tart reserves each running VM's configured memory (R2), which the VM grows
 // into and does not give back, or its footprint when the hypervisor's
-// overhead puts it above that. One with neither reserves the default
-// rather than 0 (#277).
+// overhead puts it above that. One of unknown config reserves at least the
+// default (protocol.TartVM.SizeBytes, #277).
 func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "tart"}
 	var used uint64
 	known := true
 	for _, vm := range t.VMs {
-		r := vm.MemoryBytes
+		r := vm.SizeBytes(p.DefaultTartBytes)
 		if vm.FootprintBytes == nil {
 			known = false
-			if r == 0 {
-				r = p.DefaultTartBytes
-			}
 		} else {
 			used += *vm.FootprintBytes
 			r = max(r, *vm.FootprintBytes)

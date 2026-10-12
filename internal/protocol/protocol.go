@@ -560,6 +560,20 @@ type TartVM struct {
 	SharedDirs []string `json:"shared_dirs,omitempty"`
 }
 
+// SizeBytes is what the VM holds: its configured memory, or, while its
+// config is unknown, the larger of its footprint (nil counts as 0) and
+// defaultBytes, the cost of an unknown tart run (#277).
+func (vm TartVM) SizeBytes(defaultBytes uint64) uint64 {
+	if vm.MemoryBytes > 0 {
+		return vm.MemoryBytes
+	}
+	var fp uint64
+	if vm.FootprintBytes != nil {
+		fp = *vm.FootprintBytes
+	}
+	return max(fp, defaultBytes)
+}
+
 // Engine kinds, read from an engine's /version (#227).
 const (
 	EngineDockerDesktop = "docker-desktop"

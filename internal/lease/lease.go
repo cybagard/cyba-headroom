@@ -931,8 +931,8 @@ func (r resource) runs() []int {
 
 // resources lists s's containers and VMs. Their worktree is the evidence's
 // alone: a lease's placement (attribution.ByLease) is for status and
-// policy, and never feeds back into binding (#74). A Tart VM of unknown size
-// uses tartDefault, as the budget reserves it (#277).
+// policy, and never feeds back into binding (#74). A Tart VM is sized as the
+// budget reserves it: protocol.TartVM.SizeBytes with tartDefault (#277).
 func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 	owner := map[string]string{}
 	if a := s.Attribution; a != nil {
@@ -969,11 +969,7 @@ func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			bytes := vm.MemoryBytes
-			if bytes == 0 && vm.FootprintBytes == nil {
-				bytes = tartDefault
-			}
-			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: bytes, os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.SizeBytes(tartDefault), os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
 		}
 	}
 	return out

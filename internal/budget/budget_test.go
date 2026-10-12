@@ -75,9 +75,15 @@ func TestTartReservesConfiguredMemory(t *testing.T) {
 			[]protocol.TartVM{{Name: "a"}},
 			4 * gib, nil,
 		},
-		"config unknown, footprint known": {
+		// Unknown config: the larger of the footprint and the default, so a
+		// booting VM's small footprint does not drop it below the default.
+		"config unknown, footprint above the default": {
 			[]protocol.TartVM{{Name: "a", FootprintBytes: u64(5 * gib)}},
 			5 * gib, u64(5 * gib),
+		},
+		"config unknown, footprint below the default": {
+			[]protocol.TartVM{{Name: "a", FootprintBytes: u64(gib * 6 / 10)}},
+			4 * gib, u64(gib * 6 / 10),
 		},
 	}
 	for name, tc := range cases {

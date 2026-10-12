@@ -33,7 +33,7 @@ Only the gate shims change what happens: they exec the real binary on allow, or 
 
 Defense in depth: one authoritative gate; the other layers set up, warn or detect.
 
-1. **Orca launch environment (setup).** Puts the shims first on PATH and sets `HEADROOM_WORKTREE` for every agent (R9). Not a gate, but it fixes the shim's two weak spots: PATH order and identity.
+1. **Orca launch environment (setup).** `headroom run` puts the shims first on PATH for every agent (R9). Identity comes from `ORCA_WORKTREE_ID`, which Orca sets in every agent terminal; `HEADROOM_WORKTREE` is an optional override, for launches outside Orca. Not a gate, but it fixes the shim's two weak spots: PATH order and identity.
 2. **Gate shim (enforce).** The only authoritative decision, at the exec level, for every agent and however deeply nested the call (R5, R10).
 3. **Agent hooks (warn, P1).** Deny obvious cases before the agent spends effort, with the reason fed to the model, and add session-level attribution. Advisory, since they only see the command string.
 4. **Observe mode (detect).** Flags anything that got around the first three, such as direct Docker socket use, as ungated (R4).

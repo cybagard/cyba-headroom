@@ -25,6 +25,10 @@ type Params struct {
 	LMStudioIdleBytes uint64
 	// OllamaIdleBytes is the Ollama server's footprint with no model loaded.
 	OllamaIdleBytes uint64
+	// DefaultTartBytes is reserved for a running Tart VM whose configured
+	// memory and footprint are both unknown: the shim's cost for an unknown
+	// tart run (policy.Config.DefaultTartBytes).
+	DefaultTartBytes uint64
 }
 
 // Compute returns the budget for s. A source with no reading yet is listed
@@ -59,7 +63,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		footprintsKnown = false
 	}
 	if s.Tart != nil {
-		add(tart(s.Tart))
+		add(tart(s.Tart, p))
 	} else {
 		b.Unknown = append(b.Unknown, "tart")
 		footprintsKnown = false
@@ -126,13 +130,14 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 
 // tart reserves each running VM's configured memory (R2), which the VM grows
 // into and does not give back, or its footprint when the hypervisor's
-// overhead puts it above that.
-func tart(t *protocol.Tart) protocol.BudgetComponent {
+// overhead puts it above that. One of unknown config reserves at least the
+// default (protocol.TartVM.SizeBytes, #277).
+func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "tart"}
 	var used uint64
 	known := true
 	for _, vm := range t.VMs {
-		r := vm.MemoryBytes
+		r := vm.SizeBytes(p.DefaultTartBytes)
 		if vm.FootprintBytes == nil {
 			known = false
 		} else {

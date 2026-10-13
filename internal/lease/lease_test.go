@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/budget"
 	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
@@ -181,6 +182,73 @@ func TestTartLeasesWaitForAVM(t *testing.T) {
 	b.Observe(s)
 	if len(b.List()) != 0 {
 		t.Fatalf("a new VM did not settle the Tart lease: %+v", b.List())
+	}
+}
+
+// A VM whose config and footprint are unknown costs the default Tart size,
+// as the budget reserves it: binding it settles the lease, which is not held
+// beside the budget's reservation until it expires (#277).
+func TestAVMOfUnknownSizeSettlesItsTartLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.SetDefaultTartBytes(4 * gib)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: 4 * gib, Target: "vm"}, snap(), cfg)
+	s := snap()
+	s.Tart.VMs = []protocol.TartVM{{Name: "vm"}} // tart get failed, no VM process read
+	b.Observe(s)
+	if len(b.List()) != 0 {
+		t.Fatalf("the binding reading did not settle the Tart lease: %+v", b.List())
+	}
+}
+
+// tartReserved is what a tart start holds against the next one: the budget's
+// reservation for the VMs plus the open leases.
+func tartReserved(t *testing.T, b *lease.Book, s *protocol.Snapshot) uint64 {
+	t.Helper()
+	r := budget.Compute(s, budget.Params{DefaultTartBytes: 4 * gib})
+	var n uint64
+	for _, c := range r.Components {
+		if c.Name == "tart" {
+			n += c.ReservedBytes
+		}
+	}
+	for _, l := range b.List() {
+		n += l.Bytes
+	}
+	return n
+}
+
+// A booting VM of unknown config whose footprint is known but small costs
+// the default: its lease settles, and the budget reserves the default (#277).
+func TestABootingVMOfUnknownConfigSettlesItsTartLease(t *testing.T) {
+	b, _, _ := book(t)
+	b.SetDefaultTartBytes(4 * gib)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: 4 * gib, Target: "vm"}, snap(), cfg)
+	s := snap()
+	fp := gib * 6 / 10
+	s.Tart.VMs = []protocol.TartVM{{Name: "vm", FootprintBytes: &fp}}
+	b.Observe(s)
+	if len(b.List()) != 0 {
+		t.Fatalf("the binding reading did not settle the Tart lease: %+v", b.List())
+	}
+	if got := tartReserved(t, b, s); got != 4*gib {
+		t.Fatalf("reserved %d, want the default %d", got, 4*gib)
+	}
+}
+
+// The VM's process is read from the second tick on, while it boots: what
+// is held for it never drops below the default (#277).
+func TestAVMOfUnknownConfigHoldsTheDefaultAcrossTicks(t *testing.T) {
+	b, _, _ := book(t)
+	b.SetDefaultTartBytes(4 * gib)
+	b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run vm", CostBytes: 4 * gib, Target: "vm"}, snap(), cfg)
+	fp := gib * 6 / 10
+	for i, footprint := range []*uint64{nil, &fp} {
+		s := snap()
+		s.Tart.VMs = []protocol.TartVM{{Name: "vm", FootprintBytes: footprint}}
+		b.Observe(s)
+		if got := tartReserved(t, b, s); got < 4*gib {
+			t.Fatalf("tick %d: reserved %d, below the default %d", i+1, got, 4*gib)
+		}
 	}
 }
 

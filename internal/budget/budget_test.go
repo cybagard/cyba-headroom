@@ -69,11 +69,27 @@ func TestTartReservesConfiguredMemory(t *testing.T) {
 			},
 			12 * gib, nil,
 		},
+		// tart get failed and no VM process was read: the shim's default
+		// Tart cost, not 0 (#277).
+		"config and footprint unknown": {
+			[]protocol.TartVM{{Name: "a"}},
+			4 * gib, nil,
+		},
+		// Unknown config: the larger of the footprint and the default, so a
+		// booting VM's small footprint does not drop it below the default.
+		"config unknown, footprint above the default": {
+			[]protocol.TartVM{{Name: "a", FootprintBytes: u64(5 * gib)}},
+			5 * gib, u64(5 * gib),
+		},
+		"config unknown, footprint below the default": {
+			[]protocol.TartVM{{Name: "a", FootprintBytes: u64(gib * 6 / 10)}},
+			4 * gib, u64(gib * 6 / 10),
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := &protocol.Snapshot{Tart: &protocol.Tart{Installed: true, VMs: tc.vms}}
-			c := component(t, budget.Compute(s, budget.Params{}), "tart")
+			c := component(t, budget.Compute(s, budget.Params{DefaultTartBytes: 4 * gib}), "tart")
 			if c.ReservedBytes != tc.reserved || !usedEq(c.UsedBytes, tc.used) {
 				t.Fatalf("got reserved=%d used=%v, want %d %v", c.ReservedBytes, c.UsedBytes, tc.reserved, tc.used)
 			}

@@ -1,12 +1,15 @@
 package binpath_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/binpath"
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
 func TestRelativeHOMEIsNotUsed(t *testing.T) {
@@ -61,5 +64,17 @@ func TestSearchSkip(t *testing.T) {
 	skipA := func(p string, _ os.FileInfo) bool { return filepath.Base(filepath.Dir(p)) == "a" }
 	if got, want := binpath.Search("tool", func(k string) string { return env[k] }, nil, skipA), filepath.Join(dir, "b", "tool"); got != want {
 		t.Fatalf("Search = %q, want %q", got, want)
+	}
+}
+
+// A child that inherits stdout keeps the pipe open after the command exits;
+// Run must not wait for it past the context and WaitDelay (#277).
+func TestRunDoesNotWaitForAChildHoldingStdout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, _ = binpath.Exec{Path: "/bin/sh"}.Run(ctx, "-c", "sleep 30 & echo up")
+	if d, limit := time.Since(start), time.Second+protocol.ComposeWaitDelay+time.Second; d > limit {
+		t.Fatalf("Run returned after %v, want within %v", d, limit)
 	}
 }

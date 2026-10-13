@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
 // vmComm is the VM process name as the kernel stores it: p_comm keeps only
@@ -158,7 +160,10 @@ func (h Host) Footprint(ctx context.Context, pid int) (uint64, error) {
 	return ReadFootprint(ctx, h, pid)
 }
 
-// Run implements System.
+// Run implements System. A child that inherits stdout is not waited for
+// past WaitDelay (#277).
 func (Host) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = protocol.ComposeWaitDelay
+	return cmd.Output()
 }

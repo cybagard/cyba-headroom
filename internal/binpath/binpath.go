@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
 
 // Find returns configured if set, else the first usable name on PATH or in
@@ -58,7 +60,10 @@ func Search(name string, getenv func(string) string, fallbacks []string, skip fu
 // Exec runs the binary at Path.
 type Exec struct{ Path string }
 
-// Run runs the binary with args and returns its standard output.
+// Run runs the binary with args and returns its standard output. A child
+// that inherits stdout is not waited for past WaitDelay (#277).
 func (e Exec) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, e.Path, args...).Output()
+	cmd := exec.CommandContext(ctx, e.Path, args...)
+	cmd.WaitDelay = protocol.ComposeWaitDelay
+	return cmd.Output()
 }

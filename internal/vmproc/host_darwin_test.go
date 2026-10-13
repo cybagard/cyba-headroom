@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
@@ -139,5 +141,17 @@ func TestHostListsOtherUsersProcessesWithoutArguments(t *testing.T) {
 	}
 	if p := procs[i]; p.ArgsErr == nil || p.Args != nil || p.Exec != "" {
 		t.Fatalf("got %+v, want no arguments and why", p)
+	}
+}
+
+// A child that inherits stdout keeps the pipe open after the command exits;
+// Run must not wait for it past the context and WaitDelay (#277).
+func TestHostRunDoesNotWaitForAChildHoldingStdout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, _ = vmproc.Host{}.Run(ctx, "/bin/sh", "-c", "sleep 30 & echo up")
+	if d, limit := time.Since(start), time.Second+protocol.ComposeWaitDelay+time.Second; d > limit {
+		t.Fatalf("Run returned after %v, want within %v", d, limit)
 	}
 }

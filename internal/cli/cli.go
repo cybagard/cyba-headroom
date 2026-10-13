@@ -565,10 +565,11 @@ func usage(w io.Writer) {
 // Checks decide against the latest snapshot and the open leases.
 func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Inspector) *lease.Book {
 	book := lease.New(cfg.Policy.LeaseTimeout.Duration, time.Now, log)
-	d.SetDerive(derive(book, cfg.Budget.Params()))
+	d.SetDerive(derive(book, cfg.BudgetParams()))
 	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
 	book.SetDaemonTimeout(cfg.Policy.DaemonTimeout.Duration)
+	book.SetDefaultTartBytes(cfg.BudgetParams().DefaultTartBytes)
 	return book
 }
 

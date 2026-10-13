@@ -45,7 +45,7 @@ func runSuggest(e Env) int {
 	}
 	to := time.Now()
 	from := to.Add(-since)
-	agg := suggest.New(suggest.Options{Interval: cfg.Daemon.Interval.Duration, Loc: time.Local, Current: cfg.Budget.Params()})
+	agg := suggest.New(suggest.Options{Interval: cfg.Daemon.Interval.Duration, Loc: time.Local, Current: cfg.BudgetParams()})
 	st, err := samples.Read(cfg.SamplesDir(), from, to, func(s samples.Sample) error {
 		agg.Add(s)
 		return nil

@@ -1,0 +1,22 @@
+# Dependabot keeps the pinned actions and the Go modules current.
+# Each ecosystem's updates come as one grouped PR, so an action pinned in
+# several workflows (ci.yml, release.yml, codeql.yml) moves everywhere at
+# once, its SHA and version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns:
+          - "*"

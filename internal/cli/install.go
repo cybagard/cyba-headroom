@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,9 @@ type installer struct {
 	lookPath func(name string) bool
 	// How long install waits for the daemon to answer, and how often it asks.
 	wait, poll time.Duration
+	// headroomBuild reports whether the file at p was built from headroom's
+	// module; isHeadroomBuild does it.
+	headroomBuild func(p string) bool
 }
 
 func (in *installer) plistPath() string { return agentPlist(in.home) }
@@ -109,6 +113,15 @@ func (in *installer) install(ctx context.Context) int {
 			fmt.Fprintf(in.errw, "headroom: %s links to another headroom binary; to install the binary it links to, run it: \"%s\" install --bin \"%s\"\n", in.bin, in.bin, in.bin)
 			return 1
 		}
+	}
+	// The copy would replace whatever is there: a typo'd --bin must not
+	// cost someone their docker (#274). A plain install renames over a link
+	// at the default path and never touches its target (#183).
+	fi, err := os.Lstat(in.bin)
+	plainLink := !in.binGiven && err == nil && fi.Mode()&fs.ModeSymlink != 0
+	if !plainLink && !in.ownedBinary(in.bin) {
+		fmt.Fprintf(in.errw, "headroom: %s is not a headroom binary; choose another --bin\n", in.bin)
+		return 1
 	}
 	// Only the launchd daemon may hold the socket: a terminal daemon would
 	// make the agent's daemon fail to start and crash-loop.
@@ -213,7 +226,7 @@ func (in *installer) removeOldCopy(bin, prefix string, printed bool) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return
 	}
-	if err == nil && fi.Mode().IsRegular() && isHeadroom(old, old, in.exe, bin) {
+	if err == nil && fi.Mode().IsRegular() && in.ownedBinary(old) {
 		if same, _ := sameFile(old, bin); same {
 			return
 		}
@@ -326,9 +339,11 @@ func (in *installer) uninstall(ctx context.Context) int {
 	}
 	// A link is not a copy install made: with --bin "$(brew --prefix)/bin/headroom"
 	// it is Homebrew's, and removing it would break the formula (#181).
-	kept := ""
+	kept, notOurs := "", "" // a link, and a --bin that is not headroom's (#274)
 	if fi, err := os.Lstat(owned); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		kept = owned
+	} else if owned != "" && !in.ownedBinary(owned) {
+		notOurs = owned
 	} else if owned != "" {
 		remove = append(remove, owned)
 	}
@@ -398,6 +413,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 	if kept != "" {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
 	}
+	if notOurs != "" {
+		fmt.Fprintf(in.out, "  binary   %s (not a headroom binary)\n", notOurs)
+	}
 	if len(brewShims) > 0 {
 		whose := "another headroom's"
 		if brewPlist(in.home) != "" {
@@ -433,6 +451,33 @@ func removeLock(path, dir string) {
 	if err := os.Remove(path); err == nil && filepath.Dir(path) == filepath.Clean(dir) {
 		_ = os.Remove(dir) // only if empty
 	}
+}
+
+// ownedBinary reports whether install may write p and uninstall may remove
+// it: p is missing, is the running binary, or was built from headroom's
+// module, whatever its name (#274). Neither its name nor a plist naming it
+// makes it headroom's: a typo'd --bin such as a docker, or a directory, is
+// not.
+func (in *installer) ownedBinary(p string) bool {
+	if _, err := os.Lstat(p); err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	if same, _ := sameFile(p, in.exe); same {
+		return true
+	}
+	return in.headroomBuild(p)
+}
+
+// headroomModule is headroom's Go module, as go.mod names it.
+const headroomModule = "github.com/cybagard/cyba-headroom"
+
+// isHeadroomBuild reports whether the file at p is a Go binary built from
+// headroom's module, whatever its name: an older copy, a custom --bin, a
+// Homebrew build. It reads the file and never runs it; a directory, a
+// script or another Go program is not one.
+func isHeadroomBuild(p string) bool {
+	bi, err := buildinfo.ReadFile(p)
+	return err == nil && bi.Main.Path == headroomModule
 }
 
 func (in *installer) fail(err error) int {
@@ -551,7 +596,7 @@ func trimCrashLog(f *os.File, limit int64) {
 }
 
 // newInstaller wires an installer to the real system.
-func newInstaller(e Env, bin string) (*installer, error) {
+func newInstaller(e Env, bin string, uninstall bool) (*installer, error) {
 	home := e.Getenv("HOME")
 	if home == "" {
 		return nil, errors.New("HOME is not set")
@@ -569,7 +614,14 @@ func newInstaller(e Env, bin string) (*installer, error) {
 	}
 	cfg, err := config.Load(e.Getenv)
 	if err != nil {
-		return nil, err
+		// A broken config.toml must not keep headroom installed: uninstall
+		// goes on from the default dir, as doctor does (#274).
+		dir, derr := config.Dir(e.Getenv)
+		if !uninstall || derr != nil {
+			return nil, err
+		}
+		fmt.Fprintf(e.Stderr, "headroom: %v; uninstalling with the defaults: a shim_dir or socket it sets cannot be read, so those shims and that socket may remain\n", err)
+		cfg = config.Defaults(dir)
 	}
 	return &installer{
 		home: home, exe: exe, bin: bin, binGiven: binGiven,
@@ -580,8 +632,9 @@ func newInstaller(e Env, bin string) (*installer, error) {
 		},
 		getenv: e.Getenv, out: e.Stdout, errw: e.Stderr,
 		wait: 10 * time.Second, poll: 200 * time.Millisecond,
-		shimDir:  cfg.ShimDir,
-		lookPath: func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
+		shimDir:       cfg.ShimDir,
+		lookPath:      func(name string) bool { return binpath.Search(name, e.Getenv, nil, nil) != "" },
+		headroomBuild: isHeadroomBuild,
 	}, nil
 }
 
@@ -595,7 +648,7 @@ func runInstall(e Env, uninstall bool) int {
 		}
 		bin, a = a[1], a[1:]
 	}
-	in, err := newInstaller(e, bin)
+	in, err := newInstaller(e, bin, uninstall)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, "headroom:", err)
 		return 1

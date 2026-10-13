@@ -22,39 +22,32 @@ func TestRemote(t *testing.T) {
 	}
 	host = strings.TrimSuffix(host, ".local")
 	for _, c := range []struct {
-		name, endpoint, dockerHost, containerHost string
-		want                                      bool
+		endpoint string
+		want     bool
 	}{
-		{"docker", "", "", "", false},
-		{"docker", "desktop-linux", "", "", false}, // a context name: local in #28
-		{"docker", "unix:///var/run/docker.sock", "", "", false},
-		{"docker", "ssh://dev@build-box", "", "", true},
-		{"docker", "tcp://10.0.0.5:2376", "", "", true},
-		{"docker", "tcp://localhost:2375", "", "", false},
-		{"docker", "tcp://0.0.0.0:2375", "", "", false},
-		{"docker", "tcp://host.docker.internal:2375", "", "", false},
-		{"docker", "ssh://me@" + host + ".local", "", "", false},
-		{"docker", "ssh://me@" + strings.ToUpper(host), "", "", false},
-		{"podman", "ssh://core@127.0.0.1:52000/run/podman/podman.sock", "", "", false}, // podman machine
-		{"docker", "tcp://[::1]:2375", "", "", false},
-		{"docker", "", "ssh://dev@build-box", "", true},
-		{"podman", "", "", "tcp://build-box:8080", true},
-		// Each engine reads its own variable only.
-		{"docker", "", "", "ssh://dev@build-box", false},
-		{"podman", "", "ssh://dev@build-box", "", false},
-		{"docker", "unix:///x.sock", "ssh://dev@build-box", "", false}, // the flag wins
-		{"docker", "ssh://", "", "", false},
-		{"docker", "tcp://" + lan + ":2375", "", "", false}, // this Mac's own address
+		{"", false},
+		{"desktop-linux", false}, // a context name: local in #28
+		{"unix:///var/run/docker.sock", false},
+		{"ssh://dev@build-box", true},
+		{"tcp://10.0.0.5:2376", true},
+		{"tcp://localhost:2375", false},
+		{"tcp://0.0.0.0:2375", false},
+		{"tcp://host.docker.internal:2375", false},
+		{"ssh://me@" + host + ".local", false},
+		{"ssh://me@" + strings.ToUpper(host), false},
+		{"ssh://core@127.0.0.1:52000/run/podman/podman.sock", false}, // podman machine
+		{"tcp://[::1]:2375", false},
+		{"tcp://build-box:8080", true},
+		{"ssh://", false},
+		{"tcp://" + lan + ":2375", false}, // this Mac's own address
 
-		{"docker", "10.0.0.5:2375", "", "", true}, // docker reads host:port as tcp://
-		{"docker", "", "build-box:2375", "", true},
-		{"docker", "localhost:2375", "", "", false},
-		{"docker", "::bad", "", "", false},
+		{"10.0.0.5:2375", true}, // docker reads host:port as tcp://
+		{"build-box:2375", true},
+		{"localhost:2375", false},
+		{"::bad", false},
 	} {
-		env := map[string]string{"DOCKER_HOST": c.dockerHost, "CONTAINER_HOST": c.containerHost}
-		if got := Remote(c.name, c.endpoint, func(k string) string { return env[k] }); got != c.want {
-			t.Errorf("Remote(%s, %q, DOCKER_HOST=%q, CONTAINER_HOST=%q) = %v, want %v",
-				c.name, c.endpoint, c.dockerHost, c.containerHost, got, c.want)
+		if got := Remote(c.endpoint); got != c.want {
+			t.Errorf("Remote(%q) = %v, want %v", c.endpoint, got, c.want)
 		}
 	}
 }
@@ -78,22 +71,19 @@ func resolving(t *testing.T, names map[string]string) {
 // ::1 on either scheme, with or without a port (#118).
 func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
 	resolving(t, map[string]string{"127.1": "127.0.0.1", "dev-box": "127.0.0.1", "dev-box6": "::1"})
-	for _, c := range []struct{ endpoint, dockerHost string }{
-		{"tcp://127.1:2375", ""},
-		{"127.1:2375", ""},
-		{"", "tcp://127.1:2375"},
-		{"::1", ""},
-		{"tcp://::1", ""},
-		{"", "::1"},
-		{"ssh://dev@::1", ""},
-		{"ssh://dev@::1:22", ""}, // ssh -p 22 -- ::1
-		{"", "ssh://core@::1:2222/run/podman/podman.sock"},
-		{"tcp://dev-box:2375", ""},
-		{"tcp://dev-box6:2375", ""},
+	for _, endpoint := range []string{
+		"tcp://127.1:2375",
+		"127.1:2375",
+		"::1",
+		"tcp://::1",
+		"ssh://dev@::1",
+		"ssh://dev@::1:22", // ssh -p 22 -- ::1
+		"ssh://core@::1:2222/run/podman/podman.sock",
+		"tcp://dev-box:2375",
+		"tcp://dev-box6:2375",
 	} {
-		env := map[string]string{"DOCKER_HOST": c.dockerHost}
-		if Remote("docker", c.endpoint, func(k string) string { return env[k] }) {
-			t.Errorf("Remote(docker, %q, DOCKER_HOST=%q) = true, want this Mac's", c.endpoint, c.dockerHost)
+		if Remote(endpoint) {
+			t.Errorf("Remote(%q) = true, want this Mac's", endpoint)
 		}
 	}
 }
@@ -110,8 +100,8 @@ func TestARemoteTCPHostStaysRemote(t *testing.T) {
 		"2001:db8::1",
 		"ssh://dev@ssh-alias",
 	} {
-		if !Remote("docker", endpoint, func(string) string { return "" }) {
-			t.Errorf("Remote(docker, %q) = false, want remote", endpoint)
+		if !Remote(endpoint) {
+			t.Errorf("Remote(%q) = false, want remote", endpoint)
 		}
 	}
 }
@@ -121,7 +111,7 @@ func TestARemoteTCPHostStaysRemote(t *testing.T) {
 // for a slow resolver (#118).
 func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
 	resolving(t, nil)
-	if Remote("docker", "tcp://no-such-box:2375", func(string) string { return "" }) {
+	if Remote("tcp://no-such-box:2375") {
 		t.Error("an unresolved host is remote, want this Mac's")
 	}
 	lookupIP = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
@@ -133,7 +123,7 @@ func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
 		}
 	}
 	start := time.Now()
-	if Remote("docker", "tcp://slow-box:2375", func(string) string { return "" }) {
+	if Remote("tcp://slow-box:2375") {
 		t.Error("a host that resolves too late is remote, want this Mac's")
 	}
 	if took := time.Since(start); took > time.Second {
@@ -163,12 +153,12 @@ func TestANumericHostIsResolvedOnEitherScheme(t *testing.T) {
 		{"0177.0.0.1", true},
 	} {
 		for _, endpoint := range []string{"tcp://" + c.host + ":2375", "ssh://core@" + c.host + ":2222"} {
-			if got := Remote("docker", endpoint, func(string) string { return "" }); got != c.remote {
-				t.Errorf("Remote(docker, %q) = %v, want %v", endpoint, got, c.remote)
+			if got := Remote(endpoint); got != c.remote {
+				t.Errorf("Remote(%q) = %v, want %v", endpoint, got, c.remote)
 			}
 		}
 	}
-	if !Remote("docker", "ssh://dev@cafe", func(string) string { return "" }) {
+	if !Remote("ssh://dev@cafe") {
 		t.Error("ssh://dev@cafe is this Mac's, want remote: a name, not resolved")
 	}
 }

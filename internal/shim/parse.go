@@ -56,16 +56,20 @@ type Call struct {
 	MemoryBytes uint64
 	// Host is the engine given with -H/--host or --url, and HasHost whether
 	// one was: docker reads -H "" as its default socket, not DOCKER_HOST.
-	// Context is the one named with --context or -c/--connection. A remote
-	// engine's memory is not this Mac's. Both are raw: they may hold a user
-	// name. HostLast is whether Host was given after Context.
-	// PodmanContext is podman's --context, which is not its -c: podman ranks
-	// it below --url (#71).
+	// Context is the one named with -c/--connection, or docker's --context.
+	// A remote engine's memory is not this Mac's. Both are raw: they may
+	// hold a user name. PodmanContext is podman's --context, which is not
+	// its -c: podman ranks it below --url (#71).
 	Host          string
 	HasHost       bool
 	Context       string
-	HostLast      bool
 	PodmanContext string
+}
+
+// engineOptions is c's global engine options alone, which a sub-parser's Call
+// carries over: the engine it goes to and where the CLI reads it from.
+func (c Call) engineOptions() Call {
+	return Call{Host: c.Host, HasHost: c.HasHost, Context: c.Context, PodmanContext: c.PodmanContext, ConfigDir: c.ConfigDir}
 }
 
 // Parse tells what the call name args (argv[1:]) would start. It is pure and
@@ -91,13 +95,13 @@ func parseEngine(name string, all []string) (c Call, at int) {
 	args, res, _ := scanPast(args, engineGlobal, isEngineCommand, func(f, v string) {
 		switch f {
 		case "-H", "--host", "--url":
-			c.Host, c.HasHost, c.HostLast = v, true, true
+			c.Host, c.HasHost = v, true
 		case "--context", "-c", "--connection":
 			if name == "podman" && f == "--context" {
 				c.PodmanContext = v
 				break
 			}
-			c.Context, c.HostLast = v, false
+			c.Context = v
 		case "--config":
 			c.ConfigDir = v
 		case "-v":
@@ -194,8 +198,7 @@ func parsePodman(engine Call, args []string) Call {
 		return Call{}
 	}
 	cmd := args[0] + " " + args[1]
-	c := Call{Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context, HostLast: engine.HostLast, ConfigDir: engine.ConfigDir,
-		PodmanContext: engine.PodmanContext}
+	c := engine.engineOptions()
 	// start is whether it starts anything: kube play does unless
 	// --start=false, the clones and init only with their start flag.
 	start, down := true, false
@@ -439,10 +442,9 @@ func parseCompose(engine Call, words, args []string) Call {
 	if res == askedHelp || dryRun || noUp {
 		return Call{} // starts nothing
 	}
-	c := Call{Kind: "compose", Op: op, Target: project, ComposeFiles: files, ComposeProjectDir: projectDir,
-		ComposeEnvFiles: envFiles, ComposeDetached: detached,
-		ConfigDir: engine.ConfigDir, Host: engine.Host, HasHost: engine.HasHost, Context: engine.Context,
-		HostLast: engine.HostLast, PodmanContext: engine.PodmanContext}
+	c := engine.engineOptions()
+	c.Kind, c.Op, c.Target = "compose", op, project
+	c.ComposeFiles, c.ComposeProjectDir, c.ComposeEnvFiles, c.ComposeDetached = files, projectDir, envFiles, detached
 	return c.named(append(words, op))
 }
 

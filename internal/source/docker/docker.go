@@ -43,10 +43,16 @@ type Source struct {
 	vms        vmproc.Lister
 	clients    map[string]*http.Client
 
-	// prevCPU holds each engine's containers' CPU counters from the
-	// previous tick, by engine ID. Collect is never called concurrently
-	// (daemon.Tick), so no lock.
-	prevCPU map[string]map[string]cpuCounters
+	// prev holds each engine's containers' last good stats, by engine ID
+	// and container ID, of the containers in the last list only (#267).
+	// Collect is never called concurrently (daemon.Tick), so no lock.
+	prev map[string]map[string]sample
+}
+
+// sample is a container's last good stats: its CPU counters and memory.
+type sample struct {
+	cpu    cpuCounters
+	memory uint64
 }
 
 type cpuCounters struct{ container, system uint64 }
@@ -63,7 +69,7 @@ func New(socket string, vms vmproc.Lister) *Source {
 // Discover returns a source for the engines on the sockets candidates
 // returns, asked afresh each tick: Candidates, for the daemon.
 func Discover(candidates func() []Candidate, vms vmproc.Lister) *Source {
-	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prevCPU: map[string]map[string]cpuCounters{}}
+	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prev: map[string]map[string]sample{}}
 }
 
 // untrustedBudget bounds the reading of every untrusted candidate, all
@@ -123,9 +129,9 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	cands := s.candidates()
 	defer s.prune(cands)
 	type result struct {
-		e        protocol.Engine
-		counters map[string]cpuCounters
-		err      error
+		e       protocol.Engine
+		samples map[string]sample
+		err     error
 	}
 	res := make([]result, len(cands))
 	seen := map[string]bool{}
@@ -134,7 +140,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			continue
 		}
 		r := &res[i]
-		r.e, r.counters, r.err = s.read(ctx, s.client(cand.Socket), cand, seen)
+		r.e, r.samples, r.err = s.read(ctx, s.client(cand.Socket), cand, seen)
 		switch {
 		case r.err == nil:
 			seen[cmp.Or(r.e.ID, r.e.Socket)] = true
@@ -155,7 +161,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		c := s.client(cand.Socket)
 		wg.Go(func() {
 			r := &res[i]
-			r.e, r.counters, r.err = s.read(uctx, c, cand, seen)
+			r.e, r.samples, r.err = s.read(uctx, c, cand, seen)
 			if r.err != nil && !errors.Is(r.err, errSeen) {
 				r.e = protocol.Engine{Socket: cand.Socket, Error: r.err.Error(), Containers: []protocol.Container{}}
 			}
@@ -165,7 +171,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	cancel()
 
 	engines := []protocol.Engine{}
-	cpu := map[string]map[string]cpuCounters{}
+	prev := map[string]map[string]sample{}
 	for i, cand := range cands {
 		r := res[i]
 		if errors.Is(r.err, errSeen) {
@@ -173,21 +179,21 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		}
 		if r.e.Running {
 			id := cmp.Or(r.e.ID, r.e.Socket)
-			if !cand.Trusted && cpu[id] != nil {
+			if !cand.Trusted && prev[id] != nil {
 				continue // an earlier untrusted one reached it
 			}
-			cpu[id] = r.counters
+			prev[id] = r.samples
 		}
 		engines = append(engines, r.e)
 	}
-	s.prevCPU = cpu // engines and containers that are gone drop out
+	s.prev = prev // engines and containers that are gone drop out
 	s.vmCost(ctx, engines)
 	return reading{engines}, nil
 }
 
 // read reads the engine c reaches at cand's socket, unless an engine in
 // seen answers there.
-func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen map[string]bool) (protocol.Engine, map[string]cpuCounters, error) {
+func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen map[string]bool) (protocol.Engine, map[string]sample, error) {
 	socket := cand.Socket
 	var info struct {
 		ID       string
@@ -210,13 +216,13 @@ func (s *Source) read(ctx context.Context, c *http.Client, cand Candidate, seen 
 		return protocol.Engine{}, nil, errSeen
 	}
 	e := protocol.Engine{Kind: kind, Socket: socket, ID: id, Machine: cand.Machine, Running: true, VMLimitBytes: info.MemTotal}
-	var counters map[string]cpuCounters
+	var samples map[string]sample
 	var err error
-	e.Containers, counters, err = containers(ctx, c, s.prevCPU[key])
+	e.Containers, samples, err = containers(ctx, c, s.prev[key])
 	if err == nil && kind == protocol.EnginePodman {
 		pods(ctx, c, e.Containers)
 	}
-	return e, counters, err
+	return e, samples, err
 }
 
 // pods sets the pod each of a Podman engine's containers is in, from its
@@ -313,28 +319,38 @@ func (v apiVersion) kind() string {
 }
 
 // containers lists an engine's running containers with their memory, and
-// CPU since prev; it returns their counters for the next tick.
-func containers(ctx context.Context, c *http.Client, prev map[string]cpuCounters) ([]protocol.Container, map[string]cpuCounters, error) {
+// CPU since prev; it returns their samples for the next tick. A container
+// whose stats Docker says do not exist has exited since the list call, and
+// is left out. One whose stats fail otherwise (a 5xx, a timeout, a 409 while
+// it restarts) still runs: it keeps its sample in prev, else it has no
+// memory, and its CPU is unknown (#267). Only when every one fails is that
+// an error, as allStats says.
+func containers(ctx context.Context, c *http.Client, prev map[string]sample) ([]protocol.Container, map[string]sample, error) {
 	var list []apiContainer
 	if err := get(ctx, c, "/containers/json", &list); err != nil {
 		return nil, nil, err
 	}
-	stats, err := allStats(ctx, c, list)
+	stats, errs, err := allStats(ctx, c, list)
 	if err != nil {
 		return nil, nil, err
 	}
 	out := []protocol.Container{}
-	cpu := make(map[string]cpuCounters, len(list))
+	next := make(map[string]sample, len(list))
 	for i, ct := range list {
-		st := stats[i]
-		if st == nil {
-			continue // exited or being removed since the list call
-		}
-		cur := cpuCounters{st.CPUStats.CPUUsage.TotalUsage, st.CPUStats.SystemCPUUsage}
-		cpu[ct.ID] = cur
+		p, had := prev[ct.ID]
+		var mem uint64
 		var pct *float64
-		if p, ok := prev[ct.ID]; ok {
-			pct = cpuPercent(p, cur, st.CPUStats.OnlineCPUs)
+		switch st := stats[i]; {
+		case st != nil:
+			cur := sample{cpuCounters{st.CPUStats.CPUUsage.TotalUsage, st.CPUStats.SystemCPUUsage}, st.memory()}
+			next[ct.ID], mem = cur, cur.memory
+			if had {
+				pct = cpuPercent(p.cpu, cur.cpu, st.CPUStats.OnlineCPUs)
+			}
+		case errors.Is(errs[i], ErrNoSuchContainer):
+			continue
+		case had:
+			next[ct.ID], mem = p, p.memory
 		}
 		out = append(out, protocol.Container{
 			ID:          ct.ID,
@@ -342,18 +358,17 @@ func containers(ctx context.Context, c *http.Client, prev map[string]cpuCounters
 			Image:       ct.Image,
 			Labels:      ct.Labels,
 			Mounts:      ct.bindSources(),
-			MemoryBytes: st.memory(),
+			MemoryBytes: mem,
 			CPUPercent:  pct,
 		})
 	}
-	return out, cpu, nil
+	return out, next, nil
 }
 
 // allStats fetches each container's one-shot stats concurrently. A container
-// whose stats fail (exited, being removed, restarting) gets nil and is left
-// out; only when every one fails is that an error, since the engine itself is
-// then likely broken.
-func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiStats, error) {
+// whose stats fail gets nil, and its error; only when every one fails is
+// that an error, since the engine itself is then likely broken.
+func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiStats, []error, error) {
 	out := make([]*apiStats, len(list))
 	errs := make([]error, len(list))
 	sem := make(chan struct{}, statsWorkers)
@@ -370,9 +385,9 @@ func allStats(ctx context.Context, c *http.Client, list []apiContainer) ([]*apiS
 	}
 	wg.Wait()
 	if len(list) > 0 && !slices.ContainsFunc(out, func(st *apiStats) bool { return st != nil }) {
-		return nil, fmt.Errorf("docker: stats for all %d containers failed: %w", len(list), errs[0])
+		return nil, nil, fmt.Errorf("docker: stats for all %d containers failed: %w", len(list), errs[0])
 	}
-	return out, nil
+	return out, errs, nil
 }
 
 // apiContainer is the part of GET /containers/json headroom reads.

@@ -161,10 +161,17 @@ func TestReportsContainersAndVMCost(t *testing.T) {
 }
 
 func TestDockerVMAsleepCostsNothing(t *testing.T) {
-	// Resource Saver: the API answers but the VM process is gone.
-	d := collect(t, docker.New(runningEngine(t), fakeVMs{}))
-	if !d.Running || d.VMRunning || d.VMFootprintBytes != 0 {
+	// Resource Saver: the API answers, no container runs, and the VM
+	// process is gone.
+	sock, _ := engine(t, map[string]string{"/info": "info.json", "/containers/json": `[]`})
+	d := collect(t, docker.New(sock, fakeVMs{}))
+	if !d.Running || d.VMRunning || d.VMFootprintBytes != 0 || d.VMError != "" {
 		t.Fatalf("got %+v, want running API with no VM cost", d)
+	}
+	// Containers run, so the VM must: one not found is unknown (#268).
+	d = collect(t, docker.New(runningEngine(t), fakeVMs{}))
+	if d.VMRunning || d.VMError == "" {
+		t.Fatalf("with containers: got %+v, want its VM unknown", d)
 	}
 }
 

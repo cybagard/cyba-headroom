@@ -200,10 +200,11 @@ func engineName(e protocol.Engine, engines []protocol.Engine) string {
 // the VM's overhead, whichever is larger. Not the VM's memory limit: that is a
 // ceiling it rarely reaches, and reserving it would leave no headroom (spike
 // #9). The VM keeps its high-water mark until Resource Saver stops it, so that
-// memory counts as spent.
+// memory counts as spent. An engine with no VM costs nothing only while no
+// container runs: one that runs some has a VM headroom did not find (#268).
 func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 	var c protocol.BudgetComponent
-	if !d.Running || (d.VMError == "" && !d.VMRunning) {
+	if !d.Running || (d.VMError == "" && !d.VMRunning && len(d.Containers) == 0) {
 		c.UsedBytes = new(uint64)
 		return c
 	}
@@ -215,7 +216,7 @@ func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 		need += ct.MemoryBytes
 	}
 	c.ReservedBytes = need
-	if d.VMError == "" {
+	if d.VMError == "" && d.VMRunning {
 		used := d.VMFootprintBytes
 		c.UsedBytes = &used
 		c.ReservedBytes = max(need, used)

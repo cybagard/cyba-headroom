@@ -263,7 +263,8 @@ func podmanID(cand Candidate) string {
 
 // vmCost fills in each running engine's VM. Docker Desktop's VM process
 // is known (vmproc), and so is a Podman machine's, by its name (#228);
-// another engine's is not, so its cost is unknown, not zero. A VM read
+// another engine's is not, so its cost is unknown, not zero. So is a known
+// engine's whose VM is not found while its containers run (#268). A VM read
 // failure leaves the containers valid; it is reported alongside.
 func (s *Source) vmCost(ctx context.Context, engines []protocol.Engine) {
 	var known []*protocol.Engine
@@ -294,6 +295,9 @@ func (s *Source) vmCost(ctx context.Context, engines []protocol.Engine) {
 				e.VMRunning = true
 				e.VMFootprintBytes = vm.FootprintBytes
 			}
+		}
+		if err == nil && !e.VMRunning && len(e.Containers) > 0 {
+			e.VMError = "no VM process found"
 		}
 	}
 }

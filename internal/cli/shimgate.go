@@ -35,9 +35,6 @@ const (
 	// one (podman-docker's `exec podman`) has the same PID and is not
 	// checked, and leased, twice; a child it starts has another PID and is.
 	shimCheckedVar = "HEADROOM_SHIM_CHECKED"
-	// waitPoll is how often a waiting call (BUDGET_WAIT=1) asks again
-	// (#72).
-	waitPoll = protocol.WaitPoll
 )
 
 // errCannotCheck means the daemon answered but gave no decision; a
@@ -308,7 +305,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			return gated{code: exitDenied}
 		}
 		req.Ticket = d.Ticket
-		if sig := h.wait(waitPoll); sig != nil {
+		if sig := h.wait(protocol.WaitPoll); sig != nil {
 			return interrupted(sig)
 		}
 	}

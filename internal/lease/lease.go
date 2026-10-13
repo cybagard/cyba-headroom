@@ -30,7 +30,7 @@
 // missing and Docker resolved none of the targets it starts (docker start
 // a b, a running, b unresolved). It leaves out of its key and cost those
 // that run, and those that a worktree's open lease has bound (not as
-// entry.held) or lists in its containerIDs (Book.covered). A compose
+// entry.adopted) or lists in its containerIDs (Book.covered). A compose
 // project the shim guessed, Compose's config having failed (#84), binds
 // only containers its own worktree's reading shows, and when it binds
 // none, ends quietly at its timeout and lapses (entry.guessed).
@@ -86,7 +86,7 @@ type Book struct {
 	// the first time, or again after it stopped. A failed read keeps the
 	// previous set, so a resource missing from it does not come back new;
 	// so does a reading a container is only missing from (Book.gone),
-	// though when it is back it may bind a lease, held (Observe).
+	// though when it is back it may bind a lease, adopted (Observe).
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
 	// undecided are the compose containers a reading left new
@@ -149,7 +149,7 @@ type waiter struct {
 
 // hold is what w holds: its cost, less what the leases it would take over
 // reserve while they are open, which every other call counts already. Once
-// one ends, its part is w's to hold again (review round 2 R2-1).
+// one ends, its part is w's to hold again (#72).
 func (b *Book) hold(w *waiter) uint64 {
 	var taken uint64
 	for _, e := range w.takes {
@@ -173,18 +173,18 @@ type entry struct {
 	protocol.Lease
 	cost uint64
 	// bound are this lease's own resources, and used what they use now.
-	// held are those of a stack a compose up found running, held by no
-	// lease: bound, so they are gated, but neither the cost nor used counts
+	// adopted are those of a stack a compose up found running, held by
+	// no lease: bound, so they are gated, but neither the cost nor used counts
 	// them, nor does the lease cover a start of them (covered). Their
 	// memory counts already: a down does not add it back, and their growth
 	// is not what the lease waits for.
-	bound, held map[string]bool
-	used        uint64
-	// found is set once it held a stack, or a start of several let one of
+	bound, adopted map[string]bool
+	used           uint64
+	// found is set once it adopted a stack, or a start of several let one of
 	// its containers go: one it lets go of when it stops (Book.release,
 	// entry.letGo) still appeared, so the lease ends quietly. letOne is
 	// set once it let one go (entry.letGo): found then stays when a named
-	// up takes what it held (#232).
+	// up takes what it adopted (#232).
 	found, letOne bool
 	// dead are a start of several's containers that died while it waited
 	// on others, each with its deaths since a reading showed it
@@ -408,7 +408,7 @@ func (b *Book) runs(k string, v *verdict) bool {
 func (b *Book) deadUse(o *entry, use map[string]uint64) uint64 {
 	var n uint64
 	for k := range o.bound {
-		if v := b.verdicts[k]; !o.held[k] && v != nil && !b.runs(k, v) {
+		if v := b.verdicts[k]; !o.adopted[k] && v != nil && !b.runs(k, v) {
 			n += use[k]
 		}
 	}
@@ -422,7 +422,7 @@ type takeover struct{ carry, used uint64 }
 // carry is what o, a lease a compose up takes over while services of its
 // stack are down, still reserves for its services that run, and what their
 // containers use (use, by key), as the takeover in Check says. Its cost is
-// split equally among its services: those of its containers, held ones
+// split equally among its services: those of its containers, adopted ones
 // and long gone ones aside, and those its own call started that none of
 // them is (entry.starting). ok is false when nothing is down or none of o's
 // services runs.
@@ -432,7 +432,7 @@ func (b *Book) carry(o *entry, down map[string]bool, use map[string]uint64) (t t
 	}
 	services, running := map[string]bool{}, map[string][]string{}
 	for k := range o.bound {
-		if o.held[k] {
+		if o.adopted[k] {
 			continue
 		}
 		v := b.verdicts[k]
@@ -497,29 +497,45 @@ func (b *Book) Check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	now := b.now()
 	b.expire(now) // settling may have stalled: expired leases and tickets must not count
 	w := b.ticket(r.Ticket)
-	if r.Worktree != "" {
+	// A manual call (no worktree) is not gated: policy.Decide allows it, so
+	// it never queues, and its lease reserves nothing.
+	manual := r.Worktree == ""
+	if !manual {
 		// A ticket's call is decided with the calls ahead of it held, any
 		// other with every queued one: none takes the room of a call that
-		// came first. A manual call is not gated.
-		for _, o := range b.waiting {
-			if o == w {
-				break
-			}
-			r.HeldBytes += b.hold(o)
-			if o.MacOS {
-				r.HeldMacOS++
-			}
-			r.Waiting++
-		}
+		// came first.
+		r.HeldBytes, r.HeldMacOS, r.CallsAhead = b.heldAhead(w)
 	}
-	d, taken := b.check(r, current, c, now)
+	d, taken := b.check(r, current, c, now, manual)
 	b.queue(r, w, &d, taken, now)
 	return d
 }
 
+// heldAhead is what the calls queued ahead of w hold, all of them for a
+// call with no ticket: their bytes, their macOS slots, and how many of
+// them hold bytes (policy.Request.CallsAhead).
+func (b *Book) heldAhead(w *waiter) (bytes uint64, macOS, calls int) {
+	for _, o := range b.waiting {
+		if o == w {
+			break
+		}
+		if n := b.hold(o); n > 0 {
+			bytes += n
+			calls++
+		}
+		if o.MacOS {
+			macOS++
+		}
+	}
+	return bytes, macOS, calls
+}
+
 // ticket is the queued call ticket id names; nil if none is queued.
 func (b *Book) ticket(id string) *waiter {
-	if i := slices.IndexFunc(b.waiting, func(w *waiter) bool { return w.Ticket == id }); id != "" && i >= 0 {
+	if id == "" {
+		return nil
+	}
+	if i := slices.IndexFunc(b.waiting, func(w *waiter) bool { return w.Ticket == id }); i >= 0 {
 		return b.waiting[i]
 	}
 	return nil
@@ -529,10 +545,11 @@ func (b *Book) ticket(id string) *waiter {
 // what waiting may fix keeps its ticket, w, or joins the back with a new
 // one (its ticket unknown: the daemon restarted, or it went unasked for
 // ticketTTL), and holds what this ask says it costs, less what the leases
-// it would take over, taken, reserve while open (Book.hold, review round 1
-// F1). Allowed, or denied for anything else, its ticket ends.
+// it would take over, taken, reserve while open (Book.hold).
+// Allowed, as a manual call always is, or denied for anything else, its
+// ticket ends.
 func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken []*entry, now time.Time) {
-	if d.Allow || !d.Retry || !r.Wait || r.Worktree == "" {
+	if d.Allow || !d.Retry || !r.Wait {
 		if w != nil {
 			b.waiting = slices.DeleteFunc(b.waiting, func(o *waiter) bool { return o == w })
 			b.log.Debug("ticket ended", "ticket", w.Ticket, "allowed", d.Allow, "worktree", w.Worktree)
@@ -548,10 +565,11 @@ func (b *Book) queue(r policy.Request, w *waiter, d *protocol.Decision, taken []
 	d.Ticket = w.Ticket
 }
 
-// check is Check's decision, under the book's lock, and the open leases its
-// call would take over: its cost stands in for what they reserve, and
-// LeasedBytes leaves them out.
-func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Config, now time.Time) (protocol.Decision, []*entry) {
+// check is Check's decision, under the book's lock, for a manual call or
+// a worktree's. Its cost stands in for what the open leases its call would
+// take over reserve, and LeasedBytes leaves them out; on a deny, it also
+// returns those leases, which a queued call's hold leaves out (Book.hold).
+func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Config, now time.Time, manual bool) (protocol.Decision, []*entry) {
 	if unnamed(r) {
 		r.Target = "" // its dir is its key (unnamed)
 	}
@@ -587,7 +605,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	// The containers this start's lease is keyed by and costs: not those
 	// that run, nor those a worktree's open lease has bound (not as
-	// entry.held) or lists in its containerIDs (covered; docker stop &&
+	// entry.adopted) or lists in its containerIDs (covered; docker stop &&
 	// docker start): that lease still covers them, and its worktree is
 	// charged for them. A manual call's lease is charged nothing, so it
 	// covers nothing.
@@ -717,7 +735,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			ID: fmt.Sprintf("lease-%s-%d", b.run, b.nextID), Worktree: r.Worktree, Kind: r.Kind, Command: Summary(r.Command),
 			Created: now, Expires: now.Add(b.timeout),
 		},
-		cost: d.CostBytes, bound: map[string]bool{}, held: map[string]bool{}, dead: map[string]deaths{}, macOS: r.MacOS, pid: r.PID,
+		cost: d.CostBytes, bound: map[string]bool{}, adopted: map[string]bool{}, dead: map[string]deaths{}, macOS: r.MacOS, pid: r.PID,
 		labelled: r.Labelled, name: r.Name, target: r.Target, guessed: r.Kind == "compose" && r.Guessed,
 	}
 	if idle {
@@ -734,8 +752,8 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		// already waits for or holds (compose stop, then up): this call's
 		// lease takes that one over, with its containers and its cost:
 		// what they use stays counted, so a start of one stopped is
-		// covered. Those it held stay held, whoever the reading says runs
-		// them: one gone since (Book.gone) is no longer held, so Compose
+		// covered. Those it adopted stay adopted, whoever the reading says
+		// runs them: one gone since (Book.gone) is no longer adopted, so Compose
 		// starting it binds it afresh, and a plain start of it is checked.
 		var reserved, used uint64
 		b.open = slices.DeleteFunc(b.open, func(o *entry) bool {
@@ -751,7 +769,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 				reserved, used = reserved+o.reserved(), used+o.used-min(b.deadUse(o, use), o.used)
 			}
 			for k := range o.bound {
-				e.bound[k], e.held[k] = true, o.held[k]
+				e.bound[k], e.adopted[k] = true, o.adopted[k]
 			}
 			e.found, e.letOne = e.found || o.found, e.letOne || o.letOne
 			b.log.Debug("lease ended: a later compose call took its project over", "lease", o.ID, "by", e.ID)
@@ -790,25 +808,25 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 		// compose up -d of a stack that already runs, once its lease
 		// ended: its running containers are this lease's, so it never logs
-		// "never appeared" when the up starts nothing new. They are held
-		// (entry.held). Only those held by no lease, or, for a named call,
-		// only held by an unnamed lease of its worktree, which keys every
-		// project in its dir (#232).
+		// "never appeared" when the up starts nothing new. They are
+		// adopted (entry.adopted). Only those held by no lease, or, for a
+		// named call, only adopted by an unnamed lease of its worktree,
+		// which keys every project in its dir (#232).
 		for _, x := range stack {
 			if !e.bound[x.key] && !unnamed(r) {
 				for _, o := range b.open {
-					if o.unnamed && o.Worktree == e.Worktree && o.held[x.key] {
+					if o.unnamed && o.Worktree == e.Worktree && o.adopted[x.key] {
 						delete(o.bound, x.key)
-						delete(o.held, x.key)
+						delete(o.adopted, x.key)
 						if len(o.bound) == 0 {
-							o.found = o.letOne // what it held was not its own
+							o.found = o.letOne // what it adopted was not its own
 						}
 					}
 				}
 			}
 			if !e.bound[x.key] && !b.boundAnywhere(x.key) {
 				e.bind(x)
-				e.held[x.key], e.found = true, true
+				e.adopted[x.key], e.found = true, true
 				b.boundBy(x, e)
 			}
 		}
@@ -820,14 +838,14 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	}
 	if r.Kind == "pod" {
 		// Its key is its pods. Those of their containers that run already
-		// are its own, held (entry.held): a start of a pod that runs
+		// are its own, adopted (entry.adopted): a start of a pod that runs
 		// starts nothing new, and never logs "never appeared".
 		e.target, e.pods = "", slices.DeleteFunc(slices.Clone(r.Pods), func(p string) bool { return p == "" })
 		if s != nil && len(e.pods) > 0 {
 			for _, x := range resources(s) {
 				if x.kind == "container" && e.inPods(x) && !b.boundAnywhere(x.key) {
 					e.bind(x)
-					e.held[x.key], e.found = true, true
+					e.adopted[x.key], e.found = true, true
 					b.boundBy(x, e)
 				}
 			}
@@ -855,7 +873,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			})
 		}
 	}
-	if r.Worktree == "" {
+	if manual {
 		// Manual calls are not gated and hold nothing back: the lease
 		// only marks the call as checked, so its container is not ungated.
 		e.cost, e.macOS = 0, false
@@ -1159,16 +1177,16 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				// the latest): an error toward a deny. With events, the
 				// stop's die makes it gone, and its start binds it as new
 				// (#131).
-				e.held[r.key], e.found = true, true
+				e.adopted[r.key], e.found = true, true
 			} else {
 				at, ok := started[r.key]
 				if v := b.verdicts[r.key]; ok && at.Before(e.Created) || v != nil && v.missedOut && v.last.Before(e.Created) {
 					// Started before the check, which did not see it
 					// running (a restart policy's restart since the last
 					// reading), or run all along since a reading before it:
-					// held, as one the check found running (#190). Its use
+					// adopted, as one the check found running (#190). Its use
 					// is not what the lease waits for.
-					e.held[r.key], e.found = true, true
+					e.adopted[r.key], e.found = true, true
 				}
 				b.judge(r, gated, now)
 			}
@@ -1310,7 +1328,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	b.latest, b.observed = &cp, now
 
 	for _, e := range b.open {
-		for k := range e.held {
+		for k := range e.adopted {
 			if b.gone(k) {
 				b.release(k)
 			}
@@ -1320,7 +1338,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		var used uint64
 		unsure := false
 		for k := range e.bound {
-			if e.held[k] {
+			if e.adopted[k] {
 				continue // it ran before the check: not what the lease waits for
 			}
 			if bytes, ok := present[k]; ok {
@@ -1658,13 +1676,13 @@ func kindOf(key string) string {
 
 // covered returns each worktree's open lease that holds container id, or
 // waits for it: two docker start db at once, the first's lease covers it.
-// Not one that holds it as entry.held: it reserves nothing for that one.
+// Not one that adopted it (entry.adopted): it reserves nothing for that one.
 // It renews none of them: Check does, once the start is allowed (renew).
 func (b *Book) covered(id string) []*entry {
 	k := "container:" + id
 	var out []*entry
 	for _, e := range b.open {
-		if e.Worktree != "" && (e.bound[k] && !e.held[k] || slices.Contains(e.containerIDs, id)) {
+		if e.Worktree != "" && (e.bound[k] && !e.adopted[k] || slices.Contains(e.containerIDs, id)) {
 			out = append(out, e)
 		}
 	}
@@ -1694,9 +1712,9 @@ func (b *Book) boundAnywhere(key string) bool {
 // an open lease, is gone: Docker said it died, or it was missing from
 // goneAfter fresh readings in a row (#87). A container missing from one is
 // missing, not gone: its stats failed, or a restart backoff spans the
-// reading. Only one gone lets go of its held state, ends its lease, and
+// reading. Only one gone lets go of its adopted state, ends its lease, and
 // leaves prev, so that when it is back it is new. One only missing, back,
-// binds a lease held (Observe): it may never have stopped.
+// binds a lease adopted (Observe): it may never have stopped.
 func (b *Book) gone(k string) bool { return b.missed[k] >= goneAfter(k) }
 
 // goneAfter is how many fresh readings in a row k must be missing from to
@@ -1738,13 +1756,13 @@ func (b *Book) boundBy(r resource, e *entry) {
 	}
 }
 
-// release lets go of a held container that is gone: it was never this
+// release lets go of an adopted container that is gone: it was never this
 // lease's to start, so a start of it is a new call's.
 func (b *Book) release(key string) {
 	for _, e := range b.open {
-		if e.held[key] {
+		if e.adopted[key] {
 			delete(e.bound, key)
-			delete(e.held, key)
+			delete(e.adopted, key)
 		}
 	}
 }

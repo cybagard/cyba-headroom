@@ -327,7 +327,7 @@ func TestShimGateWaitsWithItsTicket(t *testing.T) {
 		t.Fatalf("tickets sent %q, want %q", sent, want)
 	}
 	// Without BUDGET_WAIT it does not ask to wait.
-	r.asked, r.env = nil, r.env[:len(r.env)-1]
+	r.asked, r.env = nil, slices.DeleteFunc(r.env, func(e string) bool { return e == "BUDGET_WAIT=1" })
 	r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
 		return &protocol.Decision{Retry: true, Message: "no"}, nil
 	}

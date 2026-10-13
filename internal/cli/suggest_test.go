@@ -188,6 +188,25 @@ func TestWriteLeavesOutAValueAboveTheLimit(t *testing.T) {
 	}
 }
 
+// Containers that report 0 bytes never write a cap of 0, which would turn
+// off the cap the user set (#273).
+func TestWriteKeepsTheCapOverZeroByteContainers(t *testing.T) {
+	dir, env := suggestEnv(t)
+	writeSamples(t, dir, []int{6, 5, 4, 3, 2, 1}, 2, func(s *samples.Sample) {
+		s.Engines = []samples.Engine{{Kind: protocol.EngineDockerDesktop, Running: true,
+			Containers: []samples.Container{{Name: "db", Mounts: []string{"/Users/dev/w/a/data"}}}}}
+	})
+	_ = os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[policy]\nper_worktree_cap_gb = 8\n"), 0o600)
+	code, out, stderr := run(t, env, "headroom", "suggest", "--write")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %s, out:\n%s", code, stderr, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if !strings.Contains(string(b), "host_baseline_gb = 6") || !strings.Contains(string(b), "per_worktree_cap_gb = 8") {
+		t.Fatalf("config:\n%s", b)
+	}
+}
+
 // A [policy] value above the config's limit is not written either.
 func TestWriteLeavesOutAPolicyValueAboveTheLimit(t *testing.T) {
 	dir, env := suggestEnv(t)

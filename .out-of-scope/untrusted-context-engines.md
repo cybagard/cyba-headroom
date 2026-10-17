@@ -8,13 +8,13 @@ headroom does not keep that engine's last good reading for a few ticks instead.
 
 The current rule is a deliberate design (#227, amendments 3 and 4): one slow or broken context must not hide the other engines or hold up the reading. `TestASlowContextIsNotRunning` and `TestAContextThatNeverAnswersIsNotRunning` pin it. Keeping an old reading would trade a one-tick wrong allow for an engine whose figures may be stale, and add per-socket state to the source.
 
-The engines this would help are not used here. On the dev Mac (2026-10-17), both Docker contexts lead to Docker Desktop's socket (`default` through the `/var/run/docker.sock` link), so no engine is untrusted; there is no OrbStack, Rancher Desktop or Colima, and `DOCKER_HOST` and `DOCKER_CONTEXT` are unset. The daemon log has no failed reading of an untrusted engine. Colima, OrbStack and Rancher Desktop stay out of scope until they are used (#49).
+The engines this would help are not used here. On the dev Mac (2026-10-17), both Docker contexts lead to Docker Desktop's socket (`default` through the `/var/run/docker.sock` link), so no engine is untrusted; there is no OrbStack, Rancher Desktop or Colima, and `DOCKER_HOST` and `DOCKER_CONTEXT` are unset. The samples have only ever recorded two sockets, Docker Desktop's and the Podman machine's, both trusted. (The daemon log cannot show such a failure: an untrusted engine's error is kept only on the engine, in `headroom status --json` under `engines[].error`, and is not logged.) Colima, OrbStack and Rancher Desktop stay out of scope until they are used (#49).
 
 Docker Desktop is not affected: its socket is trusted, and a trusted engine whose reading fails, other than by a missing or refusing socket, fails the whole reading, so the last good one stands.
 
 ## When to revisit
 
-An untrusted context engine is in use here (Colima, OrbStack, Rancher Desktop or a remote context), and the daemon log shows its readings failing. Then keep each untrusted socket's last good engine for a bounded number of ticks, marked with its error, without making the whole source stale.
+Another local engine reached through a Docker context is in use here (Colima, OrbStack or Rancher Desktop; a context's TCP or SSH endpoint is a remote engine and never read), and `headroom status --json` shows it with an `error`. Then keep each untrusted socket's last good engine for a bounded number of ticks, marked with its error, without making the whole source stale.
 
 ## Prior requests
 

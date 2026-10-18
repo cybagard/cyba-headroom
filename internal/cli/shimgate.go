@@ -132,7 +132,8 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote(engine)
 	default:
-		engine = podmanEndpointIn(getenv, c)
+		env, _ := e.envOf()
+		engine = podmanEndpointIn(lookupIn(env), c)
 		remote = engine != "" && shim.Remote(engine)
 	}
 	if remote {
@@ -1304,12 +1305,17 @@ func dockerEndpointIn(getenv func(string) string, c shim.Call) string {
 // CONTAINER_HOST if it is empty; else --context's, unless it is default;
 // else CONTAINER_CONNECTION's; else CONTAINER_HOST; else the default
 // connection's. That is podman 6.1.3's order, measured. A connection is its
-// URI in the connections file (man podman-system-connection):
-// PODMAN_CONNECTIONS_CONF, else containers/podman-connections.json under
-// XDG_CONFIG_HOME, else under ~/.config. "" (unknown) when the name is not
-// there, or the file cannot be read or parsed, or its path is relative.
-// Connections in containers.conf are not read: they are unknown too.
-func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
+// URI in the connections file (man podman-system-connection), which is, as
+// podman 6.1.3 picks it (measured, #255): PODMAN_CONNECTIONS_CONF if set,
+// even empty; else containers/podman-connections.json under XDG_CONFIG_HOME
+// if set, even empty; else under ~/.config. A relative path is read from
+// the working directory, which podman shares. Podman decodes the file's
+// first JSON value, whole: any error drops every connection. "" (unknown)
+// when the name is not there, the path is empty, or the file cannot be
+// read or decoded. Connections in containers.conf are not read: they are
+// unknown too.
+func podmanEndpointIn(lookupEnv func(string) (string, bool), c shim.Call) string {
+	getenv := func(k string) string { v, _ := lookupEnv(k); return v }
 	name := c.Context
 	if name == "" && c.HasHost {
 		if c.Host == "" {
@@ -1326,28 +1332,40 @@ func podmanEndpointIn(getenv func(string) string, c shim.Call) string {
 	if h := getenv("CONTAINER_HOST"); h != "" && name == "" {
 		return h
 	}
-	path := getenv("PODMAN_CONNECTIONS_CONF")
-	if path == "" {
-		dir := getenv("XDG_CONFIG_HOME")
-		if dir == "" {
-			dir = filepath.Join(getenv("HOME"), ".config")
+	path, ok := lookupEnv("PODMAN_CONNECTIONS_CONF")
+	if !ok {
+		dir, ok := lookupEnv("XDG_CONFIG_HOME")
+		if !ok {
+			home := getenv("HOME")
+			if home == "" {
+				return "" // podman asks the account database: not known here
+			}
+			dir = filepath.Join(home, ".config")
 		}
 		path = filepath.Join(dir, "containers", "podman-connections.json")
 	}
-	if !filepath.IsAbs(path) {
+	if path == "" {
 		return ""
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
+	defer func() { _ = f.Close() }()
 	var file struct {
 		Connection struct {
 			Default     string
-			Connections map[string]struct{ URI string }
+			Connections map[string]struct {
+				URI, Identity, TLSCert, TLSKey, TLSCA string
+				IsMachine                             bool
+			}
+		}
+		Farm struct {
+			Default string
+			List    map[string][]string
 		}
 	}
-	if json.Unmarshal(b, &file) != nil {
+	if json.NewDecoder(f).Decode(&file) != nil {
 		return ""
 	}
 	if name == "" {

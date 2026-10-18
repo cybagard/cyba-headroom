@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1158,7 +1159,7 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		for k, v := range c.env {
 			env[k] = v
 		}
-		got := podmanEndpointIn(func(k string) string { return env[k] }, shim.Parse("podman", strings.Fields(c.flags+" run alpine")))
+		got := podmanEndpointIn(lookupMap(env), shim.Parse("podman", strings.Fields(c.flags+" run alpine")))
 		if got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
@@ -1192,10 +1193,105 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		{"no file at all", map[string]string{}, ""},
 		{"no default", map[string]string{"PODMAN_CONNECTIONS_CONF": nameless}, ""},
 	} {
-		got := podmanEndpointIn(func(k string) string { return c.env[k] }, shim.Parse("podman", []string{"run", "alpine"}))
+		got := podmanEndpointIn(lookupMap(c.env), shim.Parse("podman", []string{"run", "alpine"}))
 		if got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+
+	// #255's measured tables, podman 6.1.3: which file it reads, and which
+	// contents it reads a connection from. Each file's connection a has its
+	// own URI; a relative path is read from the working directory.
+	uri := func(n int) string { return "tcp://127.0.0.1:" + strconv.Itoa(41000+n) }
+	conn := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := func(n int) string {
+		return `{"Connection":{"Default":"a","Connections":{"a":{"URI":"` + uri(n) + `"}}}}`
+	}
+	m := filepath.Join(dir, "m")
+	mhome, work := filepath.Join(m, "home"), filepath.Join(m, "work")
+	abs, mxdg := filepath.Join(m, "abs", "c.json"), filepath.Join(m, "xdg")
+	conn(abs, file(1))
+	conn(filepath.Join(mxdg, "containers", "podman-connections.json"), file(2))
+	conn(filepath.Join(mhome, ".config", "containers", "podman-connections.json"), file(3))
+	conn(filepath.Join(work, "containers", "podman-connections.json"), file(4))
+	conn(filepath.Join(work, "x", "containers", "podman-connections.json"), file(5))
+	conn(filepath.Join(work, "rel.json"), file(6))
+	t.Chdir(work)
+	missing := filepath.Join(m, "abs", "none.json")
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"nothing set", nil, uri(3)},
+		{"PODMAN_CONNECTIONS_CONF=/abs", map[string]string{"PODMAN_CONNECTIONS_CONF": abs}, uri(1)},
+		{"PODMAN_CONNECTIONS_CONF= (empty)", map[string]string{"PODMAN_CONNECTIONS_CONF": ""}, ""},
+		{"PODMAN_CONNECTIONS_CONF=rel.json", map[string]string{"PODMAN_CONNECTIONS_CONF": "rel.json"}, uri(6)},
+		{"PODMAN_CONNECTIONS_CONF=/abs/missing", map[string]string{"PODMAN_CONNECTIONS_CONF": missing}, ""},
+		{"PODMAN_CONNECTIONS_CONF=/abs/missing, XDG_CONFIG_HOME=/abs", map[string]string{"PODMAN_CONNECTIONS_CONF": missing, "XDG_CONFIG_HOME": mxdg}, ""},
+		{"XDG_CONFIG_HOME=/abs", map[string]string{"XDG_CONFIG_HOME": mxdg}, uri(2)},
+		{"XDG_CONFIG_HOME= (empty)", map[string]string{"XDG_CONFIG_HOME": ""}, uri(4)},
+		{"XDG_CONFIG_HOME=x", map[string]string{"XDG_CONFIG_HOME": "x"}, uri(5)},
+		{"PODMAN_CONNECTIONS_CONF= and XDG_CONFIG_HOME=/abs", map[string]string{"PODMAN_CONNECTIONS_CONF": "", "XDG_CONFIG_HOME": mxdg}, ""},
+	} {
+		env := map[string]string{"HOME": mhome}
+		for k, v := range c.env {
+			env[k] = v
+		}
+		got := podmanEndpointIn(lookupMap(env), shim.Parse("podman", []string{"run", "alpine"}))
+		if got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// A file podman cannot decode as a whole has no connections, for the
+	// default and for -c alike; past its first value it reads nothing.
+	const a = `"Connections":{"a":{"URI":"tcp://127.0.0.1:41001"}}`
+	content := filepath.Join(m, "abs", "t.json")
+	for _, c := range []struct {
+		name, body, want string
+	}{
+		{"valid", `{"Connection":{"Default":"a",` + a + `}}`, uri(1)},
+		{"Farm:5", `{"Connection":{"Default":"a",` + a + `},"Farm":5}`, ""},
+		{"Farm.Default:5", `{"Connection":{"Default":"a",` + a + `},"Farm":{"Default":5}}`, ""},
+		{`Farm.List:"x"`, `{"Connection":{"Default":"a",` + a + `},"Farm":{"List":"x"}}`, ""},
+		{"Identity:5", `{"Connection":{"Default":"a","Connections":{"a":{"URI":"tcp://127.0.0.1:41001","Identity":5}}}}`, ""},
+		{`IsMachine:"yes"`, `{"Connection":{"Default":"a","Connections":{"a":{"URI":"tcp://127.0.0.1:41001","IsMachine":"yes"}}}}`, ""},
+		{"another connection's URI:5", `{"Connection":{"Default":"a","Connections":{"a":{"URI":"tcp://127.0.0.1:41001"},"b":{"URI":5}}}}`, ""},
+		{"Default:5", `{"Connection":{"Default":5,` + a + `}}`, ""},
+		{"an unknown key", `{"Connection":{"Default":"a",` + a + `},"Foo":1}`, uri(1)},
+		{"an unknown connection key", `{"Connection":{"Default":"a","Connections":{"a":{"URI":"tcp://127.0.0.1:41001","Bogus":1}}}}`, uri(1)},
+		{"lowercase keys", `{"connection":{"default":"a","connections":{"a":{"uri":"tcp://127.0.0.1:41001"}}}}`, uri(1)},
+		{"trailing data", `{"Connection":{"Default":"a",` + a + `}} x`, uri(1)},
+		{"two objects", `{"Connection":{"Default":"a",` + a + `}} {}`, uri(1)},
+		{"null", `null`, ""},
+		{"an empty file", ``, ""},
+		{"Connection:5", `{"Connection":5}`, ""},
+	} {
+		conn(content, c.body)
+		env := lookupMap(map[string]string{"HOME": mhome, "PODMAN_CONNECTIONS_CONF": content})
+		for _, args := range [][]string{{"run", "alpine"}, {"-c", "a", "run", "alpine"}} {
+			got := podmanEndpointIn(env, shim.Parse("podman", args))
+			if got != c.want {
+				t.Errorf("%s, %v: %q, want %q", c.name, args[:len(args)-2], got, c.want)
+			}
+		}
+	}
+}
+
+// lookupMap is a lookup in env that tells an empty value from none.
+func lookupMap(env map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := env[k]
+		return v, ok
 	}
 }
 

@@ -6,6 +6,7 @@ package view
 import (
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -334,7 +335,8 @@ func cpu(u protocol.Usage, agents *float64, withAgents bool, cores int) string {
 	if cores == 0 {
 		return "?"
 	}
-	share := total / float64(cores)
+	// Round first, so the format follows the value shown: 0.04 shows 0%, 9.96 shows 10%.
+	share := math.Round(total/float64(cores)*10) / 10
 	if share > 0 && share < 10 {
 		return fmt.Sprintf("%.1f%%", share)
 	}

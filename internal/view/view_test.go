@@ -26,7 +26,7 @@ func busy() *protocol.Snapshot {
 	return &protocol.Snapshot{
 		Seq: 9, CollectedAt: now.Add(-3 * time.Second),
 		Sources: map[string]protocol.SourceStatus{"host": {}, "docker": {}, "tart": {}, "orca": {}, "lmstudio": {}},
-		Host: &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(22*gib + gib/2), Pressure: "normal",
+		Host: &protocol.Host{TotalBytes: 64 * gib, CPUs: 16, UsedBytes: u64(22*gib + gib/2), Pressure: "normal",
 			SwapTotalBytes: 2 * gib, SwapUsedBytes: gib / 10,
 			Trend: protocol.Trend{Samples: 60, Worst: "warn", WarnSeconds: 12, Direction: "steady"}},
 		Budget: &protocol.Budget{TotalBytes: 64 * gib, ReservedBytes: 37 * gib, HeadroomBytes: i64(int64(27 * gib)),
@@ -188,8 +188,8 @@ func TestWorktreeRows(t *testing.T) {
 	lines := render(t, busy(), view.Options{})
 	line(t, lines, "WORKTREE")
 	r := line(t, lines, "Fix login")
-	// CPU is the containers' 15% plus the agents' 30%.
-	for _, want := range []string{"claude working", "2   3.0 GB", "45%", "1.0 GB"} {
+	// CPU is the containers' 15% plus the agents' 30% of a core, over 16.
+	for _, want := range []string{"claude working", "2   3.0 GB", "2.8%", "1.0 GB"} {
 		has(t, r, want)
 	}
 	if strings.Contains(r, "⚑") {
@@ -368,7 +368,33 @@ func TestCPUCountsTheWorktreesVMs(t *testing.T) {
 	w := &s.Attribution.Worktrees[1]
 	w.TartVMs = []protocol.AttributedVM{{Name: "ci", CPUPercent: f64(275)}, {Name: "ci-2", CPUPercent: f64(10)}}
 	w.TartCPUPercent, w.AgentCPUPercent = f64(285), f64(2)
-	has(t, line(t, render(t, s, view.Options{}), "Release prep"), "287%")
+	has(t, line(t, render(t, s, view.Options{}), "Release prep"), "18%") // 287% of a core over 16
+}
+
+func TestSmallCPUSharesKeepADecimal(t *testing.T) {
+	for agents, want := range map[float64]string{2: " 0.1% ", 0: " 0% "} {
+		s := busy()
+		s.Attribution.Worktrees[3].AgentCPUPercent = f64(agents)
+		has(t, line(t, render(t, s, view.Options{}), "Two agents"), want)
+	}
+}
+
+func TestCPUUnknownWhenCoresUnknown(t *testing.T) {
+	s := busy()
+	s.Host.CPUs = 0
+	r := line(t, render(t, s, view.Options{}), "Fix login")
+	if strings.Count(r, "?") != 1 {
+		t.Fatalf("want CPU as ?: %q", r)
+	}
+	s.Host = nil
+	if r := line(t, render(t, s, view.Options{}), "Fix login"); strings.Count(r, "?") != 1 {
+		t.Fatalf("no host: want CPU as ?: %q", r)
+	}
+}
+
+func TestFooterNamesTheCPUUnit(t *testing.T) {
+	lines := render(t, busy(), view.Options{})
+	has(t, lines[len(lines)-1], "CPU: % of 16 cores")
 }
 
 func TestUnknownVMCPUIsAQuestionMark(t *testing.T) {
@@ -386,7 +412,7 @@ func TestUnattributedVMsShowTheirCPU(t *testing.T) {
 		TartVMs:         []protocol.AttributedVM{{Name: "orphan", Reason: "no_match", CPUPercent: f64(50)}},
 		TartMemoryBytes: 4 * gib, TartCPUPercent: f64(50),
 	}
-	has(t, line(t, render(t, s, view.Options{}), "unattributed"), "50%")
+	has(t, line(t, render(t, s, view.Options{}), "unattributed"), "3.1%")
 }
 
 func TestUngatedIsFlagged(t *testing.T) {

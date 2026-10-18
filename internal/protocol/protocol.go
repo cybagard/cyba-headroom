@@ -676,6 +676,8 @@ type Container struct {
 // Host is the host's memory state (R1, R4 top line).
 type Host struct {
 	TotalBytes uint64 `json:"total_bytes"`
+	// CPUs is the logical core count (hw.logicalcpu); 0 when unknown.
+	CPUs int `json:"cpus"`
 	// Pressure is the kernel's level: normal, warn or critical (Activity
 	// Monitor's green, yellow, red), or unknown for a level this build does
 	// not recognise.

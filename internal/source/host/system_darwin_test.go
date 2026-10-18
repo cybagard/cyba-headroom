@@ -37,6 +37,9 @@ func TestSystemReadsTheRealKernel(t *testing.T) {
 	if want := sysctlCmd(t, "hw.memsize"); strconv.FormatUint(h.TotalBytes, 10) != want {
 		t.Errorf("total = %d, sysctl says %s", h.TotalBytes, want)
 	}
+	if want := sysctlCmd(t, "hw.logicalcpu"); strconv.Itoa(h.CPUs) != want {
+		t.Errorf("cpus = %d, sysctl says %s", h.CPUs, want)
+	}
 	if h.Pressure != "normal" && h.Pressure != "warn" && h.Pressure != "critical" {
 		t.Errorf("pressure = %q", h.Pressure)
 	}

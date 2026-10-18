@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -78,6 +79,8 @@ const (
 // per PID.
 type Finder struct {
 	sys System
+	// dirs reads the Tart home.
+	dirs dirs
 	// tartHome is the Tart home (TartHome); empty without one.
 	tartHome string
 
@@ -91,7 +94,20 @@ type identity struct {
 }
 
 // New returns a Finder over sys.
-func New(sys System) *Finder { return &Finder{sys: sys, known: map[int]identity{}} }
+func New(sys System) *Finder {
+	return &Finder{sys: sys, dirs: osDirs{}, known: map[int]identity{}}
+}
+
+// dirs is the directory reads the Tart location scan makes.
+type dirs interface {
+	ReadDir(name string) ([]fs.DirEntry, error)
+	EvalSymlinks(path string) (string, error)
+}
+
+type osDirs struct{}
+
+func (osDirs) ReadDir(name string) ([]fs.DirEntry, error) { return os.ReadDir(name) }
+func (osDirs) EvalSymlinks(path string) (string, error)   { return filepath.EvalSymlinks(path) }
 
 // TartHome is the folder Tart keeps its VMs and OCI cache in, as tart picks
 // it: TART_HOME if it is absolute, else ~/.tart; empty if neither is known.
@@ -138,14 +154,14 @@ func (f *Finder) tartLocations() []tartLocation {
 		return nil
 	}
 	resolve := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
+		if r, err := f.dirs.EvalSymlinks(p); err == nil {
 			p = r
 		}
 		return path.Clean(p) + "/"
 	}
 	locs := []tartLocation{{dir: resolve(path.Join(f.tartHome, "cache", "OCIs"))}}
 	vms := path.Join(f.tartHome, "vms")
-	entries, _ := os.ReadDir(vms) // none yet: no local VM to match
+	entries, _ := f.dirs.ReadDir(vms) // none yet: no local VM to match
 	for _, e := range entries {
 		locs = append(locs, tartLocation{dir: resolve(path.Join(vms, e.Name())), name: e.Name()})
 	}

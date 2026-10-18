@@ -340,7 +340,7 @@ func cpu(u protocol.Usage, agents *float64, withAgents bool, cores int) string {
 	if share > 0 && share < 10 {
 		return fmt.Sprintf("%.1f%%", share)
 	}
-	return fmt.Sprintf("%.0f%%", share)
+	return fmt.Sprintf("%.0f%%", math.Round(total/float64(cores)))
 }
 
 func gbOrUnknown(b *uint64) string {

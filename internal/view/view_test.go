@@ -373,7 +373,8 @@ func TestCPUCountsTheWorktreesVMs(t *testing.T) {
 
 func TestSmallCPUSharesKeepADecimal(t *testing.T) {
 	// Over 16 cores: a share that rounds to 0.0 shows as 0, and one that rounds to 10.0 drops the decimal.
-	for agents, want := range map[float64]string{2: " 0.1% ", 0: " 0% ", 0.02: " 0% ", 159.4: " 10% "} {
+	// From 10% up the share is rounded once: 19.46 shows 19, not 19.5 then 20.
+	for agents, want := range map[float64]string{2: " 0.1% ", 0: " 0% ", 0.02: " 0% ", 159.4: " 10% ", 311.36: " 19% ", 279.2: " 17% "} {
 		s := busy()
 		s.Attribution.Worktrees[3].AgentCPUPercent = f64(agents)
 		has(t, line(t, render(t, s, view.Options{}), "Two agents"), want)

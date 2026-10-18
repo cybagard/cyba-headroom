@@ -86,6 +86,14 @@ type Finder struct {
 
 	mu    sync.Mutex
 	known map[int]identity
+	// scan is the Tart location scan in progress; nil when none is.
+	scan *tartScan
+}
+
+// tartScan is one run of tartLocations; locs is set when done is closed.
+type tartScan struct {
+	done chan struct{}
+	locs []tartLocation
 }
 
 type identity struct {
@@ -168,6 +176,37 @@ func (f *Finder) tartLocations() []tartLocation {
 	return append(locs, tartLocation{dir: resolve(vms), nameFromPath: true})
 }
 
+// scanTart returns tartLocations, or an error once ctx ends: the reads take
+// no context, and a Tart home on a stalled volume would block them, and every
+// source sharing the VM listing with them. A scan still running is waited on
+// rather than started again, so a stalled volume holds one goroutine.
+func (f *Finder) scanTart(ctx context.Context) ([]tartLocation, error) {
+	if f.tartHome == "" {
+		return nil, nil
+	}
+	f.mu.Lock()
+	s := f.scan
+	if s == nil {
+		s = &tartScan{done: make(chan struct{})}
+		f.scan = s
+		go func() {
+			locs := f.tartLocations()
+			f.mu.Lock()
+			s.locs = locs
+			f.scan = nil
+			close(s.done)
+			f.mu.Unlock()
+		}()
+	}
+	f.mu.Unlock()
+	select {
+	case <-s.done:
+		return s.locs, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("vmproc: reading the Tart home: %w", ctx.Err())
+	}
+}
+
 // List returns the running VMs, in PID order of the system listing. A process
 // that exits while being read is left out; a VM that is still running but
 // cannot be read is an error, since dropping it would under-report its cost.
@@ -177,7 +216,10 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 		return nil, fmt.Errorf("vmproc: listing processes: %w", err)
 	}
 	f.forgetExited(pids)
-	tart := f.tartLocations()
+	tart, err := f.scanTart(ctx)
+	if err != nil {
+		return nil, err
+	}
 	vms := make([]VM, 0, len(pids))
 	for _, pid := range pids {
 		id, err := f.identify(ctx, pid, tart)

@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
@@ -378,5 +382,61 @@ func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 				t.Fatalf("got  %+v\nwant %+v", got, want)
 			}
 		})
+	}
+}
+
+// stalledDirs is a Tart home on a stalled volume: ReadDir blocks until
+// released.
+type stalledDirs struct {
+	release chan struct{}
+	reads   atomic.Int32
+}
+
+func (d *stalledDirs) ReadDir(string) ([]fs.DirEntry, error) {
+	d.reads.Add(1)
+	<-d.release
+	return nil, fs.ErrNotExist
+}
+
+func (d *stalledDirs) EvalSymlinks(p string) (string, error) { return p, nil }
+
+func TestAStalledTartHomeDoesNotBlockList(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.files["lsof 4343"] = "lsof-tart-home.txt"
+	sys.files["footprint 4343"] = "footprint.txt"
+	d := &stalledDirs{release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(d.release) })
+	t.Cleanup(release)
+	f := vmproc.SetDirs(vmproc.New(sys).WithTartHome("/Users/dev/tart-home"), d)
+	list := func(timeout time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.List(ctx)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(time.Second):
+			t.Fatal("List did not return by its deadline")
+			return nil
+		}
+	}
+	for i := range 2 {
+		if err := list(50 * time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("list %d: err = %v, want the deadline", i+1, err)
+		}
+	}
+	// The second List waited on the first one's scan rather than start
+	// another: a stalled volume holds one goroutine, not one per tick.
+	if n := d.reads.Load(); n != 1 {
+		t.Fatalf("ReadDir called %d times, want once", n)
+	}
+	release()
+	if err := list(time.Second); err != nil {
+		t.Fatalf("after the volume recovers: %v", err)
 	}
 }

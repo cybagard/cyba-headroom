@@ -109,6 +109,10 @@ func (s *Source) Collect(context.Context) (daemon.Reading, error) {
 		SwapTotalBytes: swapTotal,
 		SwapUsedBytes:  swapUsed,
 	}
+	// Optional: an unknown count leaves the rest of the reading standing.
+	if n, err := s.sys.Uint32("hw.logicalcpu"); err == nil {
+		h.CPUs = int(n)
+	}
 	s.memory(&h)
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -6,6 +6,7 @@ package view
 import (
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -112,6 +113,10 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 		r.add("worktrees unknown")
 		return 0
 	}
+	cores := 0
+	if s.Host != nil {
+		cores = s.Host.CPUs
+	}
 	agents := map[string][]protocol.Agent{}
 	if s.Orca != nil {
 		for _, w := range s.Orca.Worktrees {
@@ -142,7 +147,7 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 			mark = "⚠"
 		}
 		r.add(rowFormat, short(Label(w.Project, w.Name, w.Path), 28), agentSummary(ag), mark,
-			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true), gbOrUnknown(w.AgentMemoryBytes))
+			containers(w.Usage), vms(w.Usage), cpu(w.Usage, w.AgentCPUPercent, true, cores), gbOrUnknown(w.AgentMemoryBytes))
 	}
 	u := a.Unattributed
 	if len(u.Containers)+len(u.TartVMs) > 0 {
@@ -150,7 +155,7 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 		if ungated[""] {
 			mark = "⚠"
 		}
-		r.add(rowFormat, "unattributed", "", mark, containers(u), vms(u), cpu(u, nil, false), "")
+		r.add(rowFormat, "unattributed", "", mark, containers(u), vms(u), cpu(u, nil, false, cores), "")
 		var items []string
 		for _, c := range u.Containers {
 			items = append(items, fmt.Sprintf("%s (%s)", Clean(c.Name), Clean(c.Reason)))
@@ -163,7 +168,8 @@ func (r *renderer) worktrees(s *protocol.Snapshot) (hidden int) {
 	return hidden
 }
 
-// footer notes hidden rows, stale sources and the snapshot's age.
+// footer notes the snapshot's age, the CPU unit, hidden rows and stale
+// sources.
 func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 	r.add("")
 	var parts []string
@@ -171,6 +177,9 @@ func (r *renderer) footer(s *protocol.Snapshot, hidden int) {
 		parts = append(parts, "no data yet")
 	} else {
 		parts = append(parts, fmt.Sprintf("updated %s ago", r.o.Now.Sub(s.CollectedAt).Round(time.Second)))
+	}
+	if s.Host != nil && s.Host.CPUs > 0 {
+		parts = append(parts, fmt.Sprintf("CPU: %% of %d cores", s.Host.CPUs))
 	}
 	switch hidden {
 	case 0:
@@ -299,8 +308,9 @@ func vms(u protocol.Usage) string {
 }
 
 // cpu is the containers' and Tart VMs' CPU plus, for a worktree, its
-// agents' own; "?" if a part is unknown.
-func cpu(u protocol.Usage, agents *float64, withAgents bool) string {
+// agents' own, as a share of all cores; "?" if a part or the core count is
+// unknown.
+func cpu(u protocol.Usage, agents *float64, withAgents bool, cores int) string {
 	total := 0.0
 	if len(u.Containers) > 0 {
 		if u.ContainerCPUPercent == nil {
@@ -322,7 +332,15 @@ func cpu(u protocol.Usage, agents *float64, withAgents bool) string {
 	} else if len(u.Containers)+len(u.TartVMs) == 0 {
 		return "–"
 	}
-	return fmt.Sprintf("%.0f%%", total)
+	if cores == 0 {
+		return "?"
+	}
+	// Round first, so the format follows the value shown: 0.04 shows 0%, 9.96 shows 10%.
+	share := math.Round(total/float64(cores)*10) / 10
+	if share > 0 && share < 10 {
+		return fmt.Sprintf("%.1f%%", share)
+	}
+	return fmt.Sprintf("%.0f%%", math.Round(total/float64(cores)))
 }
 
 func gbOrUnknown(b *uint64) string {

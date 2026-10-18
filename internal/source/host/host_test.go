@@ -68,6 +68,7 @@ func healthyMac() *fakeSysctl {
 		u32: map[string]uint32{
 			"kern.memorystatus_vm_pressure_level": 1,
 			"kern.memorystatus_level":             94,
+			"hw.logicalcpu":                       16,
 		},
 		u64: map[string]uint64{
 			"hw.memsize":                           64 << 30,
@@ -407,5 +408,24 @@ func TestSwapCountersAcceptEitherWidth(t *testing.T) {
 	h := collect(t, src)
 	if h.SwapinsPerSec == nil || *h.SwapinsPerSec != 10 {
 		t.Fatalf("swapins/s = %v, want 10 from 32-bit counters", h.SwapinsPerSec)
+	}
+}
+
+func TestReportsTheCoreCount(t *testing.T) {
+	h := collect(t, host.New(healthyMac(), 5*time.Minute, newClock().now))
+	if h.CPUs != 16 {
+		t.Fatalf("cpus = %d, want 16", h.CPUs)
+	}
+}
+
+func TestCoreCountIsOptional(t *testing.T) {
+	sys := healthyMac()
+	delete(sys.u32, "hw.logicalcpu")
+	h := collect(t, host.New(sys, 5*time.Minute, newClock().now))
+	if h.CPUs != 0 {
+		t.Fatalf("cpus = %d, want 0 (unknown)", h.CPUs)
+	}
+	if h.TotalBytes != 64<<30 || h.FreePercent != 94 || h.UsedBytes == nil {
+		t.Fatalf("rest of the reading lost: %+v", h)
 	}
 }

@@ -323,12 +323,12 @@ func parseCPUTime(s string) (float64, bool) {
 	if !ok || !digits(m) || len(sec) != 2 || !digits(sec) || !digits(frac) || sec >= "60" {
 		return 0, false
 	}
-	min, err1 := strconv.ParseUint(m, 10, 32)
+	mins, err1 := strconv.ParseUint(m, 10, 32)
 	secs, err2 := strconv.ParseFloat(sec+"."+frac, 64)
 	if err1 != nil || err2 != nil {
 		return 0, false
 	}
-	return float64(min)*60 + secs, true
+	return float64(mins)*60 + secs, true
 }
 
 // digits reports whether s is one or more ASCII digits.

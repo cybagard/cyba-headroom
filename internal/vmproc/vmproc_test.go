@@ -284,6 +284,31 @@ func TestTartVMRunFromTheOCICacheIsUnknown(t *testing.T) {
 	}
 }
 
+func TestStackedTartVMIsNamedByItsVMFolder(t *testing.T) {
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stacked VM (Tart 2.40) holds its base disk open in the shared content
+	// store, here listed first, and its own overlay in vms/<name>/.
+	capture = bytes.Replace(capture,
+		[]byte("/Users/dev/tart-home/vms/vm-a/nvram.bin"),
+		[]byte("/Users/dev/tart-home/cache/content/sha256/0000000000000000000000000000000000000000000000000000000000000001"), 1)
+	capture = bytes.Replace(capture, []byte("vms/vm-a/disk.img"), []byte("vms/vm-a/overlay.asif"), 1)
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.outputs = map[string][]byte{"lsof 4343": capture}
+	sys.files["footprint 4343"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome("/Users/dev/tart-home").List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
 func TestTartVMUnderASymlinkedDefaultTartHomeIsTart(t *testing.T) {
 	// ~/.tart moved to another disk and linked back; TART_HOME unset.
 	dir := t.TempDir()

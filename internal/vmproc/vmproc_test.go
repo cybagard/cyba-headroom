@@ -264,7 +264,7 @@ func TestTartVMUnderASymlinkedTartHomeIsTart(t *testing.T) {
 	}
 }
 
-func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
+func TestTartVMRunFromTheOCICacheIsUnknown(t *testing.T) {
 	sys := newFake()
 	sys.pids = []int{4444}
 	// lsof-tart-oci.txt is the recorded lsof-tart.txt capture with the Tart
@@ -276,9 +276,9 @@ func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Its name in tart list is not derived: Tart is enough to keep it out of
-	// other_vms.
-	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Tart, FootprintBytes: 1709280520}}
+	// Tart never runs a VM from the cache; one that did would be counted by
+	// no owner as Tart, so it is shown in other_vms.
+	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Unknown, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 1709280520}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
@@ -335,12 +335,15 @@ func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 		// vm is the VM folder as Tart reaches it.
 		vm       string
 		wantName string
+		// unknown is for files Tart never runs a VM from: the VM is Unknown,
+		// named by its command.
+		unknown bool
 	}{
 		{name: "TART_HOME", dirs: []string{"th/vms/vm-a"}, tartHome: "th", vm: "th/vms/vm-a", wantName: "vm-a"},
-		{name: "OCI cache", dirs: []string{".tart/" + oci + "/" + digest}, links: [][2]string{{".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "OCI cache", dirs: []string{".tart/" + oci + "/" + digest}, links: [][2]string{{".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1", wantName: "com.apple.Virtualization.VirtualMachine", unknown: true},
 		{name: "symlinked home", dirs: []string{"ext/tart/vms/vm-a"}, links: [][2]string{{".tart", "ext/tart"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
 		{name: "symlinked vms", dirs: []string{".tart", "ext/vms/vm-a"}, links: [][2]string{{".tart/vms", "../ext/vms"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
-		{name: "symlinked cache", dirs: []string{".tart", "ext/cache/OCIs/registry.example/org-a/image-a/" + digest}, links: [][2]string{{".tart/cache", "../ext/cache"}, {".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "symlinked cache", dirs: []string{".tart", "ext/cache/OCIs/registry.example/org-a/image-a/" + digest}, links: [][2]string{{".tart/cache", "../ext/cache"}, {".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1", wantName: "com.apple.Virtualization.VirtualMachine", unknown: true},
 		{name: "symlinked VM folder", dirs: []string{".tart/vms", "ext/vm-a"}, links: [][2]string{{".tart/vms/vm-a", "../../ext/vm-a"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
 	}
 	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
@@ -378,6 +381,9 @@ func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: c.wantName, FootprintBytes: 1709280520}}
+			if c.unknown {
+				want[0].Kind = vmproc.Unknown
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("got  %+v\nwant %+v", got, want)
 			}

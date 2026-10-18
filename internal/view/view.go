@@ -298,8 +298,8 @@ func vms(u protocol.Usage) string {
 	return fmt.Sprintf("%-3d %s GB", len(u.TartVMs), num(u.TartMemoryBytes))
 }
 
-// cpu is the containers' CPU plus, for a worktree, its agents' own; "?" if
-// a part is unknown. Tart VMs' CPU is not measured yet.
+// cpu is the containers' and Tart VMs' CPU plus, for a worktree, its
+// agents' own; "?" if a part is unknown.
 func cpu(u protocol.Usage, agents *float64, withAgents bool) string {
 	total := 0.0
 	if len(u.Containers) > 0 {
@@ -308,12 +308,18 @@ func cpu(u protocol.Usage, agents *float64, withAgents bool) string {
 		}
 		total += *u.ContainerCPUPercent
 	}
+	if len(u.TartVMs) > 0 {
+		if u.TartCPUPercent == nil {
+			return "?"
+		}
+		total += *u.TartCPUPercent
+	}
 	if withAgents {
 		if agents == nil {
 			return "?"
 		}
 		total += *agents
-	} else if len(u.Containers) == 0 {
+	} else if len(u.Containers)+len(u.TartVMs) == 0 {
 		return "–"
 	}
 	return fmt.Sprintf("%.0f%%", total)

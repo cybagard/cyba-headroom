@@ -346,7 +346,8 @@ func TestTartVMUnderASymlinkedDefaultTartHomeIsTart(t *testing.T) {
 // each way Tart finds its VMs, symlinks included. lsof prints the resolved
 // path of each open file, so the capture names the VM folder's resolved
 // path, and the VM must still be Tart: else it is reserved again in
-// other_vms beside the tart source's reservation (#226 B1–B4).
+// other_vms beside the tart source's reservation (#226 B1–B4). The OCI
+// cache rows are Unknown: Tart never runs a VM from the cache (#234).
 func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 	const oci = "cache/OCIs/registry.example/org-a/image-a"
 	const digest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"

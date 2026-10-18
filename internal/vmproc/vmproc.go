@@ -130,8 +130,8 @@ func TartHome(getenv func(string) string) string {
 }
 
 // WithTartHome makes f also recognise Tart VMs under home (TartHome): local
-// VMs in vms/<name>/ and VMs run from the OCI cache in cache/OCIs/. An empty
-// or relative home is ignored, as tart's shim ignores it.
+// VMs in vms/<name>/. An empty or relative home is ignored, as tart's shim
+// ignores it.
 func (f *Finder) WithTartHome(home string) *Finder {
 	if path.IsAbs(home) {
 		f.tartHome = home
@@ -143,20 +143,22 @@ func (f *Finder) WithTartHome(home string) *Finder {
 // it: resolved, with a trailing slash.
 type tartLocation struct {
 	dir string
-	// name is the local VM's name; empty for the OCI cache, where which of
-	// tart list's names a VM runs under is not known.
+	// name is the local VM's name.
 	name string
 	// nameFromPath takes the name from the folder after dir instead: the
 	// vms folder itself, for a VM folder not read from it.
 	nameFromPath bool
 }
 
-// tartLocations lists the Tart home's VM folders and its OCI cache. lsof
-// prints resolved paths and a symlink can sit at any level under the home
-// (the home, vms/, cache/, one VM's folder), so each location is resolved
-// itself; one that can't be is used as given. The VM folders are read
-// afresh on each scan, since VMs come and go; the vms folder itself comes
-// last, for one that can't be read.
+// tartLocations lists the Tart home's VM folders. lsof prints resolved paths
+// and a symlink can sit at any level under the home (the home, vms/, one VM's
+// folder), so each location is resolved itself; one that can't be is used as
+// given. The VM folders are read afresh on each scan, since VMs come and go;
+// the vms folder itself comes last, for one that can't be read.
+//
+// The OCI cache (cache/OCIs/) is not a location: Tart 2.40.1 never runs a VM
+// from it. run and get take local names only, and --disk with a remote name
+// copies the disk to tmp/ first. A VM with files only there is Unknown.
 func (f *Finder) tartLocations() []tartLocation {
 	if f.tartHome == "" {
 		return nil
@@ -167,7 +169,7 @@ func (f *Finder) tartLocations() []tartLocation {
 		}
 		return path.Clean(p) + "/"
 	}
-	locs := []tartLocation{{dir: resolve(path.Join(f.tartHome, "cache", "OCIs"))}}
+	var locs []tartLocation
 	vms := path.Join(f.tartHome, "vms")
 	entries, _ := f.dirs.ReadDir(vms) // none yet: no local VM to match
 	for _, e := range entries {
@@ -303,8 +305,6 @@ func classify(lsof []byte, tart []tartLocation) identity {
 		if strings.Contains(p, "/Docker.app/") || strings.Contains(p, "/com.docker.docker/") {
 			return identity{kind: Docker}
 		}
-		// A VM run from the OCI cache holds the digest folder its tag links
-		// to open: its location is the cache, and it is left unnamed.
 		for _, l := range tart {
 			if rest, ok := strings.CutPrefix(p, l.dir); ok {
 				name := l.name

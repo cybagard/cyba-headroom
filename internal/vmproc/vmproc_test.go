@@ -513,12 +513,12 @@ func near(p *float64, want float64) bool { return p != nil && *p > want-1e-6 && 
 func TestCPUIsCPUTimeOverWallTime(t *testing.T) {
 	sys := newFake()
 	f, c := cpuFinder(sys)
-	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   0:10.00\n 5678 250:43.69\n")}
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   9:54.49\n 5678 250:43.69\n")}
 	if got := cpus(t, f); got[1234] != nil || got[5678] != nil {
 		t.Fatalf("first reading = %v %v, want unknown", pct(got[1234]), pct(got[5678]))
 	}
 	c.t = c.t.Add(2 * time.Second)
-	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:15.50\n 5678 250:43.69\n")
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   9:59.99\n 5678 250:43.69\n")
 	if got := cpus(t, f); !near(got[1234], 275) || !near(got[5678], 0) {
 		t.Fatalf("cpu = %v %v, want 275 and 0", pct(got[1234]), pct(got[5678]))
 	}

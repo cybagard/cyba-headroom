@@ -46,7 +46,7 @@ func TestRemote(t *testing.T) {
 		{"localhost:2375", false},
 		{"::bad", false},
 	} {
-		if got := Remote(c.endpoint); got != c.want {
+		if got := Remote("docker", c.endpoint, os.Getenv); got != c.want {
 			t.Errorf("Remote(%q) = %v, want %v", c.endpoint, got, c.want)
 		}
 	}
@@ -82,7 +82,7 @@ func TestALoopbackTCPHostIsThisMacs(t *testing.T) {
 		"tcp://dev-box:2375",
 		"tcp://dev-box6:2375",
 	} {
-		if Remote(endpoint) {
+		if Remote("docker", endpoint, os.Getenv) {
 			t.Errorf("Remote(%q) = true, want this Mac's", endpoint)
 		}
 	}
@@ -100,7 +100,7 @@ func TestARemoteTCPHostStaysRemote(t *testing.T) {
 		"2001:db8::1",
 		"ssh://dev@ssh-alias",
 	} {
-		if !Remote(endpoint) {
+		if !Remote("docker", endpoint, os.Getenv) {
 			t.Errorf("Remote(%q) = false, want remote", endpoint)
 		}
 	}
@@ -111,7 +111,7 @@ func TestARemoteTCPHostStaysRemote(t *testing.T) {
 // for a slow resolver (#118).
 func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
 	resolving(t, nil)
-	if Remote("tcp://no-such-box:2375") {
+	if Remote("docker", "tcp://no-such-box:2375", os.Getenv) {
 		t.Error("an unresolved host is remote, want this Mac's")
 	}
 	lookupIP = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
@@ -123,7 +123,7 @@ func TestAnUnresolvedTCPHostIsThisMacs(t *testing.T) {
 		}
 	}
 	start := time.Now()
-	if Remote("tcp://slow-box:2375") {
+	if Remote("docker", "tcp://slow-box:2375", os.Getenv) {
 		t.Error("a host that resolves too late is remote, want this Mac's")
 	}
 	if took := time.Since(start); took > time.Second {
@@ -153,12 +153,12 @@ func TestANumericHostIsResolvedOnEitherScheme(t *testing.T) {
 		{"0177.0.0.1", true},
 	} {
 		for _, endpoint := range []string{"tcp://" + c.host + ":2375", "ssh://core@" + c.host + ":2222"} {
-			if got := Remote(endpoint); got != c.remote {
+			if got := Remote("docker", endpoint, os.Getenv); got != c.remote {
 				t.Errorf("Remote(%q) = %v, want %v", endpoint, got, c.remote)
 			}
 		}
 	}
-	if !Remote("ssh://dev@cafe") {
+	if !Remote("docker", "ssh://dev@cafe", os.Getenv) {
 		t.Error("ssh://dev@cafe is this Mac's, want remote: a name, not resolved")
 	}
 }

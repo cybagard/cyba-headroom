@@ -4,6 +4,7 @@ package shim
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 			t.Errorf("%s resolves to %v, want a loopback address", host, addrs)
 		}
 	}
-	if Remote("tcp://127.1:2375") {
+	if Remote("docker", "tcp://127.1:2375", os.Getenv) {
 		t.Error("tcp://127.1:2375 is remote, want this Mac's")
 	}
 }
@@ -96,7 +97,7 @@ func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
 		{"ssh://dev@build-box", false, "build-box, which ssh's config may alias"},
 		{"ssh://dev@no-such-box.invalid", false, "a name, not resolved"},
 	} {
-		if got := Remote(c.endpoint); got == c.thisMac {
+		if got := Remote("docker", c.endpoint, os.Getenv); got == c.thisMac {
 			t.Errorf("Remote(%q) = %v, want %v: the client reaches %s", c.endpoint, got, !c.thisMac, c.reaches)
 		}
 	}

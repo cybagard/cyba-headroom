@@ -15,8 +15,9 @@ import (
 // contexts, connections and variables already resolved by the caller; ""
 // is not remote. Podman machine's ssh://…@127.0.0.1 counts as local, and so
 // does any host thisMac finds here. The host is the one the client dials
-// (see dialed).
-func Remote(endpoint string) bool {
+// (see dialed), by client, "docker" or "podman", in the call's environment
+// getenv.
+func Remote(client, endpoint string, _ func(string) string) bool {
 	if !strings.Contains(endpoint, "://") && strings.Contains(endpoint, ":") {
 		endpoint = "tcp://" + endpoint // docker reads a bare host:port as TCP
 	}

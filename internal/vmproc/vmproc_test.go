@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
@@ -260,7 +264,7 @@ func TestTartVMUnderASymlinkedTartHomeIsTart(t *testing.T) {
 	}
 }
 
-func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
+func TestTartVMRunFromTheOCICacheIsUnknown(t *testing.T) {
 	sys := newFake()
 	sys.pids = []int{4444}
 	// lsof-tart-oci.txt is the recorded lsof-tart.txt capture with the Tart
@@ -272,9 +276,34 @@ func TestTartVMRunFromTheOCICacheIsTart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Its name in tart list is not derived: Tart is enough to keep it out of
-	// other_vms.
-	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Tart, FootprintBytes: 1709280520}}
+	// Tart never runs a VM from the cache; one that did would be counted by
+	// no owner as Tart, so it is shown in other_vms.
+	want := []vmproc.VM{{PID: 4444, Kind: vmproc.Unknown, Name: "com.apple.Virtualization.VirtualMachine", FootprintBytes: 1709280520}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestStackedTartVMIsNamedByItsVMFolder(t *testing.T) {
+	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stacked VM (Tart 2.40) holds its base disk open in the shared content
+	// store, here listed first, and its own overlay in vms/<name>/.
+	capture = bytes.Replace(capture,
+		[]byte("/Users/dev/tart-home/vms/vm-a/nvram.bin"),
+		[]byte("/Users/dev/tart-home/cache/content/sha256/0000000000000000000000000000000000000000000000000000000000000001"), 1)
+	capture = bytes.Replace(capture, []byte("vms/vm-a/disk.img"), []byte("vms/vm-a/overlay.asif"), 1)
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.outputs = map[string][]byte{"lsof 4343": capture}
+	sys.files["footprint 4343"] = "footprint.txt"
+	got, err := vmproc.New(sys).WithTartHome("/Users/dev/tart-home").List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: "vm-a", FootprintBytes: 1709280520}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
@@ -317,7 +346,8 @@ func TestTartVMUnderASymlinkedDefaultTartHomeIsTart(t *testing.T) {
 // each way Tart finds its VMs, symlinks included. lsof prints the resolved
 // path of each open file, so the capture names the VM folder's resolved
 // path, and the VM must still be Tart: else it is reserved again in
-// other_vms beside the tart source's reservation (#226 B1–B4).
+// other_vms beside the tart source's reservation (#226 B1–B4). The OCI
+// cache rows are Unknown: Tart never runs a VM from the cache (#234).
 func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 	const oci = "cache/OCIs/registry.example/org-a/image-a"
 	const digest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
@@ -331,12 +361,15 @@ func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 		// vm is the VM folder as Tart reaches it.
 		vm       string
 		wantName string
+		// unknown is for files Tart never runs a VM from: the VM is Unknown,
+		// named by its command.
+		unknown bool
 	}{
 		{name: "TART_HOME", dirs: []string{"th/vms/vm-a"}, tartHome: "th", vm: "th/vms/vm-a", wantName: "vm-a"},
-		{name: "OCI cache", dirs: []string{".tart/" + oci + "/" + digest}, links: [][2]string{{".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "OCI cache", dirs: []string{".tart/" + oci + "/" + digest}, links: [][2]string{{".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1", wantName: "com.apple.Virtualization.VirtualMachine", unknown: true},
 		{name: "symlinked home", dirs: []string{"ext/tart/vms/vm-a"}, links: [][2]string{{".tart", "ext/tart"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
 		{name: "symlinked vms", dirs: []string{".tart", "ext/vms/vm-a"}, links: [][2]string{{".tart/vms", "../ext/vms"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
-		{name: "symlinked cache", dirs: []string{".tart", "ext/cache/OCIs/registry.example/org-a/image-a/" + digest}, links: [][2]string{{".tart/cache", "../ext/cache"}, {".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1"},
+		{name: "symlinked cache", dirs: []string{".tart", "ext/cache/OCIs/registry.example/org-a/image-a/" + digest}, links: [][2]string{{".tart/cache", "../ext/cache"}, {".tart/" + oci + "/1", digest}}, vm: ".tart/" + oci + "/1", wantName: "com.apple.Virtualization.VirtualMachine", unknown: true},
 		{name: "symlinked VM folder", dirs: []string{".tart/vms", "ext/vm-a"}, links: [][2]string{{".tart/vms/vm-a", "../../ext/vm-a"}}, vm: ".tart/vms/vm-a", wantName: "vm-a"},
 	}
 	capture, err := os.ReadFile("testdata/lsof-tart-home.txt")
@@ -374,9 +407,68 @@ func TestTartVMsAreTartWhereverTheirFilesLive(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := []vmproc.VM{{PID: 4343, Kind: vmproc.Tart, Name: c.wantName, FootprintBytes: 1709280520}}
+			if c.unknown {
+				want[0].Kind = vmproc.Unknown
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("got  %+v\nwant %+v", got, want)
 			}
 		})
+	}
+}
+
+// stalledDirs is a Tart home on a stalled volume: ReadDir blocks until
+// released.
+type stalledDirs struct {
+	release chan struct{}
+	reads   atomic.Int32
+}
+
+func (d *stalledDirs) ReadDir(string) ([]fs.DirEntry, error) {
+	d.reads.Add(1)
+	<-d.release
+	return nil, fs.ErrNotExist
+}
+
+func (d *stalledDirs) EvalSymlinks(p string) (string, error) { return p, nil }
+
+func TestAStalledTartHomeDoesNotBlockList(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{4343}
+	sys.files["lsof 4343"] = "lsof-tart-home.txt"
+	sys.files["footprint 4343"] = "footprint.txt"
+	d := &stalledDirs{release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(d.release) })
+	t.Cleanup(release)
+	f := vmproc.SetDirs(vmproc.New(sys).WithTartHome("/Users/dev/tart-home"), d)
+	list := func(timeout time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.List(ctx)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(time.Second):
+			t.Fatal("List did not return by its deadline")
+			return nil
+		}
+	}
+	for i := range 2 {
+		if err := list(50 * time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("list %d: err = %v, want the deadline", i+1, err)
+		}
+	}
+	// The second List waited on the first one's scan rather than start
+	// another: a stalled volume holds one goroutine, not one per tick.
+	if n := d.reads.Load(); n != 1 {
+		t.Fatalf("ReadDir called %d times, want once", n)
+	}
+	release()
+	if err := list(time.Second); err != nil {
+		t.Fatalf("after the volume recovers: %v", err)
 	}
 }

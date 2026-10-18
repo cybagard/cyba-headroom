@@ -115,6 +115,28 @@ func TestContainerCPUUnknownWhenAnyIs(t *testing.T) {
 	}
 }
 
+func TestTartCPUSumsTheVMs(t *testing.T) {
+	s := snapshot()
+	s.Tart.VMs[0].CPUPercent = f64(275)
+	s.Tart.VMs = append(s.Tart.VMs, protocol.TartVM{Name: "ci-2", CPUPercent: f64(10), LaunchCwd: "/Users/dev/w/project-b"})
+	w := attribution.Attribute(s).Worktrees[1]
+	if len(w.TartVMs) != 2 || w.TartVMs[0].CPUPercent == nil || *w.TartVMs[0].CPUPercent != 275 {
+		t.Fatalf("vms = %+v, want ci at 275 and ci-2", w.TartVMs)
+	}
+	if w.TartCPUPercent == nil || *w.TartCPUPercent != 285 {
+		t.Fatalf("tart cpu = %v, want 285", w.TartCPUPercent)
+	}
+}
+
+func TestTartCPUUnknownWhenAnyIs(t *testing.T) {
+	s := snapshot()
+	s.Tart.VMs[0].CPUPercent = f64(275)
+	s.Tart.VMs = append(s.Tart.VMs, protocol.TartVM{Name: "ci-2", LaunchCwd: "/Users/dev/w/project-b"}) // first reading
+	if w := attribution.Attribute(s).Worktrees[1]; w.TartCPUPercent != nil {
+		t.Fatalf("tart cpu = %v, want unknown", *w.TartCPUPercent)
+	}
+}
+
 func TestEmptySnapshot(t *testing.T) {
 	a := attribution.Attribute(&protocol.Snapshot{})
 	if len(a.Worktrees) != 0 || len(a.Unattributed.Containers) != 0 {

@@ -314,6 +314,8 @@ type Usage struct {
 	TartMemoryBytes uint64 `json:"tart_memory_bytes"`
 	// TartFootprintBytes is absent when a VM's footprint is unknown.
 	TartFootprintBytes *uint64 `json:"tart_footprint_bytes,omitempty"`
+	// TartCPUPercent is absent while any VM's CPU is unknown.
+	TartCPUPercent *float64 `json:"tart_cpu_percent,omitempty"`
 }
 
 // AttributedContainer is a container and how it was matched (By), or why it
@@ -332,11 +334,12 @@ type AttributedContainer struct {
 // AttributedVM is a Tart VM and how it was matched (By), or why it was not
 // (Reason).
 type AttributedVM struct {
-	Name           string  `json:"name"`
-	MemoryBytes    uint64  `json:"memory_bytes"`
-	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
-	By             string  `json:"by,omitempty"`
-	Reason         string  `json:"reason,omitempty"`
+	Name           string   `json:"name"`
+	MemoryBytes    uint64   `json:"memory_bytes"`
+	FootprintBytes *uint64  `json:"footprint_bytes,omitempty"`
+	CPUPercent     *float64 `json:"cpu_percent,omitempty"`
+	By             string   `json:"by,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
 }
 
 // Budget is reserved vs. used vs. headroom (R2). Reserved is what running

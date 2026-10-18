@@ -66,7 +66,7 @@ func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribut
 			u := usage(m)
 			u.TartVMs = append(u.TartVMs, protocol.AttributedVM{
 				Name: vm.Name, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes,
-				By: m.By, Reason: m.Reason,
+				CPUPercent: vm.CPUPercent, By: m.By, Reason: m.Reason,
 			})
 		}
 	}
@@ -100,6 +100,7 @@ func total(u *protocol.Usage) {
 	}
 	var fp uint64
 	fpKnown := true
+	vmCPU, vmCPUKnown := 0.0, true
 	for _, vm := range u.TartVMs {
 		u.TartMemoryBytes += vm.MemoryBytes
 		if vm.FootprintBytes == nil {
@@ -107,8 +108,16 @@ func total(u *protocol.Usage) {
 		} else {
 			fp += *vm.FootprintBytes
 		}
+		if vm.CPUPercent == nil {
+			vmCPUKnown = false
+		} else {
+			vmCPU += *vm.CPUPercent
+		}
 	}
 	if fpKnown {
 		u.TartFootprintBytes = &fp
+	}
+	if vmCPUKnown {
+		u.TartCPUPercent = &vmCPU
 	}
 }

@@ -314,6 +314,8 @@ type Usage struct {
 	TartMemoryBytes uint64 `json:"tart_memory_bytes"`
 	// TartFootprintBytes is absent when a VM's footprint is unknown.
 	TartFootprintBytes *uint64 `json:"tart_footprint_bytes,omitempty"`
+	// TartCPUPercent is absent while any VM's CPU is unknown.
+	TartCPUPercent *float64 `json:"tart_cpu_percent,omitempty"`
 }
 
 // AttributedContainer is a container and how it was matched (By), or why it
@@ -332,11 +334,12 @@ type AttributedContainer struct {
 // AttributedVM is a Tart VM and how it was matched (By), or why it was not
 // (Reason).
 type AttributedVM struct {
-	Name           string  `json:"name"`
-	MemoryBytes    uint64  `json:"memory_bytes"`
-	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
-	By             string  `json:"by,omitempty"`
-	Reason         string  `json:"reason,omitempty"`
+	Name           string   `json:"name"`
+	MemoryBytes    uint64   `json:"memory_bytes"`
+	FootprintBytes *uint64  `json:"footprint_bytes,omitempty"`
+	CPUPercent     *float64 `json:"cpu_percent,omitempty"`
+	By             string   `json:"by,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
 }
 
 // Budget is reserved vs. used vs. headroom (R2). Reserved is what running
@@ -546,6 +549,10 @@ type TartVM struct {
 	// (phys_footprint); absent if its process was not found (e.g. booting),
 	// which means unknown, not free.
 	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	// CPUPercent is the VM process's CPU use since the previous reading,
+	// 100 = one core; absent on its first reading or if it could not be
+	// read.
+	CPUPercent *float64 `json:"cpu_percent,omitempty"`
 
 	// How the VM was launched, for attribution (R3). tart run changes its own
 	// cwd to the VM bundle, so the launching shell is its parent.

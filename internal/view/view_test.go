@@ -363,6 +363,32 @@ func TestCPUUnknownWhenAgentsUnknown(t *testing.T) {
 	has(t, r, "?")
 }
 
+func TestCPUCountsTheWorktreesVMs(t *testing.T) {
+	s := busy()
+	w := &s.Attribution.Worktrees[1]
+	w.TartVMs = []protocol.AttributedVM{{Name: "ci", CPUPercent: f64(275)}, {Name: "ci-2", CPUPercent: f64(10)}}
+	w.TartCPUPercent, w.AgentCPUPercent = f64(285), f64(2)
+	has(t, line(t, render(t, s, view.Options{}), "Release prep"), "287%")
+}
+
+func TestUnknownVMCPUIsAQuestionMark(t *testing.T) {
+	s := busy()
+	s.Attribution.Worktrees[1].AgentCPUPercent = f64(2) // the VM "ci"'s CPU is unknown
+	if r := line(t, render(t, s, view.Options{}), "Release prep"); strings.Count(r, "?") != 1 {
+		t.Fatalf("want CPU as ?: %q", r)
+	}
+}
+
+func TestUnattributedVMsShowTheirCPU(t *testing.T) {
+	s := busy()
+	s.Attribution.Unattributed = protocol.Usage{
+		Containers:      []protocol.AttributedContainer{},
+		TartVMs:         []protocol.AttributedVM{{Name: "orphan", Reason: "no_match", CPUPercent: f64(50)}},
+		TartMemoryBytes: 4 * gib, TartCPUPercent: f64(50),
+	}
+	has(t, line(t, render(t, s, view.Options{}), "unattributed"), "50%")
+}
+
 func TestUngatedIsFlagged(t *testing.T) {
 	s := busy()
 	s.Ungated = []protocol.Ungated{

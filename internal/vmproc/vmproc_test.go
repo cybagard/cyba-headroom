@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,10 +20,11 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
-// fakeSystem lists fixed PIDs and answers lsof/footprint from captured output.
+// fakeSystem lists fixed PIDs and answers lsof, footprint and ps from
+// captured output. A ps without an answer fails; it removes no process.
 type fakeSystem struct {
 	pids  []int
-	files map[string]string // "lsof <pid>" or "footprint <pid>" -> testdata file
+	files map[string]string // "lsof <pid>", "footprint <pid>" or "ps <pid,…>" -> testdata file
 	// outputs, checked before files, are outputs built by the test.
 	outputs map[string][]byte
 	calls   map[string]int
@@ -46,7 +48,7 @@ func (f *fakeSystem) Run(_ context.Context, name string, args ...string) ([]byte
 	}
 	file, ok := f.files[key]
 	if !ok {
-		if f.toolBroken {
+		if f.toolBroken || name == "/bin/ps" {
 			return nil, errors.New("exit status 1") // tool failed, process still there
 		}
 		f.pids = slices.DeleteFunc(f.pids, func(p int) bool { return strconv.Itoa(p) == pid })
@@ -470,5 +472,169 @@ func TestAStalledTartHomeDoesNotBlockList(t *testing.T) {
 	release()
 	if err := list(time.Second); err != nil {
 		t.Fatalf("after the volume recovers: %v", err)
+	}
+}
+
+// clock is a fake clock for CPU readings.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time { return c.t }
+
+// cpuFinder is a Finder over sys with a fake clock.
+func cpuFinder(sys *fakeSystem) (*vmproc.Finder, *clock) {
+	c := &clock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	return vmproc.SetNow(vmproc.New(sys), c.now), c
+}
+
+// cpus is each VM's CPU, nil when unknown, by PID.
+func cpus(t *testing.T, f *vmproc.Finder) map[int]*float64 {
+	t.Helper()
+	vms, err := f.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]*float64{}
+	for _, vm := range vms {
+		got[vm.PID] = vm.CPUPercent
+	}
+	return got
+}
+
+// pct shows a CPU reading.
+func pct(p *float64) string {
+	if p == nil {
+		return "unknown"
+	}
+	return strconv.FormatFloat(*p, 'f', -1, 64)
+}
+
+func near(p *float64, want float64) bool { return p != nil && *p > want-1e-6 && *p < want+1e-6 }
+
+func TestCPUIsCPUTimeOverWallTime(t *testing.T) {
+	sys := newFake()
+	f, c := cpuFinder(sys)
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   9:54.49\n 5678 250:43.69\n")}
+	if got := cpus(t, f); got[1234] != nil || got[5678] != nil {
+		t.Fatalf("first reading = %v %v, want unknown", pct(got[1234]), pct(got[5678]))
+	}
+	c.t = c.t.Add(2 * time.Second)
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   9:59.99\n 5678 250:43.69\n")
+	if got := cpus(t, f); !near(got[1234], 275) || !near(got[5678], 0) {
+		t.Fatalf("cpu = %v %v, want 275 and 0", pct(got[1234]), pct(got[5678]))
+	}
+}
+
+func TestCPUStartsOverForAReusedPID(t *testing.T) {
+	sys := newFake()
+	f, c := cpuFinder(sys)
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   0:10.00\n 5678   0:01.00\n")}
+	cpus(t, f)
+	c.t = c.t.Add(2 * time.Second)
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:15.50\n 5678   0:02.00\n")
+	if got := cpus(t, f); !near(got[1234], 275) {
+		t.Fatalf("cpu = %v, want 275", pct(got[1234]))
+	}
+	// The VM exits; its PID is reused by one that has run longer.
+	sys.pids = []int{5678}
+	sys.outputs["ps 5678"] = []byte(" 5678   0:03.00\n")
+	c.t = c.t.Add(2 * time.Second)
+	cpus(t, f)
+	sys.pids = []int{1234, 5678}
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:20.00\n 5678   0:04.00\n")
+	c.t = c.t.Add(2 * time.Second)
+	if got := cpus(t, f); got[1234] != nil || !near(got[5678], 50) {
+		t.Fatalf("cpu = %v %v, want unknown for the reused PID and 50", pct(got[1234]), pct(got[5678]))
+	}
+}
+
+func TestCPUTimeThatWentBackwardsIsUnknown(t *testing.T) {
+	sys := newFake()
+	f, c := cpuFinder(sys)
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   0:10.00\n 5678   0:01.00\n")}
+	cpus(t, f)
+	c.t = c.t.Add(2 * time.Second)
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:09.00\n 5678   0:02.00\n")
+	if got := cpus(t, f); got[1234] != nil || !near(got[5678], 50) {
+		t.Fatalf("cpu = %v %v, want unknown and 50", pct(got[1234]), pct(got[5678]))
+	}
+}
+
+func TestPSFailureLeavesCPUUnknownAndKeepsFootprints(t *testing.T) {
+	sys := newFake()
+	f, c := cpuFinder(sys)
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   0:10.00\n 5678   0:01.00\n")}
+	cpus(t, f)
+	c.t = c.t.Add(2 * time.Second)
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:15.50\n 5678   0:02.00\n")
+	if got := cpus(t, f); !near(got[1234], 275) {
+		t.Fatalf("cpu = %v, want 275", pct(got[1234]))
+	}
+	delete(sys.outputs, "ps 1234,5678") // ps fails
+	c.t = c.t.Add(2 * time.Second)
+	vms, err := f.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vm := range vms {
+		if vm.CPUPercent != nil || vm.FootprintBytes != 1709280520 {
+			t.Fatalf("vm %d: cpu %v, footprint %d; want unknown CPU and the footprint", vm.PID, pct(vm.CPUPercent), vm.FootprintBytes)
+		}
+	}
+	if len(vms) != 2 {
+		t.Fatalf("got %d VMs, want 2", len(vms))
+	}
+}
+
+func TestAnUnparsableLineLeavesOnlyThatPIDUnknown(t *testing.T) {
+	sys := newFake()
+	f, c := cpuFinder(sys)
+	sys.outputs = map[string][]byte{"ps 1234,5678": []byte(" 1234   0:10.00\n 5678   0:01.00\n")}
+	cpus(t, f)
+	c.t = c.t.Add(2 * time.Second)
+	// hh:mm:ss is not how macOS ps prints CPU time.
+	sys.outputs["ps 1234,5678"] = []byte(" 1234   0:15.50\n 5678 1:00:02.00\n")
+	if got := cpus(t, f); !near(got[1234], 275) || got[5678] != nil {
+		t.Fatalf("cpu = %v %v, want 275 and unknown", pct(got[1234]), pct(got[5678]))
+	}
+}
+
+func TestCPUTimesParseAsPSPrintsThem(t *testing.T) {
+	sys := newFake()
+	sys.pids = []int{1001, 2002, 3003, 4004}
+	for _, pid := range []string{"1001", "2002", "3003", "4004"} {
+		sys.files["lsof "+pid] = "lsof-docker.txt"
+		sys.files["footprint "+pid] = "footprint.txt"
+	}
+	f, c := cpuFinder(sys)
+	// Two runs of ps 2 s apart: 0:35.65, 10:04.64, 227:33.61 and 0:00.00.
+	sys.files["ps 1001,2002,3003,4004"] = "ps-cputime-1.txt"
+	cpus(t, f)
+	c.t = c.t.Add(2 * time.Second)
+	sys.files["ps 1001,2002,3003,4004"] = "ps-cputime-2.txt"
+	got := cpus(t, f)
+	if !near(got[1001], 0) || !near(got[2002], 0) || !near(got[3003], 11.5) || !near(got[4004], 0) {
+		t.Fatalf("cpu = %v %v %v %v, want 0 0 11.5 0", pct(got[1001]), pct(got[2002]), pct(got[3003]), pct(got[4004]))
+	}
+	// A minute later, one more minute of CPU time each.
+	c.t = c.t.Add(time.Minute)
+	sys.outputs = map[string][]byte{"ps 1001,2002,3003,4004": []byte(" 1001   1:35.65\n 2002  11:04.64\n 3003 228:33.84\n 4004   1:00.00\n")}
+	got = cpus(t, f)
+	for _, pid := range []int{1001, 2002, 3003, 4004} {
+		if !near(got[pid], 100) {
+			t.Fatalf("cpu of %d = %v, want 100", pid, pct(got[pid]))
+		}
+	}
+}
+
+func TestNoPSRunWithoutVMs(t *testing.T) {
+	sys := newFake()
+	sys.pids = nil
+	if _, err := vmproc.New(sys).List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for key := range sys.calls {
+		if strings.HasPrefix(key, "ps ") {
+			t.Fatalf("ran %q with no VM process", key)
+		}
 	}
 }

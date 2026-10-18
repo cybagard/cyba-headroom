@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 )
 
@@ -47,6 +48,10 @@ type VM struct {
 	// FootprintBytes is phys_footprint: what the host pays, as Activity
 	// Monitor shows it.
 	FootprintBytes uint64
+	// CPUPercent is CPU use since the previous List, 100 = one core, as ps
+	// and docker stats count; nil on a process's first List or when its CPU
+	// time could not be read.
+	CPUPercent *float64
 }
 
 // Process is a process with its executable and full argument list.
@@ -73,6 +78,7 @@ type System interface {
 const (
 	lsofPath      = "/usr/sbin/lsof"
 	footprintPath = "/usr/bin/footprint"
+	psPath        = "/bin/ps"
 )
 
 // Finder lists VMs. A process's kind never changes, so it is classified once
@@ -83,9 +89,13 @@ type Finder struct {
 	dirs dirs
 	// tartHome is the Tart home (TartHome); empty without one.
 	tartHome string
+	// now is the clock CPU readings are timed by.
+	now func() time.Time
 
 	mu    sync.Mutex
 	known map[int]identity
+	// cpu is each process's previous CPU reading.
+	cpu map[int]cpuReading
 	// scan is the Tart location scan in progress; nil when none is.
 	scan *tartScan
 }
@@ -96,6 +106,12 @@ type tartScan struct {
 	locs []tartLocation
 }
 
+// cpuReading is a process's CPU time, in seconds, at a moment.
+type cpuReading struct {
+	at  time.Time
+	cpu float64
+}
+
 type identity struct {
 	kind Kind
 	name string
@@ -103,7 +119,7 @@ type identity struct {
 
 // New returns a Finder over sys.
 func New(sys System) *Finder {
-	return &Finder{sys: sys, dirs: osDirs{}, known: map[int]identity{}}
+	return &Finder{sys: sys, dirs: osDirs{}, now: time.Now, known: map[int]identity{}, cpu: map[int]cpuReading{}}
 }
 
 // dirs is the directory reads the Tart location scan makes.
@@ -237,7 +253,87 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 		}
 		vms = append(vms, VM{PID: pid, Kind: id.kind, Name: id.name, FootprintBytes: fp})
 	}
+	f.readCPU(ctx, vms)
 	return vms, nil
+}
+
+// readCPU sets each VM's CPUPercent from one ps run: CPU time used since its
+// previous reading over the wall time between them. A failed run, or a
+// missing or unparsable line, leaves a VM's CPU unknown: memory is what
+// gates, and it must not fail over CPU.
+func (f *Finder) readCPU(ctx context.Context, vms []VM) {
+	if len(vms) == 0 {
+		return
+	}
+	pids := make([]string, len(vms))
+	for i, vm := range vms {
+		pids[i] = strconv.Itoa(vm.PID)
+	}
+	out, err := f.sys.Run(ctx, psPath, "-o", "pid=,cputime=", "-p", strings.Join(pids, ","))
+	if err != nil {
+		return
+	}
+	now := f.now()
+	cur := parseCPUTimes(out)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, vm := range vms {
+		c, ok := cur[vm.PID]
+		if !ok {
+			continue
+		}
+		prev, seen := f.cpu[vm.PID]
+		f.cpu[vm.PID] = cpuReading{at: now, cpu: c}
+		if wall := now.Sub(prev.at).Seconds(); seen && c >= prev.cpu && wall > 0 {
+			p := (c - prev.cpu) / wall * 100
+			vms[i].CPUPercent = &p
+		}
+	}
+}
+
+// parseCPUTimes reads ps -o pid=,cputime= output: a PID and its CPU time,
+// in seconds, per line. macOS ps prints CPU time as minutes:seconds.fraction,
+// minutes unbounded (250:43.69); a line in any other shape is left out.
+func parseCPUTimes(out []byte) map[int]float64 {
+	times := map[int]float64{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		if t, ok := parseCPUTime(fields[1]); ok {
+			times[pid] = t
+		}
+	}
+	return times
+}
+
+// parseCPUTime parses minutes:seconds.fraction, as 0:00.00 or 250:43.69.
+func parseCPUTime(s string) (float64, bool) {
+	m, rest, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0, false
+	}
+	sec, frac, ok := strings.Cut(rest, ".")
+	if !ok || !digits(m) || len(sec) != 2 || !digits(sec) || !digits(frac) || sec >= "60" {
+		return 0, false
+	}
+	mins, err1 := strconv.ParseUint(m, 10, 32)
+	secs, err2 := strconv.ParseFloat(sec+"."+frac, 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return float64(mins)*60 + secs, true
+}
+
+// digits reports whether s is one or more ASCII digits.
+func digits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
 // exited reports whether pid is no longer a VM process.
@@ -246,8 +342,8 @@ func (f *Finder) exited(pid int) bool {
 	return err == nil && !slices.Contains(pids, pid)
 }
 
-// forgetExited drops classifications of PIDs no longer listed, so a reused
-// PID is classified afresh.
+// forgetExited drops classifications and CPU readings of PIDs no longer
+// listed, so a reused PID is classified and timed afresh.
 func (f *Finder) forgetExited(live []int) {
 	alive := make(map[int]bool, len(live))
 	for _, pid := range live {
@@ -258,6 +354,11 @@ func (f *Finder) forgetExited(live []int) {
 	for pid := range f.known {
 		if !alive[pid] {
 			delete(f.known, pid)
+		}
+	}
+	for pid := range f.cpu {
+		if !alive[pid] {
+			delete(f.cpu, pid)
 		}
 	}
 }

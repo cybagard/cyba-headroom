@@ -1016,6 +1016,28 @@ func TestDockerEndpointFollowsTheCLI(t *testing.T) {
 			t.Errorf("%s: %q, want %q", flags, got, want)
 		}
 	}
+	// CONTAINER_HOST is podman's: docker ignores it, alone or beside its own
+	// selectors (measured, #285).
+	for _, c := range []struct {
+		name, current, flags string
+		env                  map[string]string
+		want                 string
+	}{
+		{"CONTAINER_HOST alone", "", "", nil, "unix:///var/run/docker.sock"},
+		{"CONTAINER_HOST, DOCKER_HOST", "", "", map[string]string{"DOCKER_HOST": "unix:///x.sock"}, "unix:///x.sock"},
+		{"CONTAINER_HOST, -H", "", "-H unix:///y.sock", nil, "unix:///y.sock"},
+		{"CONTAINER_HOST, --context", "", "--context desktop-linux", nil, "unix:///Users/dev/.docker/run/docker.sock"},
+		{"CONTAINER_HOST, a current context", "desktop-linux", "", nil, "unix:///Users/dev/.docker/run/docker.sock"},
+	} {
+		use(c.current)
+		env = map[string]string{"DOCKER_CONFIG": dir, "CONTAINER_HOST": "tcp://203.0.113.5:2375"}
+		for k, v := range c.env {
+			env[k] = v
+		}
+		if got := dockerEndpointIn(get, shim.Parse("docker", strings.Fields(c.flags+" run alpine"))); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
 }
 
 // A bare host:port is -H's, not a context's (a context name has no ':'):
@@ -1104,10 +1126,11 @@ const (
 // one that file does not have is unknown.
 func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 	const (
-		remote  = podmanFar
-		machine = podmanMachine
-		url     = "tcp://198.51.100.8:8080"
-		host    = "tcp://198.51.100.9:8080"
+		remote     = podmanFar
+		machine    = podmanMachine
+		url        = "tcp://198.51.100.8:8080"
+		host       = "tcp://198.51.100.9:8080"
+		dockerHost = "tcp://203.0.113.6:2375"
 	)
 	dir, err := os.MkdirTemp("/tmp", "hr")
 	if err != nil {
@@ -1154,6 +1177,13 @@ func TestPodmanEndpointFollowsTheCLI(t *testing.T) {
 		{"--context over CONTAINER_HOST", "--context remote-a", map[string]string{"CONTAINER_HOST": machine}, remote},
 		{"--context over CONTAINER_CONNECTION", "--context remote-a", map[string]string{"CONTAINER_CONNECTION": "podman-machine-default"}, remote},
 		{"-c after -H", "-H " + machine + " -c remote-a", nil, remote},
+		// DOCKER_HOST is docker's: podman ignores it, alone or beside its
+		// own selectors (measured, #285).
+		{"DOCKER_HOST alone", "", map[string]string{"DOCKER_HOST": dockerHost}, machine},
+		{"DOCKER_HOST, CONTAINER_HOST", "", map[string]string{"DOCKER_HOST": dockerHost, "CONTAINER_HOST": host}, host},
+		{"DOCKER_HOST, --url", "--url " + url, map[string]string{"DOCKER_HOST": dockerHost}, url},
+		{"DOCKER_HOST, -c", "-c remote-a", map[string]string{"DOCKER_HOST": dockerHost}, remote},
+		{"DOCKER_HOST, CONTAINER_CONNECTION", "", map[string]string{"DOCKER_HOST": dockerHost, "CONTAINER_CONNECTION": "remote-a"}, remote},
 	} {
 		env := map[string]string{"PODMAN_CONNECTIONS_CONF": conf}
 		for k, v := range c.env {

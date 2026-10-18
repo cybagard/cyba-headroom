@@ -121,6 +121,18 @@ func TestFootprintFromVMProcess(t *testing.T) {
 	}
 }
 
+func TestCPUFromVMProcess(t *testing.T) {
+	cpu := 275.0
+	vms := fakeVMs{
+		{PID: 10, Kind: vmproc.Docker, FootprintBytes: 3 << 30},
+		{PID: 20, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 4350000000, CPUPercent: &cpu},
+	}
+	got := collect(t, tart.New(runningCLI(), fakeProcs{}, vms, home))
+	if vm := got.VMs[0]; vm.CPUPercent == nil || *vm.CPUPercent != 275 {
+		t.Fatalf("cpu = %v, want the headroom-mac process's", vm.CPUPercent)
+	}
+}
+
 type brokenVMs struct{}
 
 func (brokenVMs) List(context.Context) ([]vmproc.VM, error) { return nil, errors.New("lsof failed") }

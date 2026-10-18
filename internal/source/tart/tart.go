@@ -94,14 +94,14 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 
 	// VM processes and launch details are optional: on failure, report the
 	// VMs without them rather than failing the reading.
-	footprint := map[string]uint64{}
+	procOf := map[string]vmproc.VM{}
 	procs, err := s.vms.List(ctx)
 	if err != nil {
 		t.VMError = err.Error()
 	}
 	for _, p := range procs {
 		if p.Kind == vmproc.Tart {
-			footprint[p.Name] = p.FootprintBytes
+			procOf[p.Name] = p
 		}
 	}
 	launches, err := s.launches(ctx, running)
@@ -126,8 +126,8 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 			}
 		}
 		vm := protocol.TartVM{Name: v.Name, OS: cfg.OS, CPUs: cfg.CPU, MemoryBytes: cfg.Memory << 20}
-		if fp, ok := footprint[v.Name]; ok {
-			vm.FootprintBytes = &fp
+		if p, ok := procOf[v.Name]; ok {
+			vm.FootprintBytes, vm.CPUPercent = &p.FootprintBytes, p.CPUPercent
 		}
 		if l, ok := launches[v.Name]; ok {
 			vm.RunPID, vm.RunPIDs, vm.LaunchCwd, vm.SharedDirs = l.pid, l.pids, l.cwd, l.dirs

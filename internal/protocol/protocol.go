@@ -546,6 +546,10 @@ type TartVM struct {
 	// (phys_footprint); absent if its process was not found (e.g. booting),
 	// which means unknown, not free.
 	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	// CPUPercent is the VM process's CPU use since the previous reading,
+	// 100 = one core; absent on its first reading or if it could not be
+	// read.
+	CPUPercent *float64 `json:"cpu_percent,omitempty"`
 
 	// How the VM was launched, for attribution (R3). tart run changes its own
 	// cwd to the VM bundle, so the launching shell is its parent.

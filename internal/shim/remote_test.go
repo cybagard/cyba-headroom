@@ -335,6 +335,25 @@ func TestTheSSHAskedIsTheOneOnTheCallsPath(t *testing.T) {
 	}
 }
 
+// An ssh on PATH that leaves a child holding its stdout is not waited for
+// past resolveTimeout (#256, #277).
+func TestASlowSSHWrapperIsNotWaitedFor(t *testing.T) {
+	resolving(t, map[string]string{"box": "203.0.113.5"})
+	dir := t.TempDir()
+	script := "#!/bin/sh\nsleep 3\necho 'hostname 203.0.113.5'\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	getenv := func(k string) string { return map[string]string{"PATH": dir}[k] }
+	start := time.Now()
+	if Remote("docker", "ssh://u@box", getenv) {
+		t.Error("a host ssh -G names too late is remote, want this Mac's")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the shim waited %v for ssh -G, want about 200ms", took)
+	}
+}
+
 // podman dials either the URL's own host or the hostname ssh -G gives for
 // it, as its connections file goes, so it is remote only when both are;
 // proxies are ignored. docker dials ssh -G's

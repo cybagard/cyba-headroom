@@ -47,12 +47,15 @@ func Remote(client, endpoint string, getenv func(string) string) bool {
 }
 
 // sshConfig runs "ssh args…" with the ssh at path, "" when there is none,
-// and returns what it prints; a test replaces it.
+// and returns what it prints; a test replaces it. A child that inherits
+// stdout is not waited for past WaitDelay (#277).
 var sshConfig = func(ctx context.Context, path string, args ...string) ([]byte, error) {
 	if path == "" {
 		return nil, exec.ErrNotFound
 	}
-	return exec.CommandContext(ctx, path, args...).Output()
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.WaitDelay = 50 * time.Millisecond
+	return cmd.Output()
 }
 
 // sshDialed is the hostname "ssh -G" gives for an ssh:// endpoint's host,

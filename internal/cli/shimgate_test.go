@@ -2186,6 +2186,7 @@ func TestTheCallsOwnEngineDecidesWhetherItIsGated(t *testing.T) {
 		"a bare local -H":         {"-H", "localhost:2375", "run", "alpine"},
 	} {
 		r := newShimRig(t)
+		r.fakeSSH()
 		r.ask = allow
 		if err := os.MkdirAll(filepath.Join(r.dir, "dc"), 0o700); err != nil {
 			t.Fatal(err)
@@ -2333,6 +2334,7 @@ func TestAnEmptyHostIsThisMacs(t *testing.T) {
 		{"-H=", "run", "-l", "dev.headroom.lease=x", "alpine"},
 	} {
 		r := newShimRig(t)
+		r.fakeSSH()
 		r.ask = allow
 		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"), "DOCKER_HOST=ssh://dev@build.example")
 		code, _ := r.run(append([]string{"docker"}, args...)...)
@@ -2355,6 +2357,7 @@ func TestABareHostNameIsTCP(t *testing.T) {
 		{[]string{"-H", "203.0.113.5", "run", "alpine"}, false},
 	} {
 		r := newShimRig(t)
+		r.fakeSSH()
 		r.ask = allow
 		dc := filepath.Join(r.dir, "dc")
 		for _, ctx := range []string{"localhost", "203.0.113.5"} {
@@ -2475,6 +2478,7 @@ func TestPodmanCallsAreGatedByTheEnginePodmanPicks(t *testing.T) {
 // does: it runs as a docker CLI plugin, under the CLI's global options.
 func TestComposeReadsItsContextFromTheCallsConfig(t *testing.T) {
 	r := newShimRig(t)
+	r.fakeSSH()
 	r.ask = allow
 	for dir, host := range map[string]string{"a": "ssh://dev@build.example", "b": "unix:///var/run/docker.sock"} {
 		sum := sha256.Sum256([]byte("foo"))

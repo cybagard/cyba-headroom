@@ -5,8 +5,11 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/cybagard/cyba-headroom/internal/binpath"
 )
 
 // Remote reports whether a container call goes to an engine on another
@@ -15,13 +18,83 @@ import (
 // contexts, connections and variables already resolved by the caller; ""
 // is not remote. Podman machine's ssh://…@127.0.0.1 counts as local, and so
 // does any host thisMac finds here. The host is the one the client dials
-// (see dialed).
-func Remote(endpoint string) bool {
+// (see dialed), by client, "docker" or "podman": on ssh://, the one the
+// config of the ssh on the call's PATH names (see sshDialed). podman 6.1.3
+// dials that one or the URL's own host, as its connections file goes
+// (measured), so it is remote only when both are.
+func Remote(client, endpoint string, getenv func(string) string) bool {
 	if !strings.Contains(endpoint, "://") && strings.Contains(endpoint, ":") {
 		endpoint = "tcp://" + endpoint // docker reads a bare host:port as TCP
 	}
 	host, tcp, ok := dialed(endpoint)
-	return ok && !thisMac(host, tcp)
+	if !ok {
+		return false
+	}
+	if !tcp {
+		raw := host
+		var proxied bool
+		if host, proxied, ok = sshDialed(endpoint, getenv); !ok {
+			return false // gated, rather than a local call skipped as remote
+		}
+		if client == "podman" {
+			return !thisMac(raw) && !thisMac(host)
+		}
+		if proxied {
+			return true
+		}
+	}
+	return !thisMac(host)
+}
+
+// sshConfig runs "ssh args…" with the ssh at path, "" when there is none,
+// and returns what it prints; a test replaces it. A child that inherits
+// stdout is not waited for past WaitDelay (#277).
+var sshConfig = func(ctx context.Context, path string, args ...string) ([]byte, error) {
+	if path == "" {
+		return nil, exec.ErrNotFound
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.WaitDelay = 50 * time.Millisecond
+	return cmd.Output()
+}
+
+// sshDialed is the hostname "ssh -G" gives for an ssh:// endpoint's host,
+// asked of the ssh first on the call's PATH with the user and port the
+// docker CLI hands it (see dialed), and whether a ProxyJump or ProxyCommand
+// reaches it. Both clients read this config: docker's ssh binary, proxies
+// included, and podman's Go client, which may read the account's
+// ~/.ssh/config for Hostname, Port and User but ignores proxies
+// (sshClient in podman 6.1.3's pkg/bindings/connection.go). ok is false
+// when ssh -G fails, does not answer within resolveTimeout, or names no
+// hostname.
+func sshDialed(endpoint string, getenv func(string) string) (host string, proxied, ok bool) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", false, false
+	}
+	args := []string{"-G"}
+	if user := u.User.Username(); user != "" {
+		args = append(args, "-l", user)
+	}
+	if port := u.Port(); port != "" {
+		args = append(args, "-p", port)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	defer cancel()
+	out, err := sshConfig(ctx, binpath.Search("ssh", getenv, nil, nil), append(args, "--", u.Hostname())...)
+	if err != nil {
+		return "", false, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		switch key {
+		case "hostname":
+			host = value
+		case "proxyjump", "proxycommand":
+			proxied = proxied || value != "none"
+		}
+	}
+	return host, proxied, host != ""
 }
 
 // dialed is the host the client dials for endpoint, read per scheme as the
@@ -82,8 +155,8 @@ func ownIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsUnspecified() || ownAddress(ip)
 }
 
-// thisMac reports whether host, as the client dials it (see dialed), is
-// this machine. The rule, on either scheme:
+// thisMac reports whether host, as the client dials it (see dialed and
+// sshDialed), is this machine. The rule, on either scheme:
 //
 //  1. An address is this Mac's when it is a loopback, unspecified or own
 //     address (see ownIP).
@@ -91,14 +164,14 @@ func ownIP(ip net.IP) bool {
 //     getaddrinfo and ssh do.
 //  3. localhost, host.docker.internal and this Mac's hostname are this
 //     Mac's, with or without a trailing dot or .local.
-//  4. Any other name goes to the resolver on tcp only, as the docker CLI
-//     dials it: with a net.Dialer (ConfigureTransport in
-//     docker/go-connections v0.6.0's sockets/sockets.go), so Go's resolver,
-//     which on macOS is getaddrinfo even without cgo. On ssh it is remote:
-//     the ssh binary's config may alias it.
+//  4. Any other name goes to the resolver, as the docker CLI dials it on
+//     tcp: with a net.Dialer (ConfigureTransport in docker/go-connections
+//     v0.6.0's sockets/sockets.go), so Go's resolver, which on macOS is
+//     getaddrinfo even without cgo. On ssh, ssh resolves it with
+//     getaddrinfo, and podman with Go's resolver.
 //
 // A host the resolver does not answer within resolveTimeout is this Mac's.
-func thisMac(host string, tcp bool) bool {
+func thisMac(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ownIP(ip)
 	}
@@ -111,9 +184,6 @@ func thisMac(host string, tcp bool) bool {
 	}
 	if me, err := os.Hostname(); err == nil && name == strings.TrimSuffix(strings.ToLower(me), ".local") {
 		return true
-	}
-	if !tcp {
-		return false
 	}
 	return resolvesHere(host)
 }

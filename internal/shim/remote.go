@@ -19,7 +19,9 @@ import (
 // is not remote. Podman machine's ssh://…@127.0.0.1 counts as local, and so
 // does any host thisMac finds here. The host is the one the client dials
 // (see dialed), by client, "docker" or "podman": on ssh://, the one the
-// config of the ssh on the call's PATH names (see sshDialed).
+// config of the ssh on the call's PATH names (see sshDialed). podman 6.1.3
+// dials that one or the URL's own host, as its connections file goes
+// (measured), so it is remote only when both are.
 func Remote(client, endpoint string, getenv func(string) string) bool {
 	if !strings.Contains(endpoint, "://") && strings.Contains(endpoint, ":") {
 		endpoint = "tcp://" + endpoint // docker reads a bare host:port as TCP
@@ -29,11 +31,15 @@ func Remote(client, endpoint string, getenv func(string) string) bool {
 		return false
 	}
 	if !tcp {
+		raw := host
 		var proxied bool
 		if host, proxied, ok = sshDialed(endpoint, getenv); !ok {
 			return false // gated, rather than a local call skipped as remote
 		}
-		if proxied && client != "podman" {
+		if client == "podman" {
+			return !thisMac(raw) && !thisMac(host)
+		}
+		if proxied {
 			return true
 		}
 	}
@@ -52,11 +58,12 @@ var sshConfig = func(ctx context.Context, path string, args ...string) ([]byte, 
 // sshDialed is the hostname "ssh -G" gives for an ssh:// endpoint's host,
 // asked of the ssh first on the call's PATH with the user and port the
 // docker CLI hands it (see dialed), and whether a ProxyJump or ProxyCommand
-// reaches it. Both clients read this config: docker's ssh binary, proxies included, and podman's Go
-// client, which reads the account's ~/.ssh/config for Hostname, Port and
-// User but ignores proxies (sshClient in podman 6.1.3's
-// pkg/bindings/connection.go). ok is false when ssh -G fails, does not
-// answer within resolveTimeout, or names no hostname.
+// reaches it. Both clients read this config: docker's ssh binary, proxies
+// included, and podman's Go client, which may read the account's
+// ~/.ssh/config for Hostname, Port and User but ignores proxies
+// (sshClient in podman 6.1.3's pkg/bindings/connection.go). ok is false
+// when ssh -G fails, does not answer within resolveTimeout, or names no
+// hostname.
 func sshDialed(endpoint string, getenv func(string) string) (host string, proxied, ok bool) {
 	u, err := url.Parse(endpoint)
 	if err != nil {

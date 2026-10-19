@@ -197,9 +197,13 @@ func TestANumericHostIsResolvedOnEitherScheme(t *testing.T) {
 // An ssh host is the hostname "ssh -G" gives for it, resolved as a tcp host
 // is, for either client: an alias for this Mac, or a name that resolves to
 // it, is this Mac's; one for another machine is remote; and when ssh -G or
-// the resolver fails, the call is gated (#256).
+// the resolver fails, the call is gated (#256). The far aliases' own names
+// resolve away too, as podman may dial them.
 func TestAnSSHHostIsTheOneSSHConfigNames(t *testing.T) {
-	resolving(t, map[string]string{"lo-name": "127.0.0.1", "far-name": "203.0.113.5", "lan-name": lanAddress()})
+	resolving(t, map[string]string{
+		"lo-name": "127.0.0.1", "far-name": "203.0.113.5", "lan-name": lanAddress(),
+		"far-alias": "203.0.113.8", "name-alias": "203.0.113.8",
+	})
 	sshConfigs(t, map[string]string{
 		"lo-alias":   "user dev\nhostname 127.0.0.1\nport 22\n",
 		"far-alias":  "user dev\nhostname 192.0.2.1\nport 22\n",
@@ -281,10 +285,9 @@ func TestASlowSSHConfigIsThisMacs(t *testing.T) {
 }
 
 // docker's ssh honours ProxyJump and ProxyCommand, so a host reached
-// through one is remote whatever its hostname; podman ignores both and
-// dials the hostname (#256).
+// through one is remote whatever its hostname; podman ignores both (#256).
 func TestAProxiedSSHHostIsRemoteForDockerOnly(t *testing.T) {
-	resolving(t, nil)
+	resolving(t, map[string]string{"far-jump": "203.0.113.7"})
 	sshConfigs(t, map[string]string{
 		"jump":     "hostname 127.0.0.1\nproxyusefdpass no\nproxyjump hop\n",
 		"command":  "hostname 127.0.0.1\nproxyusefdpass no\nproxycommand nc %h %p\n",
@@ -315,7 +318,7 @@ func TestAProxiedSSHHostIsRemoteForDockerOnly(t *testing.T) {
 func TestTheSSHAskedIsTheOneOnTheCallsPath(t *testing.T) {
 	resolving(t, nil)
 	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'hostname 203.0.113.5'\n"
+	script := "#!/bin/sh\necho 'hostname 127.0.0.1'\n"
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -323,11 +326,45 @@ func TestTheSSHAskedIsTheOneOnTheCallsPath(t *testing.T) {
 		return func(k string) string { return map[string]string{"PATH": p}[k] }
 	}
 	for _, client := range []string{"docker", "podman"} {
-		if !Remote(client, "ssh://dev@lo-alias", path(dir)) {
-			t.Errorf("%s: the ssh on PATH names 203.0.113.5, want remote", client)
+		if Remote(client, "ssh://dev@203.0.113.5", path(dir)) {
+			t.Errorf("%s: the ssh on PATH names 127.0.0.1, want this Mac's", client)
 		}
 		if Remote(client, "ssh://dev@203.0.113.5", path(t.TempDir())) {
 			t.Errorf("%s: no ssh on PATH, want this Mac's", client)
+		}
+	}
+}
+
+// podman dials either the URL's own host or the hostname ssh -G gives for
+// it, as its connections file goes, so it is remote only when both are;
+// proxies are ignored. docker dials ssh -G's
+// hostname (#256, plan amendment 2).
+func TestAPodmanSSHHostIsRemoteOnlyWhenBothHostsAre(t *testing.T) {
+	resolving(t, map[string]string{
+		"lo-alias": "203.0.113.5", "here-alias": "127.0.0.1",
+		"far-both": "203.0.113.6", "far-jump": "203.0.113.7",
+	})
+	sshConfigs(t, map[string]string{
+		"lo-alias":   "hostname 127.0.0.1\n",
+		"here-alias": "hostname 192.0.2.1\n",
+		"far-both":   "hostname 192.0.2.2\n",
+		"far-jump":   "hostname 192.0.2.3\nproxyjump hop\n",
+	})
+	for _, c := range []struct {
+		host           string
+		docker, podman bool
+	}{
+		{"lo-alias", false, false},  // alias local, raw name remote
+		{"here-alias", true, false}, // alias remote, raw name this Mac's
+		{"far-both", true, true},
+		{"far-jump", true, true},
+	} {
+		endpoint := "ssh://u@" + c.host
+		if got := Remote("docker", endpoint, os.Getenv); got != c.docker {
+			t.Errorf("docker: Remote(%q) = %v, want %v", endpoint, got, c.docker)
+		}
+		if got := Remote("podman", endpoint, os.Getenv); got != c.podman {
+			t.Errorf("podman: Remote(%q) = %v, want %v", endpoint, got, c.podman)
 		}
 	}
 }

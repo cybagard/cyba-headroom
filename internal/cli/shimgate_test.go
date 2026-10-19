@@ -78,7 +78,12 @@ func newShimRig(t testing.TB) *shimRig {
 func (r *shimRig) fakeSSH() {
 	r.t.Helper()
 	script := "#!/bin/sh\nfor a; do h=$a; done\ncase $h in build-box|build.example) h=203.0.113.9 ;; esac\necho \"hostname $h\"\n"
-	if err := os.WriteFile(filepath.Join(r.dir, "ssh"), []byte(script), 0o755); err != nil {
+	path := filepath.Join(r.dir, "ssh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		r.t.Fatal(err)
+	}
+	// macOS's first run of a new script can exceed the shim's resolveTimeout.
+	if err := exec.Command(path, "-G", "--", "x").Run(); err != nil {
 		r.t.Fatal(err)
 	}
 }

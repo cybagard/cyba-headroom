@@ -4,6 +4,7 @@ package shim
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 			t.Errorf("%s resolves to %v, want a loopback address", host, addrs)
 		}
 	}
-	if Remote("tcp://127.1:2375") {
+	if Remote("docker", "tcp://127.1:2375", os.Getenv) {
 		t.Error("tcp://127.1:2375 is remote, want this Mac's")
 	}
 }
@@ -36,9 +37,9 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 // names none) and dialed through the system resolver; ssh:// as docker's
 // connhelper hands it to ssh ("ssh -p PORT -- HOST", HOST being
 // url.Hostname) and ssh resolves it. Each row's reach is what docker 29.8.1
-// dialed, or what "ssh -G" and "ssh -v" connected to, on macOS 27. A
-// number goes to the resolver on either scheme; a name is resolved on
-// tcp:// only, so an ssh name stays remote (#118).
+// dialed, or what "ssh -G" and "ssh -v" connected to, on macOS 27. The
+// host goes to the resolver on either scheme (#118), on ssh:// the hostname
+// ssh -G gives for it (#256).
 func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
 	for _, c := range []struct {
 		endpoint string
@@ -93,10 +94,9 @@ func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
 		{"ssh://core@203.0.113.7:2222", false, "203.0.113.7"},
 		{"ssh://core@localhost:2222", true, "the loopback"},
 		{"ssh://core@localhost.:2222", true, "the loopback"},
-		{"ssh://dev@build-box", false, "build-box, which ssh's config may alias"},
-		{"ssh://dev@no-such-box.invalid", false, "a name, not resolved"},
+		{"ssh://dev@no-such-box.invalid", true, "nothing: an unresolved name is gated"},
 	} {
-		if got := Remote(c.endpoint); got == c.thisMac {
+		if got := Remote("docker", c.endpoint, os.Getenv); got == c.thisMac {
 			t.Errorf("Remote(%q) = %v, want %v: the client reaches %s", c.endpoint, got, !c.thisMac, c.reaches)
 		}
 	}

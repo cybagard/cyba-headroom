@@ -130,11 +130,11 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// the call names.
 	case name == "docker":
 		engine = dockerEndpointIn(getenv, c)
-		remote = engine != "" && shim.Remote(engine)
+		remote = engine != "" && shim.Remote("docker", engine, getenv)
 	default:
 		env, _ := e.envOf()
 		engine = podmanEndpointIn(lookupIn(env), c)
-		remote = engine != "" && shim.Remote(engine)
+		remote = engine != "" && shim.Remote("podman", engine, getenv)
 	}
 	if remote {
 		return gated{proceed: true}

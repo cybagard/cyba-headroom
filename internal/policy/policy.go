@@ -487,7 +487,8 @@ func worktreeUse(s *protocol.Snapshot, id string) (uint64, []Held) {
 // idle reports whether the worktree's agents have all been out of the
 // working state for longer than the grace period. Orca's state lags: the
 // agent making a call may only just have been marked done or waiting while
-// its tool shell still runs. Unknown agents are never called idle.
+// its tool shell still runs. Unknown agents, and an agent whose state time
+// is unknown, are never called idle.
 func idle(s *protocol.Snapshot, id string, c Config) bool {
 	if s.Orca == nil {
 		return false
@@ -497,7 +498,7 @@ func idle(s *protocol.Snapshot, id string, c Config) bool {
 			continue
 		}
 		for _, a := range w.Agents {
-			if a.State == "working" || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
+			if a.State == "working" || a.StateSince.IsZero() || (c.Now != nil && c.Now().Sub(a.StateSince) < c.IdleGrace) {
 				return false
 			}
 		}

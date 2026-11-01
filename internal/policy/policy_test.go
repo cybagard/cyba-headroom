@@ -1,6 +1,7 @@
 package policy_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,16 @@ func TestIdleHolderWaitsOutOrcasLag(t *testing.T) {
 	s := snap()
 	s.Orca.Worktrees[1].Agents[0].StateSince = now.Add(-30 * time.Second)
 	if d := policy.Decide(req("idle", gib), s, cfg); !d.Allow {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestAnUnknownStateTimeIsNotIdle(t *testing.T) {
+	// Done since an unknown time (#272): it may have just finished, so it is
+	// not an idle holder.
+	s := snap()
+	s.Orca.Worktrees[1].Agents[0].StateSince = time.Time{}
+	if d := policy.Decide(req("idle", gib), s, cfg); !d.Allow || slices.Contains(code(d), policy.IdleHolder) {
 		t.Fatalf("decision = %+v", d)
 	}
 }

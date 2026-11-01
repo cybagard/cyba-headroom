@@ -146,9 +146,9 @@ func TestAHolderWithNoAgentsIsIdle(t *testing.T) {
 	}
 }
 
-// The idle-holder rule keeps its own idea of idle (#24); the slot message
-// only offers stopping a holder whose idle time is known, and never a name
-// that reads as a flag.
+// The slot message only offers stopping a holder whose idle time is known,
+// and never a name that reads as a flag; the idle-holder rule calls an
+// unknown idle time not idle either (#272).
 func TestStopOfferNeedsAKnownIdleTimeAndASafeName(t *testing.T) {
 	s := slotSnap()
 	s.Tart.VMs[1].Name, s.Attribution.Worktrees[1].TartVMs[0].Name = "-x", "-x"
@@ -157,8 +157,8 @@ func TestStopOfferNeedsAKnownIdleTimeAndASafeName(t *testing.T) {
 	}
 	s = slotSnap()
 	s.Orca.Worktrees[1].Agents[0].StateSince = time.Time{}
-	if d := policy.Decide(req("idle", gib), s, slotCfg); d.Allow || d.Reasons[0].Code != policy.IdleHolder {
-		t.Fatalf("the idle-holder rule changed: %+v", d)
+	if d := policy.Decide(req("idle", gib), s, slotCfg); !d.Allow {
+		t.Fatalf("idle time unknown, yet an idle holder: %+v", d)
 	}
 }
 

@@ -19,7 +19,8 @@ import (
 // is not remote. Podman machine's ssh://…@127.0.0.1 counts as local, and so
 // does any host thisMac finds here. The host is the one the client dials
 // (see dialed), by client, "docker" or "podman": on ssh://, the one the
-// config of the ssh on the call's PATH names (see sshDialed). podman 6.1.3
+// ssh config names (see sshDialed), for docker that of the ssh on the
+// call's PATH, for podman the account's ~/.ssh/config. podman 6.1.3
 // dials that one or the URL's own host, as its connections file goes
 // (measured), so it is remote only when both are.
 func Remote(client, endpoint string, getenv func(string) string) bool {
@@ -133,7 +134,8 @@ func dialed(endpoint string) (host string, tcp, ok bool) {
 // lookupIP resolves a host name; a test replaces it.
 var lookupIP = net.DefaultResolver.LookupIPAddr
 
-// resolveTimeout bounds how long a call waits for lookupIP.
+// resolveTimeout bounds how long a call waits for lookupIP, and for ssh -G
+// (see sshDialed).
 const resolveTimeout = 200 * time.Millisecond
 
 // ownAddress reports whether ip is one of this machine's interface addresses.

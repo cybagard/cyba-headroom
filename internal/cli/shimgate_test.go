@@ -31,7 +31,7 @@ import (
 // would exec.
 type shimRig struct {
 	t        testing.TB
-	dir      string // PATH dir with fake docker and tart, and the config dir
+	dir      string // PATH dir with fake docker, podman, tart and ssh, and the config dir
 	env      []string
 	ask      func(protocol.CheckRequest) (*protocol.Decision, error)
 	asked    []protocol.CheckRequest
@@ -68,24 +68,46 @@ func newShimRig(t testing.TB) *shimRig {
 			t.Fatal(err)
 		}
 	}
+	ssh, err := warmSSH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(ssh, filepath.Join(dir, "ssh")); err != nil {
+		t.Fatal(err)
+	}
 	return &shimRig{t: t, dir: dir, env: []string{"PATH=" + dir, "HEADROOM_CONFIG_DIR=" + dir}, now: time.Unix(1e9, 0), sleepFor: 2 * time.Second}
 }
 
-// fakeSSH puts an ssh first on the rig's PATH whose "ssh -G" names
-// 203.0.113.9 for the remote fixtures build-box and build.example, and any
-// other host as itself, so the shim reads a remote ssh host without the real
-// ssh, its config or DNS (#256).
-func (r *shimRig) fakeSSH() {
-	r.t.Helper()
+// warmSSH writes, once per test process, the ssh each rig links in: its
+// "ssh -G" names 203.0.113.9 for the remote fixtures build-box and
+// build.example, and any other host as itself, so the shim reads an ssh
+// host without the real ssh, its config or DNS (#256), and no gate test
+// passes only because ssh was missing (#306). macOS's first run of a new
+// script can exceed the shim's resolveTimeout, so the copy is run once
+// here; a hard link shares that warmed file, a fresh copy would not.
+var warmSSH = sync.OnceValues(func() (string, error) {
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		return "", err
+	}
+	sshDir = dir
 	script := "#!/bin/sh\nfor a; do h=$a; done\ncase $h in build-box|build.example) h=203.0.113.9 ;; esac\necho \"hostname $h\"\n"
-	path := filepath.Join(r.dir, "ssh")
+	path := filepath.Join(dir, "ssh")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		r.t.Fatal(err)
+		return "", err
 	}
-	// macOS's first run of a new script can exceed the shim's resolveTimeout.
-	if err := exec.Command(path, "-G", "--", "x").Run(); err != nil {
-		r.t.Fatal(err)
+	return path, exec.Command(path, "-G", "--", "x").Run()
+})
+
+// sshDir holds warmSSH's copy, removed after the package's tests.
+var sshDir string
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sshDir != "" {
+		_ = os.RemoveAll(sshDir)
 	}
+	os.Exit(code)
 }
 
 func (r *shimRig) run(argv ...string) (code int, stderr string) {
@@ -244,7 +266,6 @@ func TestShimGateDoesNotAsk(t *testing.T) {
 		"a remote engine by flag":    {[]string{"docker", "-H", "tcp://10.0.0.5:2376", "run", "alpine"}, nil},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.env = append(r.env, c.env...)
 		r.ask = func(protocol.CheckRequest) (*protocol.Decision, error) {
 			t.Errorf("%s: asked the daemon", name)
@@ -2216,7 +2237,6 @@ func TestTheCallsOwnEngineDecidesWhetherItIsGated(t *testing.T) {
 		"a bare local -H":         {"-H", "localhost:2375", "run", "alpine"},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		if err := os.MkdirAll(filepath.Join(r.dir, "dc"), 0o700); err != nil {
 			t.Fatal(err)
@@ -2250,7 +2270,6 @@ func TestTheEngineFollowsTheCLIAtTheGate(t *testing.T) {
 		"the default context's DOCKER_HOST": {[]string{"--context", "default"}, []string{"DOCKER_HOST=ssh://dev@build.example"}, false},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		dc := filepath.Join(r.dir, "dc")
 		for ctx, host := range map[string]string{"local": "unix:///var/run/docker.sock", "remote": "ssh://dev@build.example"} {
@@ -2318,7 +2337,6 @@ func TestARemoteContextMaySetTheLeaseLabel(t *testing.T) {
 		{"--context", "builder", "run", "-l", "dev.headroom.lease=x", "alpine"},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		sum := sha256.Sum256([]byte("builder"))
 		meta := filepath.Join(r.dir, "dc", "contexts", "meta", hex.EncodeToString(sum[:]))
@@ -2364,7 +2382,6 @@ func TestAnEmptyHostIsThisMacs(t *testing.T) {
 		{"-H=", "run", "-l", "dev.headroom.lease=x", "alpine"},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		r.env = append(r.env, "DOCKER_CONFIG="+filepath.Join(r.dir, "dc"), "DOCKER_HOST=ssh://dev@build.example")
 		code, _ := r.run(append([]string{"docker"}, args...)...)
@@ -2387,7 +2404,6 @@ func TestABareHostNameIsTCP(t *testing.T) {
 		{[]string{"-H", "203.0.113.5", "run", "alpine"}, false},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		dc := filepath.Join(r.dir, "dc")
 		for _, ctx := range []string{"localhost", "203.0.113.5"} {
@@ -2472,7 +2488,6 @@ func TestPodmanCallsAreGatedByTheEnginePodmanPicks(t *testing.T) {
 		"-c remote-a after the machine's -H":           {args: []string{"-H", machine, "-c", "remote-a"}, gated: false},
 	} {
 		r := newShimRig(t)
-		r.fakeSSH()
 		r.ask = allow
 		r.env = append(r.env, c.env...)
 		conf, body := filepath.Join(r.dir, "podman-connections.json"), podmanConnections(c.def)
@@ -2508,7 +2523,6 @@ func TestPodmanCallsAreGatedByTheEnginePodmanPicks(t *testing.T) {
 // does: it runs as a docker CLI plugin, under the CLI's global options.
 func TestComposeReadsItsContextFromTheCallsConfig(t *testing.T) {
 	r := newShimRig(t)
-	r.fakeSSH()
 	r.ask = allow
 	for dir, host := range map[string]string{"a": "ssh://dev@build.example", "b": "unix:///var/run/docker.sock"} {
 		sum := sha256.Sum256([]byte("foo"))

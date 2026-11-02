@@ -22,7 +22,7 @@ Admission control for a fleet of parallel coding agents on one Mac.
 
 headroom shows what each coding agent costs in Docker and Tart, and what LM Studio and Ollama reserve on the host. It shows one row for each Orca worktree in which agents work. headroom needs [Orca](https://github.com/stablyai/orca) to find each worktree.
 
-headroom also gates the containers and VMs that an agent in an Orca worktree starts through `docker`, `podman` or `tart`. Before a call starts something, headroom checks that the call fits in the memory budget. If it does not fit, headroom stops the call and tells the agent what it can reuse or stop.
+headroom also gates the calls through its `docker`, `podman` and `tart` shims that start a container or VM on this Mac. It allows such a call, denies it, or with `BUDGET_WAIT=1` makes it wait: see [Gate](#gate). A call that it cannot check runs, with a warning.
 
 ## Install
 
@@ -33,7 +33,7 @@ brew install cybagard/tap/headroom
 brew services start headroom
 ```
 
-The service starts the daemon now and at login, and puts the shims in `~/.config/headroom/shims`. In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`, for example:
+The service starts the daemon now and at login, and puts the shims in the shim directory (by default `~/.config/headroom/shims`). In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`, for example:
 
 ```sh
 headroom run -- claude
@@ -41,7 +41,7 @@ headroom run -- claude
 
 If Orca does not find `headroom`, use the full path, `/opt/homebrew/bin/headroom run -- <agent>`.
 
-Do not also run `headroom install`. To upgrade, run `brew upgrade cybagard/tap/headroom`, then `brew services restart headroom`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then `rm -rf ~/.config/headroom/shims`.
+Do not also run `headroom install`. To upgrade, run `brew upgrade cybagard/tap/headroom`, then `brew services restart headroom`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then remove the shim directory (by default `rm -rf ~/.config/headroom/shims`).
 
 ### Install from the release tarball
 
@@ -83,13 +83,13 @@ The view shows the headroom figure (host memory minus reserved memory) and the m
 
 ### Gate
 
-`brew services start headroom` or `headroom install` puts the shims (`docker`, `podman` and `tart`) in `~/.config/headroom/shims`. Launch each agent with the shims first on PATH. A call from outside an Orca worktree is not gated.
+`brew services start headroom` or `headroom install` puts the shims (`docker`, `podman` and `tart`) in the shim directory (by default `~/.config/headroom/shims`). Launch each agent with the shims first on PATH. A call from outside an Orca worktree is not gated.
 
 ```sh
 headroom run -- claude
 ```
 
-In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`. With the release tarball, use the line that `install` prints for each agent. An agent that already runs keeps its old PATH until you restart it.
+In Orca, open Settings → Agents and set the command of each agent to `headroom run -- <agent>`. With the release tarball, `install` prints this command for each of `claude`, `codex`, `kilo`, `opencode`, `gemini`, `goose` and `amp` that it finds on its PATH, if it could link the shims. An agent that already runs keeps its old PATH until you restart it.
 
 Each gated call gets one of these verdicts:
 
@@ -103,7 +103,7 @@ To check a shell, run `headroom doctor` in it. Each line marks a check as passed
 
 ## Configuration
 
-The config file is `~/.config/headroom/config.toml`. `headroom config` prints each setting that is in effect. `headroom suggest` suggests values from the recorded samples.
+The config directory is `$HEADROOM_CONFIG_DIR`, else `$XDG_CONFIG_HOME/headroom`, else `~/.config/headroom`. The config file is `config.toml` in it, and the shim directory is `shims` in it unless `shim_dir` sets another. `headroom config` prints the path of the config file and its settings over the defaults. The daemon reads the config file only when it starts: to apply a change, run `brew services restart headroom`, or with the release tarball, `headroom install` again. `headroom suggest` suggests values from the recorded samples.
 
 `min_headroom_gb`, `per_worktree_cap_gb` and `host_baseline_gb` keep the default 0 after the baseline run ([docs/baseline.md](docs/baseline.md)): the margin and the baseline wait on [#311](https://github.com/cybagard/cyba-headroom/issues/311), and the cap the run suggests, 7 GB, would deny a single 16 GB Tart VM. A value of 0 means no margin, no cap and no baseline. The example below uses example values, not defaults:
 

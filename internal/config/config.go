@@ -24,7 +24,8 @@ const FileName = "config.toml"
 const maxSocketPath = 103
 
 // Config is the full set of user settings. Zero thresholds mean "not enforced":
-// defaults are set from the Phase 2 observe baseline (#23), not guessed here.
+// defaults are set from the Phase 2 observe baseline (docs/baseline.md), not
+// guessed here.
 type Config struct {
 	// Dir is the directory the config was resolved from. Not read from the file.
 	Dir string `toml:"-"`
@@ -224,13 +225,15 @@ func Defaults(dir string) Config {
 		Daemon: Daemon{
 			Interval:      Duration{5 * time.Second},
 			SourceTimeout: Duration{3 * time.Second},
-			TrendWindow:   Duration{5 * time.Minute},
+			TrendWindow:   Duration{5 * time.Minute}, // docs/baseline.md, "Trend"
 		},
 		Policy: Policy{
 			LeaseTimeout:  Duration{2 * time.Minute},
 			DaemonTimeout: Duration{500 * time.Millisecond},
 			WaitTimeout:   Duration{10 * time.Minute},
-			// Calibrated from the baseline run (#63).
+			// Checked against the baseline run (docs/baseline.md).
+			// MinHeadroomGB waits on #311; PerWorktreeCapGB stays unset because
+			// a 7 GB cap would deny one 16 GB Tart VM (docs/baseline.md).
 			PressureGuard:       "critical",
 			PressureGuardRising: true,
 			DefaultContainerGB:  1,
@@ -238,8 +241,15 @@ func Defaults(dir string) Config {
 			IdleGrace:           Duration{2 * time.Minute},
 		},
 		// Overheads measured in spike #9, #16, docs/spikes/ollama.md and
-		// docs/spikes/podman.md; #23 refines them.
-		Budget:  Budget{DockerOverheadGB: 1.6, PodmanOverheadGB: 1.0, LMStudioIdleGB: 0.6, OllamaIdleGB: 0.1, MaxMacOSVMs: 2},
+		// docs/spikes/podman.md, checked against the baseline run
+		// (docs/baseline.md). HostBaselineGB stays unset until #311.
+		Budget: Budget{
+			DockerOverheadGB: 1.6, // suggest's 21.1 is the VM's high-water mark (#310)
+			PodmanOverheadGB: 1.0,
+			LMStudioIdleGB:   0.7, // p95 with no model loaded, docs/baseline.md
+			OllamaIdleGB:     0.1,
+			MaxMacOSVMs:      2,
+		},
 		Samples: Samples{Enabled: true, Retention: Duration{30 * 24 * time.Hour}},
 	}
 }

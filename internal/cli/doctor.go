@@ -144,6 +144,9 @@ func daemonFinding(home, socket string, err error, ping func() (int, error), age
 			return finding{mark: warn, name: "daemon", detail: fmt.Sprintf("running at %s, LaunchAgent unknown: whether %s runs it: %s", socket, whose, oneLine(lerr))}
 		case runsDaemon(pid, running):
 			manager = fmt.Sprintf("under %s LaunchAgent (%s)", whose, how)
+		case running == 0:
+			// Its daemon exits on this daemon's lock, and launchd restarts it.
+			return finding{mark: warn, name: "daemon", detail: fmt.Sprintf("running at %s, %s; %s LaunchAgent is installed but not running", socket, manager, whose)}
 		default:
 			manager += fmt.Sprintf("; %s LaunchAgent is installed but does not run this daemon", whose)
 		}

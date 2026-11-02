@@ -615,8 +615,10 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 		// A daemon in a terminal, beside the installed agent's (#316).
 		"by hand, headroom's installed": {plists: []string{"headroom"}, pid: daemon, running: map[string]int{"headroom": other}, mark: "✓",
 			subs: []string{"started by hand (pid 4242)", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "under headroom's"},
-		"by hand, headroom's not running": {plists: []string{"headroom"}, pid: daemon, mark: "✓",
-			subs: []string{"started by hand (pid 4242)", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "under headroom's"},
+		// launchd runs no process for the agent: it crash-loops on the
+		// socket this daemon holds.
+		"by hand, headroom's not running": {plists: []string{"headroom"}, pid: daemon, mark: "!",
+			subs: []string{"started by hand (pid 4242)", "headroom's LaunchAgent is installed but not running"}, forbidden: "under headroom's"},
 		"by hand, homebrew's installed": {plists: []string{"homebrew"}, pid: daemon, running: map[string]int{"homebrew": other}, mark: "✓",
 			subs: []string{"started by hand (pid 4242)", "Homebrew's LaunchAgent is installed but does not run this daemon"}, forbidden: "under Homebrew's"},
 		"by hand, legacy installed": {plists: []string{"legacy"}, pid: daemon, running: map[string]int{"legacy": other}, mark: "✓",
@@ -625,8 +627,8 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 		// launchd runs the agent, as install says.
 		"no pid, headroom's running": {plists: []string{"headroom"}, running: map[string]int{"headroom": other}, mark: "✓", subs: []string{"under headroom's LaunchAgent (headroom install)"}},
 		"no pid, homebrew's running": {plists: []string{"homebrew"}, running: map[string]int{"homebrew": other}, mark: "✓", subs: []string{"under Homebrew's LaunchAgent (brew services)"}},
-		"no pid, headroom's stopped": {plists: []string{"headroom"}, mark: "✓",
-			subs: []string{"started by hand", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "pid 0"},
+		"no pid, headroom's stopped": {plists: []string{"headroom"}, mark: "!",
+			subs: []string{"started by hand", "headroom's LaunchAgent is installed but not running"}, forbidden: "pid 0"},
 		"no pid, none": {mark: "✓", subs: []string{"started by hand"}, forbidden: "pid 0"},
 		// Unknown is never a match.
 		"launchctl fails": {plists: []string{"headroom"}, pid: daemon, launchErr: errors.New("exit 1: boom"), mark: "!",

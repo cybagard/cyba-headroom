@@ -6,7 +6,7 @@
 
 Admission control for a fleet of parallel coding agents on one Mac.
 
-**Status:** v0.1.0 is a pre-release. All `v0.*` releases are pre-releases.
+**Status:** v0.2.0 is a pre-release. All `v0.*` releases are pre-releases.
 
 ## Table of contents
 
@@ -99,13 +99,13 @@ Each gated call gets one of these verdicts:
 
 If the daemon is down, each call runs and shows a warning. A login shell (`zsh -l`) puts the real `docker` first on PATH, so its calls are not gated.
 
-To check a shell, run `headroom doctor` in it. Each line tells you what to fix.
+To check a shell, run `headroom doctor` in it. Each line marks a check as passed (`✓`), a warning (`!`) or failed (`✗`).
 
 ## Configuration
 
 The config file is `~/.config/headroom/config.toml`. `headroom config` prints each setting that is in effect. `headroom suggest` suggests values from the recorded samples.
 
-`min_headroom_gb`, `per_worktree_cap_gb` and `host_baseline_gb` have the default 0 until the baseline run in [#63](https://github.com/cybagard/cyba-headroom/issues/63) sets them. A value of 0 means no margin, no cap and no baseline. The example below uses example values, not defaults:
+`min_headroom_gb`, `per_worktree_cap_gb` and `host_baseline_gb` keep the default 0 after the baseline run ([docs/baseline.md](docs/baseline.md)): the margin and the baseline wait on [#311](https://github.com/cybagard/cyba-headroom/issues/311), and the cap the run suggests, 7 GB, would deny a single 16 GB Tart VM. A value of 0 means no margin, no cap and no baseline. The example below uses example values, not defaults:
 
 ```toml
 [policy]

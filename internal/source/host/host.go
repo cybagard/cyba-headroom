@@ -24,7 +24,7 @@ type Sysctl interface {
 const minTrendSpan = time.Minute
 
 // steadySlope is the |free %/min| below which pressure counts as steady.
-// A starting guess; calibrate from the #23 baseline.
+// Checked against the baseline run's warn onsets (docs/baseline.md).
 const steadySlope = 1.0
 
 // Source is the host memory source. It keeps state between samples, so the

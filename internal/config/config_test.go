@@ -195,8 +195,8 @@ func write(t *testing.T, dir, body string) {
 
 func TestBudgetParams(t *testing.T) {
 	d := Defaults("/x").Budget
-	if d.DockerOverheadGB != 1.6 || d.PodmanOverheadGB != 1.0 || d.LMStudioIdleGB != 0.6 || d.OllamaIdleGB != 0.1 || d.HostBaselineGB != 0 {
-		t.Fatalf("defaults = %+v, want docker 1.6, podman 1.0, lmstudio 0.6, ollama 0.1, baseline 0 (set by #23)", d)
+	if d.DockerOverheadGB != 1.6 || d.PodmanOverheadGB != 1.0 || d.LMStudioIdleGB != 0.7 || d.OllamaIdleGB != 0.1 || d.HostBaselineGB != 0 {
+		t.Fatalf("defaults = %+v, want docker 1.6, podman 1.0, lmstudio 0.7, ollama 0.1, baseline 0 (docs/baseline.md)", d)
 	}
 	p := Budget{HostBaselineGB: 10, DockerOverheadGB: 1.5, PodmanOverheadGB: 0.75, LMStudioIdleGB: 0.25, OllamaIdleGB: 0.5}.Params()
 	if p.HostBaselineBytes != 10<<30 || p.DockerOverheadBytes != 3<<29 || p.PodmanOverheadBytes != 3<<28 || p.LMStudioIdleBytes != 1<<28 || p.OllamaIdleBytes != 1<<29 {
@@ -238,7 +238,7 @@ func TestSamplesSettings(t *testing.T) {
 func TestPolicyConfig(t *testing.T) {
 	d := Defaults("/x").Policy
 	if d.PressureGuard != "critical" || !d.PressureGuardRising || d.DefaultContainerGB != 1 || d.DefaultTartGB != 4 ||
-		d.IdleGrace.Duration != 2*time.Minute {
+		d.IdleGrace.Duration != 2*time.Minute || d.MinHeadroomGB != 0 || d.PerWorktreeCapGB != 0 {
 		t.Fatalf("defaults = %+v", d)
 	}
 	p := Config{Policy: Policy{MinHeadroomGB: 6, PerWorktreeCapGB: 12, PressureGuard: "warn", DefaultContainerGB: 0.5,

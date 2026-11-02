@@ -107,6 +107,7 @@ func TestReplayOfASampleWithoutOllama(t *testing.T) {
 func TestMinHeadroomFromWarnOnsets(t *testing.T) {
 	onset := map[int]uint64{100: 10, 200: 11, 300: 12, 400: 13}
 	ss := threeDays(func(s *samples.Sample, i int) {
+		s.Engines = desktopVM(0, 0) // running throughout: no VM start
 		if fp, ok := onset[i]; ok {
 			s.Host.Pressure, s.Host.FreePercent = "warn", 38
 			s.Engines = desktopVM(0, fp*gib)

@@ -39,6 +39,7 @@ const (
 	minWorkingDays    = 3
 	minWorkingPerDay  = time.Hour
 	minDockerTime     = time.Hour
+	minDockerStarts   = 10
 	minLMIdleTime     = 10 * time.Minute
 	minOllamaIdleTime = 10 * time.Minute
 	minWarnOnsets     = 3
@@ -94,7 +95,7 @@ type Aggregator struct {
 
 	unaccounted     []float64
 	stale, swapping int
-	// Docker VM footprint − containers while the VM ran.
+	// Docker VM footprint − containers at the first sample of each VM start.
 	dockerExtra []float64
 	// LM Studio's footprint with no model loaded.
 	lmIdle []float64
@@ -149,6 +150,7 @@ var budgetSources = []string{"host", "docker", "tart", "podman", "vms", "lmstudi
 // Add takes one sample.
 func (a *Aggregator) Add(s samples.Sample) {
 	onset := a.onset(s)
+	vmStart := a.dockerStart(s)
 	dt := a.weight(s)
 	a.prev = &s
 	day := a.day(s.T)
@@ -218,7 +220,9 @@ func (a *Aggregator) Add(s samples.Sample) {
 		for _, c := range d.Containers {
 			payload += c.MemoryBytes
 		}
-		a.dockerExtra = append(a.dockerExtra, max(float64(d.VMFootprintBytes)-float64(payload), 0))
+		if vmStart {
+			a.dockerExtra = append(a.dockerExtra, max(float64(d.VMFootprintBytes)-float64(payload), 0))
+		}
 	}
 	if l := s.LMStudio; l != nil && len(l.Models) == 0 && l.FootprintBytes != nil {
 		a.lmIdle = append(a.lmIdle, float64(*l.FootprintBytes))
@@ -249,6 +253,20 @@ func desktop(engines []samples.Engine) *samples.Engine {
 		}
 	}
 	return nil
+}
+
+// running reports whether s's Docker Desktop VM runs.
+func running(s samples.Sample) bool {
+	d := desktop(s.Engines)
+	return d != nil && d.Running && d.VMRunning
+}
+
+// dockerStart reports whether s is the first sample of a Docker Desktop VM
+// start: the VM runs, and in the previous sample it did not. As with onsets,
+// only a sample right after the previous one counts.
+func (a *Aggregator) dockerStart(s samples.Sample) bool {
+	p := a.prev
+	return p != nil && a.contiguous(*p, s) && running(s) && !running(*p)
 }
 
 // onset reports whether pressure rose with s: "warn" when it left normal,
@@ -560,16 +578,17 @@ func (a *Aggregator) perWorktreeCap() Value {
 }
 
 // dockerOverhead is the p95 of what the Docker VM costs beyond its
-// containers: guest kernel, dockerd, page cache from image pulls.
+// containers when it starts: guest kernel and dockerd, before page cache
+// from builds and pulls grows it to its high-water mark.
 func (a *Aggregator) dockerOverhead() Value {
 	v := Value{Section: "budget", Key: "docker_overhead_gb"}
-	if have := a.dockerSpan.Round(time.Minute); have < minDockerTime {
-		v.Why = fmt.Sprintf("not enough data: the Docker VM ran for %s of working time, need %s", have, minDockerTime)
+	if n := len(a.dockerExtra); n < minDockerStarts {
+		v.Why = fmt.Sprintf("not enough data: %d Docker VM starts while agents worked, need %d", n, minDockerStarts)
 		return v
 	}
 	p50, p95, top := dist(a.dockerExtra)
 	v.OK, v.GB = true, roundUp(p95, 0.1)
-	v.Rule = fmt.Sprintf("p95 of Docker VM footprint − containers while agents worked (%d samples; p50 %.1f, p95 %.1f, max %.1f GB)",
+	v.Rule = fmt.Sprintf("p95 of Docker VM footprint − containers at the first sample of each Docker VM start while agents worked (%d starts; p50 %.1f, p95 %.1f, max %.1f GB)",
 		len(a.dockerExtra), p50, p95, top)
 	return v
 }

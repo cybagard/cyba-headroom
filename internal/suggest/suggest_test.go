@@ -145,25 +145,64 @@ func TestStaleOllamaIsLeftOut(t *testing.T) {
 	}
 }
 
-func TestDockerOverhead(t *testing.T) {
-	ss := threeDays(func(s *samples.Sample, i int) {
-		s.Engines = desktopVM(31*gib, 4*gib, samples.Container{Name: "db", MemoryBytes: 2*gib + gib/2})
-		if i%50 == 0 { // image pull: page cache spikes
-			s.Engines[0].VMFootprintBytes = 6 * gib
-		}
+// A Docker VM that sits at its high-water mark (page cache from builds and
+// pulls) for hours says nothing about what it costs when it starts.
+func TestDockerOverheadIgnoresTheHighWaterMark(t *testing.T) {
+	ss := threeDays(func(s *samples.Sample, _ int) {
+		s.Engines = desktopVM(21*gib, 20*gib, samples.Container{Name: "db", MemoryBytes: gib / 2})
 	})
-	v := value(t, aggregate(ss), "docker_overhead_gb")
-	// Footprint − containers = 1.5 GiB (3.5 GiB 2% of the time): p95 = 1.5.
-	if !v.OK || v.GB != 1.5 || !strings.Contains(v.Rule, "p50 1.5") || !strings.Contains(v.Rule, "max 3.5") {
+	if v := value(t, aggregate(ss), "docker_overhead_gb"); v.OK || !strings.Contains(v.Why, "not enough data") {
 		t.Fatalf("docker overhead = %+v", v)
 	}
-	// Under an hour of the VM running is not enough.
-	short := threeDays(func(s *samples.Sample, i int) {
-		if i < 200 { // 3 × 200 samples = 50 min
-			s.Engines = desktopVM(0, 4*gib)
+}
+
+// vmStarts is threeDays with the Docker VM started perDay times a day. Each
+// start's first sample has overhead(k) beyond a 0.5 GiB container, k
+// counting starts; after it the VM grows to its 20 GiB high-water mark.
+func vmStarts(perDay int, overhead func(k int) uint64) []samples.Sample {
+	return threeDays(func(s *samples.Sample, i int) {
+		cycle, j := i/200, i%200
+		db := samples.Container{Name: "db", MemoryBytes: gib / 2}
+		s.Engines = desktopVM(21*gib, 20*gib, db)
+		switch {
+		case cycle >= perDay || j < 10: // stopped by Resource Saver
+			s.Engines[0].VMRunning, s.Engines[0].VMFootprintBytes = false, 0
+		case j == 10:
+			k := s.T.Sub(day0).Hours() / 24 // day index, then cycle
+			s.Engines[0].VMFootprintBytes = overhead(int(k)*perDay+cycle) + db.MemoryBytes
 		}
 	})
-	if v := value(t, aggregate(short), "docker_overhead_gb"); v.OK || !strings.Contains(v.Why, "not enough data") {
+}
+
+func TestDockerOverheadIsP95AtVMStarts(t *testing.T) {
+	// 21 starts at 1.0, 1.1, … 3.0 GiB of overhead: p95 is the 20th, 2.9.
+	v := value(t, aggregate(vmStarts(7, func(k int) uint64 { return gib + uint64(k)*gib/10 })), "docker_overhead_gb")
+	if !v.OK || v.GB != 2.9 || !strings.Contains(v.Rule, "first sample of each Docker VM start") || !strings.Contains(v.Rule, "21 starts") {
+		t.Fatalf("docker overhead = %+v", v)
+	}
+}
+
+func TestDockerOverheadNeedsTenStarts(t *testing.T) {
+	// 3 days × 3 starts = 9.
+	v := value(t, aggregate(vmStarts(3, func(int) uint64 { return gib })), "docker_overhead_gb")
+	if v.OK || !strings.Contains(v.Why, "not enough data") || !strings.Contains(v.Why, "9 Docker VM starts") || !strings.Contains(v.Why, "need 10") {
+		t.Fatalf("docker overhead = %+v", v)
+	}
+}
+
+// After a gap in sampling, such as sleep, the VM may have run all along.
+func TestDockerVMRunningAfterAGapIsNotAStart(t *testing.T) {
+	ss := vmStarts(3, func(int) uint64 { return gib }) // 9 starts
+	stopped := sample(day0.AddDate(0, 0, 3).Add(9*time.Hour), []string{"working"}, 5*gib)
+	stopped.Engines = desktopVM(21*gib, 0)
+	stopped.Engines[0].VMRunning = false
+	ss = append(ss, stopped)
+	ss = append(ss, series(stopped.T.Add(10*time.Minute), 10, func(_ int, at time.Time) samples.Sample {
+		s := sample(at, []string{"working"}, 5*gib)
+		s.Engines = desktopVM(21*gib, 20*gib)
+		return s
+	})...)
+	if v := value(t, aggregate(ss), "docker_overhead_gb"); v.OK || !strings.Contains(v.Why, "9 Docker VM starts") {
 		t.Fatalf("docker overhead = %+v", v)
 	}
 }
@@ -305,9 +344,7 @@ func TestConcurrencyAdvice(t *testing.T) {
 
 func TestValuesHaveNoFloatNoise(t *testing.T) {
 	// 1.63 GiB of overhead rounds up to 1.7, which 17 × 0.1 gets wrong.
-	ss := threeDays(func(s *samples.Sample, _ int) {
-		s.Engines = desktopVM(0, gib*163/100)
-	})
+	ss := vmStarts(4, func(int) uint64 { return gib * 163 / 100 })
 	if v := value(t, aggregate(ss), "docker_overhead_gb"); v.GB != 1.7 || fmt.Sprint(v.GB) != "1.7" {
 		t.Fatalf("docker overhead = %v", v.GB)
 	}

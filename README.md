@@ -94,10 +94,10 @@ In Orca, open Settings → Agents and set the command of each agent to `headroom
 Each gated call gets one of these verdicts:
 
 - **Allowed:** the call runs as usual.
-- **Denied:** the call exits 75 and tells the agent what it can reuse or stop.
-- **Waiting:** with `BUDGET_WAIT=1`, the call waits for room or for a macOS VM slot, when waiting can help. Waiting calls are served first come first. The default limit is 10 minutes.
+- **Denied:** the call exits 75 and gives the reason, and the containers and VMs that the worktree holds, if any. If waiting can help, it tells the agent to retry later or to use `BUDGET_WAIT=1`. If not, it tells the agent to reuse or stop what the worktree holds, or to ask for less memory; if the config allows no macOS VMs, it tells the agent to set `budget.max_macos_vms`.
+- **Waiting:** with `BUDGET_WAIT=1`, the call waits for room, for a macOS VM slot or for the memory pressure to decrease, when waiting can help. Waiting calls are served first come first. The default limit is 10 minutes.
 
-If the daemon is down, each call runs and shows a warning. A login shell (`zsh -l`) can put the real tools first on PATH; then its calls are not gated. The `login` line of `headroom doctor` checks it.
+If the daemon is down, each call runs and shows a warning. A login shell (`zsh -l`) can put the real tools first on PATH, or replace them with an alias or function; then its calls are not gated. The `login` line of `headroom doctor` checks a login shell of your `$SHELL`, or of `/bin/zsh` if `$SHELL` is not zsh, bash, sh, ksh or dash.
 
 To check a shell, run `headroom doctor` in it. Each line marks a check as passed (`✓`), a warning (`!`) or failed (`✗`).
 

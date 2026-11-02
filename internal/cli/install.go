@@ -35,6 +35,23 @@ type agentControl interface {
 	PID(ctx context.Context) (int, error)
 }
 
+// launchdAgent is the LaunchAgent label in this user's GUI domain.
+func launchdAgent(label string) launchd.Agent {
+	return launchd.Agent{Label: label, UID: os.Getuid(), Run: launchd.Exec{}}
+}
+
+// pingDaemon returns the PID of the daemon answering on cfg's socket.
+func pingDaemon(cfg config.Config) (int, error) {
+	return client.Ping(context.Background(), cfg.Socket, cfg.Policy.DaemonTimeout.Duration)
+}
+
+// runsDaemon reports whether the agent launchd runs as agentPID (0: not
+// running) is the daemon that answered as pid. A daemon from before #22
+// reports no PID: it is the agent's if launchd runs the agent.
+func runsDaemon(pid, agentPID int) bool {
+	return agentPID != 0 && (pid == agentPID || pid == 0)
+}
+
 // logPaths are the daemon's log directory, its log and its crash log, shared
 // by install and logs.
 func logPaths(home string) (dir, log, crash string) {
@@ -130,10 +147,7 @@ func (in *installer) install(ctx context.Context) int {
 		if err != nil {
 			return in.fail(err)
 		}
-		// A daemon from before #22 reports no PID: it is ours if launchd
-		// runs the agent.
-		ours := agentPID != 0 && (pid == agentPID || pid == 0)
-		if !ours {
+		if !runsDaemon(pid, agentPID) {
 			who := "a daemon outside launchd"
 			if pid != 0 {
 				who = fmt.Sprintf("a daemon outside launchd (pid %d)", pid)
@@ -625,7 +639,7 @@ func newInstaller(e Env, bin string, uninstall bool) (*installer, error) {
 	}
 	return &installer{
 		home: home, exe: exe, bin: bin, binGiven: binGiven,
-		agent:  launchd.Agent{Label: agentLabel, UID: os.Getuid(), Run: launchd.Exec{}},
+		agent:  launchdAgent(agentLabel),
 		socket: cfg.Socket,
 		ping: func(ctx context.Context) (int, error) {
 			return client.Ping(ctx, cfg.Socket, cfg.Policy.DaemonTimeout.Duration)

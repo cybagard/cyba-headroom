@@ -86,40 +86,69 @@ func doctor(e Env) []finding {
 	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks, self))
 
 	snap, serr := h.status(cfg)
-	out = append(out, daemonFinding(e.Getenv("HOME"), cfg.Socket, serr))
+	out = append(out, daemonFinding(e.Getenv("HOME"), cfg.Socket, serr,
+		func() (int, error) { return h.ping(cfg) }, h.agentPID))
 
 	out = append(out, identityFinding(e.Getenv, h, snap))
 	return append(out, <-login)
 }
 
 // daemonFinding says whether the daemon answers on socket (err is why not),
-// and which LaunchAgent runs it: headroom's or Homebrew's (#185).
-func daemonFinding(home, socket string, err error) finding {
-	exists := func(p string) bool { _, err := os.Stat(p); return home != "" && err == nil }
-	ours, brew := exists(agentPlist(home)), home != "" && brewPlist(home) != ""
+// and which LaunchAgent runs it: headroom's or Homebrew's (#185), if launchd
+// runs that agent as the daemon that answered (#316), the rule install
+// applies. ping returns the daemon's PID; agentPID, launchd's for a label.
+func daemonFinding(home, socket string, err error, ping func() (int, error), agentPID func(label string) (int, error)) finding {
+	ours, brewFile := false, ""
+	if home != "" {
+		_, serr := os.Stat(agentPlist(home))
+		ours, brewFile = serr == nil, brewPlist(home)
+	}
+	brew := brewFile != ""
 	// headroom install refuses while Homebrew's agent is there.
 	start := "`headroom install`"
 	if brew {
 		start = "`brew services start headroom`"
 	}
-	manager := "no LaunchAgent (started by hand)"
-	switch {
-	case ours && brew:
-		manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`)"
-	case brew:
-		manager = "under Homebrew's LaunchAgent (brew services)"
-	case ours:
-		manager = "under headroom's LaunchAgent (headroom install)"
-	}
 	if err != nil {
+		manager := "no LaunchAgent (started by hand)"
+		switch {
+		case ours && brew:
+			manager = "both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`)"
+		case brew:
+			manager = "under Homebrew's LaunchAgent (brew services)"
+		case ours:
+			manager = "under headroom's LaunchAgent (headroom install)"
+		}
 		return finding{mark: warn, name: "daemon",
 			detail: fmt.Sprintf("not reachable at %s (%s): calls run ungated until it is back; start it with %s; %s", socket, oneLine(err), start, manager)}
 	}
-	mark := pass
 	if ours && brew {
-		mark = warn
+		return finding{mark: warn, name: "daemon", detail: fmt.Sprintf("running at %s, both headroom's and Homebrew's LaunchAgents are installed: remove one (`headroom uninstall`)", socket)}
 	}
-	return finding{mark: mark, name: "daemon", detail: fmt.Sprintf("running at %s, %s", socket, manager)}
+	manager := "started by hand"
+	pid, perr := ping()
+	if perr != nil {
+		return finding{mark: warn, name: "daemon", detail: fmt.Sprintf("running at %s, LaunchAgent unknown: asking the daemon its PID: %s", socket, oneLine(perr))}
+	}
+	if pid != 0 {
+		manager = fmt.Sprintf("started by hand (pid %d)", pid)
+	}
+	label, whose, how := agentLabel, "headroom's", "headroom install"
+	if brew {
+		label, whose, how = strings.TrimSuffix(filepath.Base(brewFile), ".plist"), "Homebrew's", "brew services"
+	}
+	if ours || brew {
+		running, lerr := agentPID(label)
+		switch {
+		case lerr != nil:
+			return finding{mark: warn, name: "daemon", detail: fmt.Sprintf("running at %s, LaunchAgent unknown: whether %s runs it: %s", socket, whose, oneLine(lerr))}
+		case runsDaemon(pid, running):
+			manager = fmt.Sprintf("under %s LaunchAgent (%s)", whose, how)
+		default:
+			manager += fmt.Sprintf("; %s LaunchAgent is installed but does not run this daemon", whose)
+		}
+	}
+	return finding{mark: pass, name: "daemon", detail: fmt.Sprintf("running at %s, %s", socket, manager)}
 }
 
 // daemonStatus asks the daemon for its snapshot. A whole snapshot takes

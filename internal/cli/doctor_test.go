@@ -24,6 +24,13 @@ type doctorRig struct {
 	loginErr               error
 	ancestors              []int
 	cwd                    string
+	// The answering daemon's PID, from ping, and each LaunchAgent's, from
+	// launchd, by label.
+	pid       int
+	pingErr   error
+	agentPIDs map[string]int
+	agentErrs map[string]error
+	asked     []string // what doctor asked: "ping", and each label
 }
 
 func newDoctorRig(t *testing.T) *doctorRig {
@@ -58,6 +65,7 @@ func newDoctorRig(t *testing.T) *doctorRig {
 	}}}
 	r.login = "docker=" + filepath.Join(r.shims, "docker") + "\npodman=" + filepath.Join(r.shims, "podman") + "\ntart=" + filepath.Join(r.shims, "tart") + "\n"
 	r.cwd = "/Users/dev/src/a"
+	r.pid = 4242
 	return r
 }
 
@@ -70,6 +78,14 @@ func (r *doctorRig) run() (int, string) {
 		fallbacks: map[string][]string{}, // only the rig's tools, not the host's
 		status: func(config.Config) (*protocol.Snapshot, error) {
 			return r.snap, r.statusErr
+		},
+		ping: func(config.Config) (int, error) {
+			r.asked = append(r.asked, "ping")
+			return r.pid, r.pingErr
+		},
+		agentPID: func(label string) (int, error) {
+			r.asked = append(r.asked, label)
+			return r.agentPIDs[label], r.agentErrs[label]
 		},
 		loginShell: func(shell string) (string, error) {
 			want := r.env["SHELL"]
@@ -495,6 +511,8 @@ func TestDoctorLoginShellRunsBesideTheStatusCall(t *testing.T) {
 				return nil, errors.New("login shell not started while the daemon was asked")
 			}
 		},
+		ping:     func(config.Config) (int, error) { return r.pid, nil },
+		agentPID: func(string) (int, error) { return 0, nil },
 		loginShell: func(string) (string, error) {
 			close(asked)
 			return r.login, nil
@@ -569,41 +587,78 @@ func TestAskLoginShellReal(t *testing.T) {
 	}
 }
 
-// Doctor names what runs the daemon: headroom's LaunchAgent or Homebrew's
-// (#185).
+// Doctor names the LaunchAgent that runs the daemon, headroom's or
+// Homebrew's (#185), only if launchd runs the daemon that answered: its
+// PID is that agent's (#316), as install checks.
 func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 	agents := map[string]string{
-		"headroom": agentLabel + ".plist",
-		"homebrew": "sh.brew.headroom.plist",
-		"legacy":   "homebrew.mxcl.headroom.plist",
+		"headroom": agentLabel,
+		"homebrew": "sh.brew.headroom",
+		"legacy":   "homebrew.mxcl.headroom",
 	}
+	const daemon, other = 4242, 977
 	for name, tc := range map[string]struct {
 		plists    []string
 		down      bool
+		pid       int            // the answering daemon's; 0 before #22
+		running   map[string]int // launchd's PID for each agent
+		launchErr error          // launchctl print fails
+		pingErr   error
 		mark      string
 		subs      []string
 		forbidden string
 	}{
-		"headroom's": {plists: []string{"headroom"}, mark: "✓", subs: []string{"headroom's LaunchAgent", "headroom install"}},
-		"homebrew's": {plists: []string{"homebrew"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
-		"legacy":     {plists: []string{"legacy"}, mark: "✓", subs: []string{"Homebrew's LaunchAgent", "brew services"}},
-		"none":       {mark: "✓", subs: []string{"no LaunchAgent"}},
+		"headroom's": {plists: []string{"headroom"}, pid: daemon, running: map[string]int{"headroom": daemon}, mark: "✓", subs: []string{"under headroom's LaunchAgent (headroom install)"}},
+		"homebrew's": {plists: []string{"homebrew"}, pid: daemon, running: map[string]int{"homebrew": daemon}, mark: "✓", subs: []string{"under Homebrew's LaunchAgent (brew services)"}},
+		"legacy":     {plists: []string{"legacy"}, pid: daemon, running: map[string]int{"legacy": daemon}, mark: "✓", subs: []string{"under Homebrew's LaunchAgent (brew services)"}},
+		"none":       {pid: daemon, mark: "✓", subs: []string{"started by hand (pid 4242)"}, forbidden: "LaunchAgent is installed"},
+		// A daemon in a terminal, beside the installed agent's (#316).
+		"by hand, headroom's installed": {plists: []string{"headroom"}, pid: daemon, running: map[string]int{"headroom": other}, mark: "✓",
+			subs: []string{"started by hand (pid 4242)", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "under headroom's"},
+		"by hand, headroom's not running": {plists: []string{"headroom"}, pid: daemon, mark: "✓",
+			subs: []string{"started by hand (pid 4242)", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "under headroom's"},
+		"by hand, homebrew's installed": {plists: []string{"homebrew"}, pid: daemon, running: map[string]int{"homebrew": other}, mark: "✓",
+			subs: []string{"started by hand (pid 4242)", "Homebrew's LaunchAgent is installed but does not run this daemon"}, forbidden: "under Homebrew's"},
+		"by hand, legacy installed": {plists: []string{"legacy"}, pid: daemon, running: map[string]int{"legacy": other}, mark: "✓",
+			subs: []string{"started by hand (pid 4242)", "Homebrew's LaunchAgent is installed but does not run this daemon"}, forbidden: "under Homebrew's"},
+		// A daemon from before #22 reports no PID: it is the agent's if
+		// launchd runs the agent, as install says.
+		"no pid, headroom's running": {plists: []string{"headroom"}, running: map[string]int{"headroom": other}, mark: "✓", subs: []string{"under headroom's LaunchAgent (headroom install)"}},
+		"no pid, homebrew's running": {plists: []string{"homebrew"}, running: map[string]int{"homebrew": other}, mark: "✓", subs: []string{"under Homebrew's LaunchAgent (brew services)"}},
+		"no pid, headroom's stopped": {plists: []string{"headroom"}, mark: "✓",
+			subs: []string{"started by hand", "headroom's LaunchAgent is installed but does not run this daemon"}, forbidden: "pid 0"},
+		"no pid, none": {mark: "✓", subs: []string{"started by hand"}, forbidden: "pid 0"},
+		// Unknown is never a match.
+		"launchctl fails": {plists: []string{"headroom"}, pid: daemon, launchErr: errors.New("exit 1: boom"), mark: "!",
+			subs: []string{"unknown", "exit 1: boom"}, forbidden: "under headroom's"},
+		"ping fails": {plists: []string{"homebrew"}, pingErr: errors.New("connection reset"), running: map[string]int{"homebrew": daemon}, mark: "!",
+			subs: []string{"unknown", "connection reset"}, forbidden: "under Homebrew's"},
 		// Homebrew's daemon runs --wait: it takes over by itself (#194).
-		"both":           {plists: []string{"headroom", "homebrew"}, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
-		"both, legacy":   {plists: []string{"headroom", "legacy"}, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
-		"homebrew's off": {plists: []string{"homebrew"}, down: true, mark: "!", subs: []string{"brew services start headroom"}, forbidden: "headroom install"},
+		"both":           {plists: []string{"headroom", "homebrew"}, pid: daemon, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
+		"both, legacy":   {plists: []string{"headroom", "legacy"}, pid: daemon, mark: "!", subs: []string{"both", "(`headroom uninstall`)"}, forbidden: "brew services restart"},
+		"homebrew's off": {plists: []string{"homebrew"}, down: true, mark: "!", subs: []string{"not reachable", "brew services start headroom", "under Homebrew's LaunchAgent"}, forbidden: "headroom install"},
+		"headroom's off": {plists: []string{"headroom"}, down: true, mark: "!", subs: []string{"not reachable", "`headroom install`", "under headroom's LaunchAgent"}},
+		"none off":       {down: true, mark: "!", subs: []string{"not reachable", "`headroom install`", "no LaunchAgent"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newDoctorRig(t)
 			r.env["HOME"] = filepath.Join(r.cfg, "home")
 			for _, p := range tc.plists {
-				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", agents[p])
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", agents[p]+".plist")
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
 					t.Fatal(err)
 				}
+			}
+			r.pid, r.pingErr = tc.pid, tc.pingErr
+			r.agentPIDs, r.agentErrs = map[string]int{}, map[string]error{}
+			for a, pid := range tc.running {
+				r.agentPIDs[agents[a]] = pid
+			}
+			for _, a := range agents {
+				r.agentErrs[a] = tc.launchErr
 			}
 			if tc.down {
 				r.snap, r.statusErr = nil, errors.New("connection refused")
@@ -612,6 +667,9 @@ func TestDoctorNamesTheDaemonsManager(t *testing.T) {
 			wantMark(t, out, "daemon", tc.mark, tc.subs...)
 			if l := doctorLine(t, out, "daemon"); tc.forbidden != "" && strings.Contains(l, tc.forbidden) {
 				t.Errorf("daemon line %q says %q", l, tc.forbidden)
+			}
+			if tc.down && len(r.asked) > 0 {
+				t.Errorf("daemon down, yet doctor asked %v", r.asked)
 			}
 		})
 	}

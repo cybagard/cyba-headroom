@@ -6,7 +6,7 @@
 
 Admission control for a fleet of parallel coding agents on one Mac.
 
-**Status:** v0.2.0 is a pre-release. All `v0.*` releases are pre-releases.
+**Status:** v0.2.1 is a pre-release. All `v0.*` releases are pre-releases.
 
 ## Table of contents
 

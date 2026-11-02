@@ -22,7 +22,7 @@ Admission control for a fleet of parallel coding agents on one Mac.
 
 headroom shows what each coding agent costs in Docker and Tart, and what LM Studio and Ollama reserve on the host. It shows one row for each Orca worktree in which agents work. headroom needs [Orca](https://github.com/stablyai/orca) to find each worktree.
 
-headroom also gates the calls through its `docker`, `podman` and `tart` shims that start a container or VM on this Mac. It allows such a call, denies it, or with `BUDGET_WAIT=1` makes it wait: see [Gate](#gate). A call that it cannot check runs, with a warning.
+headroom also gates the calls through its `docker`, `podman` and `tart` shims that start a container or VM on this Mac. It allows such a call, denies it, or with `BUDGET_WAIT=1` makes it wait: see [Gate](#gate). A call that it cannot check runs: with a warning if it cannot read the config, what the call starts or the daemon's answer, and without one if the daemon's readings are stale or the budget is unknown.
 
 ## Install
 

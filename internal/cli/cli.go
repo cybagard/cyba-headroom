@@ -79,6 +79,8 @@ type Env struct {
 	stat       func(string) (fs.FileInfo, error)                                      // os.Stat
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
+	ping       func(config.Config) (int, error)                                       // pingDaemon
+	agentPID   func(label string) (int, error)                                        // launchdAgent(label).PID
 	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
 	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
 	machineAsk func(bin string, args []string) ([]byte, error)                        // askMachine

@@ -101,6 +101,12 @@ func (e Env) withDefaults() Env {
 	if e.loginShell == nil {
 		e.loginShell = askLoginShell
 	}
+	if e.ping == nil {
+		e.ping = pingDaemon
+	}
+	if e.agentPID == nil {
+		e.agentPID = func(label string) (int, error) { return launchdAgent(label).PID(context.Background()) }
+	}
 	if e.now == nil {
 		e.now = time.Now
 	}

@@ -23,7 +23,7 @@ The LaunchAgent has recorded a sample every 5 s since 2026-10-07. Schema v2 samp
 | `[daemon] trend_window` | stays **5m** | 2 min is too noisy at the threshold, 10 min too slow; see [Trend](#trend) |
 
 - **Warn turned on at a median of 47% free (206 onsets); critical was never observed in 30 days.** The 47% is not the point at which this Mac runs short. Every warn day but one had two 16 GB Tart VMs and a 21 GB Docker VM running, with 22–29 GB in the compressor: the kernel warns as the compressor fills with idle VM pages, not as free pages run out. On 2026-10-29 LM Studio held a 29–55 GB model and free memory went down to 5%, still at warn.
-- **Swap-rate unit (#18): open.** The samples point to pages (about 16 KiB per event, against `vm.swapusage`), but the rates were never compared with `vm_stat`, so the field docs still say "unverified"; see [Swap-rate unit](#swap-rate-unit-18).
+- **Swap-rate unit (#18): open.** The samples point to pages (about 16 KiB per event, against `vm.swapusage`), but the rates were never compared with `vm_stat`, so the field docs of `SwapinsPerSec` and `SwapoutsPerSec` in `internal/protocol` still say "unverified"; see [Swap-rate unit](#swap-rate-unit-18).
 
 ## `suggest` output
 
@@ -163,7 +163,7 @@ An onset is a sample at warn after one at normal. An episode is an onset with no
 
 On every warn day but 10-29 the budget reserved about 54 GB (Docker VM 21.1 + two Tart VMs 32 + LM Studio 0.6) and counted another 10–19 GB as unaccounted: 64–73 GB on a 64 GB host, while the kernel had about half its memory free. That is #311.
 
-An episode looks the same each time: free memory sits near 90%, the two Tart VMs boot (63 of the 65 episodes began within 10 minutes of the second VM starting; the other two are 10-29's), and within about 2 minutes the compressor grows from 2–3 GB to 25–27 GB and free memory falls to about 50%. The kernel turns warn there and flips between warn and normal while free memory hovers at 46–50%. Free memory then recovers: in the 30 minutes after each episode's onset it never went below 37%.
+An episode looks the same each time: free memory sits near 90%, the two Tart VMs boot (63 of the 65 episodes began within 10 minutes of the second VM starting; the other two are 10-29's), and within about 2 minutes the compressor grows from 2–3 GB to 25–27 GB and free memory falls to about 50%. The kernel turns warn there and flips between warn and normal while free memory hovers at 46–50%. Free memory then recovers: in the 30 minutes after each of the 63 Tart episodes' onsets it never went below 36% (10-17); the two 10-29 episodes reached 5% and 11%.
 
 ## Reading
 
@@ -171,14 +171,14 @@ An episode looks the same each time: free memory sits near 90%, the two Tart VMs
 
 - **`lmstudio_idle_gb` 0.7:** LM Studio with no model loaded, p50 0.6, p95 0.7, max 1.4 GB. The same in both windows.
 - **`docker_overhead_gb` 21.1 (not taken):** the Docker VM's limit is 20.5 GiB, and it sat at 21.1 GB footprint on most days whatever ran in it: Docker Desktop keeps the VM's high-water mark until Resource Saver stops it. The rule "footprint − containers" learns that mark. The budget reserves `max(overhead + containers, footprint)` already, so the spike value stays (#310).
-- **`host_baseline_gb` 23 and `min_headroom_gb` 1 (not taken):** both come from unaccounted memory, which at warn included 25–29 GB of compressor. With the suggested budget, headroom at warn onsets replays to −12.8 GB, so the floor `suggest` reports is just its margin (#311).
+- **`host_baseline_gb` 23 and `min_headroom_gb` 1 (not taken):** both come from unaccounted memory, which at warn included 22–29 GB of compressor (see the onset table). With the suggested budget, headroom at warn onsets replays to −12.8 GB, so the floor `suggest` reports is just its margin (#311).
 - **`per_worktree_cap_gb` 7 (not taken):** p95 of per-worktree daily peaks is 4.9 GB, but a worktree running two 16 GB Tart VMs peaked at 38.9 GB. The 14-day window, with no Tart VMs at all, tops out at 6.3 GB.
 
 ### Odd things
 
 - **2026-10-30 is missing.** The last sample on 10-29 is at 21:53 and the next on 10-31 at 11:10, a minute after the Mac booted (`kern.boottime`): the Mac was down, not the daemon.
 - **Short days** (10-14, 10-16, 10-17, 10-21 to 10-24, 10-27, 10-31) are the Mac asleep, not a stalled daemon: their samples spread from just after midnight to just before it, in short bursts with gaps of about 20 minutes between them (one of 17.5 hours on 10-24), as the Mac wakes for maintenance. 10-31 starts at the boot. On 10-23 every sample marks `lmstudio` and `orca` stale. 10-25 has 25 hours: the clocks went back.
-- **Warn stopped after 10-18** because the Tart VMs did. No Tart VM ran after 10-18; with only the Docker VM, LM Studio and agents, the compressor peaked at 8 GB and free memory stayed at 77% or above.
+- **Warn stopped after 10-18** because the Tart VMs did. After 10-18 a Tart VM ran only once, a 4 GB one for 10 minutes on 10-19 (07:52–08:02); apart from 10-29, with only the Docker VM, LM Studio and agents, the compressor peaked at 8 GB and free memory stayed at 77% or above.
 - **The 10-29 onsets had no agents working.** LM Studio had one model loaded, its footprint 29–55 GB, while the Docker VM was stopped or small and no Tart VM ran. Free memory went down to 5% and swap to 4.5 GB, and pressure stayed at warn: the only onsets where free pages, not compressed VMs, ran short.
 - **Critical was never observed.** Not even at 5% free on 10-29.
 - **Warn's median free % (47%) is an artefact of compressed VMs.** It records where the compressor filled with two 16 GB Tart VMs' idle pages, not a level at which this Mac runs out of memory. Use it as the warn threshold of this Mac with VMs running, not as a floor for the budget.
@@ -189,7 +189,7 @@ An episode looks the same each time: free memory sits near 90%, the two Tart VMs
 
 `pressure_guard_rising` (deny at warn while the trend is rising) stays true, because the run cannot settle it. #24 asked how often warn plus rising preceded critical. The answer is never, but critical never happened at all, so there is no case to show whether it predicts critical or not. What the run does show is its cost on this Mac:
 
-- 65 warn episodes, none followed by critical; in the 30 minutes after each onset free memory stayed at 37% or above, and on 10-29 it reached 5% and stayed at warn.
+- 65 warn episodes, none followed by critical; in the 30 minutes after each onset free memory stayed at 36% or above apart from 10-29, where it reached 5% and stayed at warn.
 - At warn, 79% of samples read rising, because the 5-minute window still holds the drop that caused warn. Free memory then rose a median of 19 points over the next 5 minutes (11 points for the warn samples that did not read rising).
 - With the gate on, it would have denied for about 7 hours of the 535 minutes at warn, nearly all of it during the compressed-VM warn of #311; only 32 of the 6,420 warn samples saw swap-outs.
 
@@ -229,7 +229,7 @@ The samples from before the reboot still say what the unit probably is. 4,675 sa
 | swap-outs (swap used grows) | 11 | 79,830 | 16,439 | 12,743–24,476 |
 | swap-ins (swap used shrinks) | 107 | 192,151 | 16,251 | 10,224–25,418 |
 
-(Samples with more than 500 events and no event the other way.) That is one event per 16 KiB page, the host's page size (`hw.pagesize` 16384). Swap used shrinks in 8 MB steps, which explains the spread. The field docs (`internal/protocol` `SwapinsPerSec`, `internal/samples`) keep "unverified" until a swap on the host is compared with `vm_stat`.
+(Samples with more than 500 events and no event the other way.) That is one event per 16 KiB page, the host's page size (`hw.pagesize` 16384). Swap used shrinks in 8 MB steps, which explains the spread. The field docs of `SwapinsPerSec` and `SwapoutsPerSec` (`internal/protocol/protocol.go`) keep "unverified" until a swap on the host is compared with `vm_stat`.
 
 ## Method
 

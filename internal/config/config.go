@@ -232,7 +232,8 @@ func Defaults(dir string) Config {
 			DaemonTimeout: Duration{500 * time.Millisecond},
 			WaitTimeout:   Duration{10 * time.Minute},
 			// Checked against the baseline run (docs/baseline.md).
-			// MinHeadroomGB and PerWorktreeCapGB stay unset: #311.
+			// MinHeadroomGB waits on #311; PerWorktreeCapGB stays unset because
+			// a 7 GB cap would deny one 16 GB Tart VM (docs/baseline.md).
 			PressureGuard:       "critical",
 			PressureGuardRising: true,
 			DefaultContainerGB:  1,

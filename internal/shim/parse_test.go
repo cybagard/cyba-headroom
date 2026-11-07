@@ -112,39 +112,6 @@ func TestParse(t *testing.T) {
 		{"docker compose up web --help", Call{}},
 		{"docker compose run web echo --dry-run", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
 		{"docker compose up -d --dry-run", Call{}},
-		// docker-compose is docker compose, with fewer of docker's globals (#266).
-		{"docker-compose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"a.yml"}, ComposeDetached: true}},
-		{"docker-compose -H tcp://h:1 --context c -D up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true, Context: "c"}},
-		{"docker-compose --host=tcp://h:1 --log-level debug --tls --tlsverify --debug up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true}},
-		{"docker-compose -H=tcp://h:1 --context=c --log-level=info up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true, Context: "c"}},
-		{"docker-compose -p proj run web", Call{Kind: "compose", Op: "run", Command: "docker compose run", Target: "proj"}},
-		// Docker's options anywhere in the leading run of options, up to a
-		// compose option with a separate value (#266 plan amendment 1).
-		{"docker-compose --compatibility -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
-		{"docker-compose --dry-run=false -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
-		{"docker-compose --dry-run -H unix:///var/run/docker.sock up", Call{}},
-		{"docker-compose --project-name=x -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "x", Host: "unix:///var/run/docker.sock", HasHost: true}},
-		{"docker-compose --ansi=never --host=unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
-		{"docker-compose --profile=a --context nope up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Context: "nope"}},
-		{"docker-compose -D --compatibility -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
-		{"docker-compose -fc.yml -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"c.yml"}, Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
-		{"docker-compose -pproj -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
-		{"docker-compose -fc.yml -D up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"c.yml"}, ComposeDetached: true}},
-		{"docker-compose -p x -H unix:///var/run/docker.sock up", Call{}},
-		{"docker-compose -f c.yml -H unix:///var/run/docker.sock up", Call{}},
-		{"docker-compose -c x up", Call{}},
-		{"docker-compose --config x up", Call{}},
-		{"docker-compose -l info up", Call{}},
-		{"docker-compose --tlscacert ca.pem up", Call{}},
-		{"docker-compose -Htcp://h:1 up", Call{}},
-		{"docker-compose -DH tcp://h:1 up", Call{}},
-		{"docker-compose --tls=false up", Call{}},
-		{"docker-compose -f a.yml -H h up", Call{}},
-		{"docker-compose -v", Call{}},
-		{"docker-compose -v up", Call{}},
-		{"docker-compose --version", Call{}},
-		{"docker-compose down", Call{}},
-		{"docker-compose", Call{}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -247,6 +214,76 @@ func TestParse(t *testing.T) {
 		argv := strings.Fields(c.argv)
 		if got := Parse(argv[0], argv[1:]); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.argv, got, c.want)
+		}
+	}
+}
+
+// docker-compose is docker compose with fewer of docker's options, which it
+// reads anywhere in its leading run of options: every row measured on the
+// real v5.6.1 (#266: the plan, its amendment 1 and review rounds 2 and 3).
+// A call it fails on gives Call{}, or is gated: never a wrong allow.
+func TestDockerComposeLeadingRun(t *testing.T) {
+	const sock = "unix:///var/run/docker.sock"
+	type want struct {
+		compose               bool
+		host, context, target string
+		files                 []string
+	}
+	up := func(host, context string) want { return want{compose: true, host: host, context: context} }
+	for _, tc := range []struct {
+		argv string
+		want want
+	}{
+		// The plan's table.
+		{"-f a.yml up -d", want{compose: true, files: []string{"a.yml"}}},
+		{"-p proj run web", want{compose: true, target: "proj"}},
+		{"-H S up -d", up(sock, "")},
+		{"--context c up -d", up("", "c")},
+		{"-H S --context c -D up -d", up(sock, "c")},
+		{"--host=S --log-level debug --tls --tlsverify --debug up -d", up(sock, "")},
+		{"-H=S --context=c --log-level=info up -d", up(sock, "c")},
+		{"-c x up -d", want{}},
+		{"--config x up -d", want{}},
+		{"-l info up -d", want{}},
+		{"--tlscacert ca.pem up -d", want{}},
+		{"-HS up -d", want{}},
+		{"-DH S up -d", want{}},
+		{"--tls=false up -d", want{}},
+		{"-f a.yml -H S up -d", want{}},
+		{"-v", want{}},
+		{"-v up -d", want{}},
+		{"--version", want{}},
+		{"down", want{}},
+		{"", want{}},
+		// Amendment 1.
+		{"--compatibility -H S up -d", up(sock, "")},
+		{"--dry-run -H S up -d", want{}}, // a dry run starts nothing
+		{"--dry-run=false -H S up -d", up(sock, "")},
+		{"--project-name=x -H S up -d", want{compose: true, host: sock, target: "x"}},
+		{"--ansi=never --host=S up -d", up(sock, "")},
+		{"--profile=a --context nope up -d", up("", "nope")},
+		{"-D --compatibility -H S up -d", up(sock, "")},
+		{"-p x -H S up -d", want{}},
+		{"-f c.yml -H S up -d", want{}},
+		// Round 2: a shorthand's joined value.
+		{"-fc.yml -H S up -d", want{compose: true, host: sock, files: []string{"c.yml"}}},
+		{"-pproj -H S up -d", want{compose: true, host: sock, target: "proj"}},
+		{"-fc.yml -D up -d", want{compose: true, files: []string{"c.yml"}}},
+		// Round 3: compose's hidden flags, and any other.
+		{"--no-ansi -H S up -d", up(sock, "")},
+		{"--verbose -H S up -d", up(sock, "")},
+		{"--verbose=true -H S up -d", up(sock, "")},
+		{"--workdir=. -H S up -d", up(sock, "")},
+		{"--bogus -H S up -d", up(sock, "")},
+		{"-- -H S up -d", want{}},
+		{"--profile a -H S up -d", want{}},
+		{"--workdir . -H S up -d", want{}},
+	} {
+		args := strings.Fields(strings.ReplaceAll(tc.argv, "S", sock))
+		c := Parse("docker-compose", args)
+		got := want{compose: c.Kind == "compose", host: c.Host, context: c.Context, target: c.Target, files: c.ComposeFiles}
+		if !reflect.DeepEqual(got, tc.want) || c.HasHost != (tc.want.host != "") {
+			t.Errorf("docker-compose %s:\n got %+v\nwant %+v", tc.argv, got, tc.want)
 		}
 	}
 }

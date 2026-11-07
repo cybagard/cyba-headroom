@@ -488,20 +488,20 @@ func parseCompose(engine Call, words, args []string) Call {
 // asDockerCompose returns a docker-compose call's args as the docker compose
 // call it is (#266): its docker options, "compose" at lead, then the rest.
 // The standalone binary takes only a few of docker's options, anywhere in
-// the leading run of options, which ends at a compose option with a
-// separate value (-f x) or the first word (plan amendment 1); they move
-// before "compose", and compose's keep their order. ok is false for -v and
-// --version, and for a docker option after that run: the real call fails
-// on it.
+// the leading run of options, as its first pass does: it reads docker's,
+// takes any other option for compose's, and stops at the first word or
+// "--". So a compose option with a separate value (-f x) ends the run at
+// its value (plan amendment 1). Docker's options move before "compose",
+// compose's keep their order. ok is false for -v and --version, and for a
+// docker option in compose's part: the real call fails on it. A compose
+// option it does not know only gates a call that fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 	var docker, compose []string
 	i := 0
-loop:
-	for i < len(args) {
+	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' && args[i] != "--" {
 		a := args[i]
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]
-		own, isCompose := composeGlobal[f]
 		switch {
 		case a == "-v" || a == "--version":
 			return nil, 0, false
@@ -509,28 +509,20 @@ loop:
 			docker, i = append(docker, a), i+1 // a boolean takes no =value
 		case known && takes:
 			docker, i = append(docker, args[i:min(i+2, len(args))]...), min(i+2, len(args))
-		case isCompose && (joined || !own), joinedShort(a):
-			compose, i = append(compose, a), i+1 // -fc.yml too
 		default:
-			break loop
+			compose, i = append(compose, a), i+1
 		}
 	}
+	rest := slices.Concat(compose, args[i:])
 	rejected := false
-	scanPast(args[i:], withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
+	scanPast(rest, withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
 		_, own := composeGlobal[f]
 		rejected = rejected || !own
 	})
 	if rejected {
 		return nil, 0, false
 	}
-	all = slices.Concat(docker, []string{"compose"}, compose, args[i:])
-	return all, len(docker), true
-}
-
-// joinedShort reports whether a is one of compose's global shorthands that
-// take a value, with its value joined: -fc.yml, -pproj.
-func joinedShort(a string) bool {
-	return len(a) > 2 && a[0] == '-' && a[1] != '-' && composeGlobal[a[:2]]
+	return slices.Concat(docker, []string{"compose"}, rest), len(docker), true
 }
 
 // isComposeCommand reports whether w is a compose command; it tells an

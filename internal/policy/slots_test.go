@@ -82,17 +82,44 @@ func TestNoMacOSSlots(t *testing.T) {
 	}
 }
 
-// Without a fresh Tart reading the count is unknown: decide on memory (R7).
-func TestUnknownSlotCountDoesNotBlock(t *testing.T) {
+// A stale Tart reading's count is a floor: a VM that stopped since only
+// costs a retryable deny, and a third macOS VM is not let by (#269). With
+// no reading ever, the count is unknown: decide on memory (R7).
+func TestAStaleSlotCountStillBlocks(t *testing.T) {
 	s := slotSnap()
-	s.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true}}
-	if d := policy.Decide(tartReq("busy", true), s, slotCfg); !d.Allow || !strings.Contains(d.Message, "tart") {
+	s.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true, At: now.Add(-5 * time.Minute)}}
+	d := policy.Decide(tartReq("busy", true), s, slotCfg)
+	if d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots ||
+		!strings.Contains(d.Reasons[0].Text, "2 of 2") || !strings.Contains(d.Reasons[0].Text, "(by the last Tart reading, 5m old)") {
 		t.Fatalf("stale tart: %+v", d)
+	}
+	s.Tart.MacOSRunning, s.Tart.VMs = 1, s.Tart.VMs[1:]
+	r := tartReq("busy", true)
+	if d := policy.Decide(r, s, slotCfg); !d.Allow {
+		t.Fatalf("stale tart, one slot free: %+v", d)
+	}
+	r.PendingMacOS = 1
+	if d := policy.Decide(r, s, slotCfg); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("stale tart, the free slot is promised: %+v", d)
 	}
 	s = slotSnap()
 	s.Tart = nil
 	if d := policy.Decide(tartReq("busy", true), s, slotCfg); !d.Allow {
 		t.Fatalf("no tart reading: %+v", d)
+	}
+}
+
+// A snapshot past MaxSnapshotAge still holds the last Tart reading, and its
+// count still holds (#269).
+func TestAnOldSnapshotKeepsTheSlotCount(t *testing.T) {
+	s := slotSnap()
+	s.CollectedAt = now.Add(-3 * time.Minute)
+	c := slotCfg
+	c.MaxSnapshotAge = time.Minute
+	d := policy.Decide(tartReq("busy", true), s, c)
+	if d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots ||
+		!strings.Contains(d.Reasons[0].Text, "(by the last Tart reading, 3m old)") {
+		t.Fatalf("old snapshot: %+v", d)
 	}
 }
 

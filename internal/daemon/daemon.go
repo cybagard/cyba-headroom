@@ -50,6 +50,7 @@ type Daemon struct {
 	publish func(*protocol.Snapshot)
 	check   CheckFunc
 	release func(id string) bool
+	drop    func(ticket string) bool
 
 	tickMu sync.Mutex
 	seq    uint64
@@ -95,6 +96,10 @@ func (d *Daemon) SetCheck(f CheckFunc) { d.check = f }
 // SetRelease sets f to answer OpRelease: end lease id, reporting whether it
 // was open (#28). Call it before Serve.
 func (d *Daemon) SetRelease(f func(id string) bool) { d.release = f }
+
+// SetDropTicket sets f to end a waiting call's ticket, reporting whether
+// it was queued: one whose check reply was lost (#271). Call it before Serve.
+func (d *Daemon) SetDropTicket(f func(ticket string) bool) { d.drop = f }
 
 // Snapshot returns the latest published snapshot. Callers must not modify it.
 func (d *Daemon) Snapshot() *protocol.Snapshot { return d.snap.Load() }

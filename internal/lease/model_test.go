@@ -158,6 +158,10 @@ type mguess struct {
 
 type op struct{ kind, a, b int }
 
+// lostReply, set in an op's kind, loses the reply to its first check
+// (#271): the daemon undoes it (loseReply).
+const lostReply = 1 << 8
+
 type model struct {
 	t        *testing.T
 	cur      op
@@ -184,6 +188,7 @@ type model struct {
 	asking   *mwaiter             // the waiter whose call is asking
 	taking   []string             // the leases the asking call takes over
 	polled   map[string]time.Time // each ticket's last ask, kept once the model drops it (heldForNothing)
+	lost     bool                 // the next check's reply is lost (lostReply, #271)
 }
 
 // openBugs are the cases that expose a bug still open, by its issue. They
@@ -312,7 +317,10 @@ func (m *model) check(r policy.Request) protocol.Decision {
 	d := m.b.Check(r, m.snapshot(), cfg)
 	taking := m.taking
 	m.taking = nil
-	if !d.Allow && m.headroom == plenty {
+	if m.lost {
+		d = m.loseReply(d)
+	}
+	if !d.Allow && m.headroom == plenty && !m.lost {
 		m.fail("%s denied: %+v", r.Command, d)
 	}
 	if d.Allow && d.LeaseID != "" && r.Worktree != "" && d.HeadroomBytes != nil &&
@@ -323,6 +331,7 @@ func (m *model) check(r policy.Request) protocol.Decision {
 	if !d.Allow && held > 0 && d.HeadroomBytes != nil && *d.HeadroomBytes-int64(d.LeasedBytes)-int64(d.CostBytes) >= int64(cfg.MinHeadroomBytes) {
 		m.outcomes["queue: held back"]++ // it would fit but for the tickets ahead
 	}
+	m.lost = false
 	if w != nil {
 		m.queued(w, d, taking)
 	}
@@ -337,6 +346,32 @@ func (m *model) check(r policy.Request) protocol.Decision {
 	}
 	m.heldForNothing()
 	return d
+}
+
+// loseReply is the daemon's undo of a check whose reply was lost (#271):
+// the shim gave up before it came, so its lease is released and its
+// ticket dropped. To the model the call was denied for good: it starts
+// nothing gated, and its waiter leaves the queue. What the shim then runs
+// ungated is a raw run (op 8). An allow still renewed the leases that
+// cover the call, which the shim runs: it is the last allowed call.
+func (m *model) loseReply(d protocol.Decision) protocol.Decision {
+	m.step("reply lost: lease %q, ticket %q", d.LeaseID, d.Ticket)
+	if d.Allow {
+		m.last = m.c.t
+	}
+	if d.LeaseID != "" {
+		if !m.b.Release(d.LeaseID) {
+			m.fail("reply lost: lease %s was not open to release", d.LeaseID)
+		}
+		m.outcomes["reply lost: released"]++
+	}
+	if d.Ticket != "" {
+		if !m.b.DropTicket(d.Ticket) {
+			m.fail("reply lost: ticket %s was not queued to drop", d.Ticket)
+		}
+		m.outcomes["reply lost: dropped"]++
+	}
+	return protocol.Decision{}
 }
 
 // stack is a compose project in a worktree's directory.
@@ -1256,6 +1291,7 @@ func (m *model) call(kind int, o op) func() bool {
 
 func (m *model) run(ops []op) {
 	for _, o := range ops {
+		m.lost, o.kind = o.kind&lostReply != 0, o.kind&^lostReply
 		m.cur = o
 		m.c.t = m.c.t.Add(10 * time.Millisecond) // calls and events take time
 		st := m.stackAt(o.a)
@@ -1421,6 +1457,7 @@ func (m *model) run(ops []op) {
 		default:
 			m.tick()
 		}
+		m.lost = false
 		if m.diff {
 			m.differ()
 		}
@@ -1558,6 +1595,14 @@ func TestTheLeaseModel(t *testing.T) {
 		for i := range ops {
 			ops[i] = op{rng.IntN(23), rng.IntN(1000), rng.IntN(1000)}
 		}
+		// A stream of its own picks the ops whose first check's reply is
+		// lost (#271), so the ops above are those of earlier walks.
+		lose := rand.New(rand.NewPCG(uint64(seed), 2))
+		for i := range ops {
+			if lose.IntN(16) == 0 {
+				ops[i].kind |= lostReply
+			}
+		}
 		f, n := playCounting(t, ops)
 		for k, v := range n {
 			outcomes[k] += v
@@ -1581,7 +1626,7 @@ func TestTheLeaseModel(t *testing.T) {
 	if seeds >= 300 {
 		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker",
 			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled",
-			"queue: takeover held", "start: already runs"} {
+			"queue: takeover held", "start: already runs", "reply lost: released", "reply lost: dropped"} {
 			if outcomes[k] == 0 {
 				t.Errorf("no %s ran: %v", k, outcomes)
 			}

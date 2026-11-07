@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -332,5 +333,123 @@ func TestListenRecordsTheHoldersPID(t *testing.T) {
 	}
 	if pid, err := daemon.LockHolder(path); err != nil || pid != os.Getpid() {
 		t.Fatalf("LockHolder = %d, %v; want %d", pid, err, os.Getpid())
+	}
+}
+
+// undone records what the daemon undid after a check's reply.
+type undone struct {
+	mu                sync.Mutex
+	released, dropped []string
+	done              chan struct{}
+}
+
+func (u *undone) got() (released, dropped []string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.released, u.dropped
+}
+
+// serveUndoing serves a daemon whose checks answer dec, each once its
+// client is ready (ready is closed), and records the leases it releases
+// and the tickets it drops.
+func serveUndoing(t *testing.T, path string, dec protocol.Decision, ready <-chan struct{}) *undone {
+	t.Helper()
+	u := &undone{done: make(chan struct{}, 2)}
+	serveWith(t, path, func(d *daemon.Daemon) {
+		d.SetCheck(func(*protocol.CheckRequest, *protocol.Snapshot) protocol.Decision {
+			<-ready
+			return dec
+		})
+		d.SetRelease(func(id string) bool {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.released = append(u.released, id)
+			u.done <- struct{}{}
+			return true
+		})
+		d.SetDropTicket(func(ticket string) bool {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.dropped = append(u.dropped, ticket)
+			u.done <- struct{}{}
+			return true
+		})
+	})
+	return u
+}
+
+// loseReply sends a check and closes the connection before reading its
+// reply, then lets the slow check answer: the daemon's write fails.
+func loseReply(t *testing.T, path string, ready chan<- struct{}) {
+	t.Helper()
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(c, `{"v":`+strconv.Itoa(protocol.Version)+`,"op":"check","check":{"worktree":"w1","command":"docker run x"}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(ready)
+}
+
+func waitUndone(t *testing.T, u *undone) {
+	t.Helper()
+	select {
+	case <-u.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the daemon undid nothing")
+	}
+}
+
+// A check whose client closed before reading its reply was never gated:
+// its lease is released, so it holds no cost to the timeout (#271).
+func TestALostReplyReleasesItsLease(t *testing.T) {
+	path := sockPath(t)
+	ready := make(chan struct{})
+	u := serveUndoing(t, path, protocol.Decision{Allow: true, LeaseID: "lease-a-1"}, ready)
+	loseReply(t, path, ready)
+	waitUndone(t, u)
+	if released, dropped := u.got(); !slices.Equal(released, []string{"lease-a-1"}) || len(dropped) != 0 {
+		t.Fatalf("released %v, dropped %v; want lease-a-1 released", released, dropped)
+	}
+}
+
+// A waiting call's lost reply drops its ticket, so the calls behind it
+// move up now, not after TicketTTL (#271).
+func TestALostReplyDropsItsTicket(t *testing.T) {
+	path := sockPath(t)
+	ready := make(chan struct{})
+	u := serveUndoing(t, path, protocol.Decision{Retry: true, Ticket: "ticket-a-1"}, ready)
+	loseReply(t, path, ready)
+	waitUndone(t, u)
+	if released, dropped := u.got(); len(released) != 0 || !slices.Equal(dropped, []string{"ticket-a-1"}) {
+		t.Fatalf("released %v, dropped %v; want ticket-a-1 dropped", released, dropped)
+	}
+}
+
+// A delivered reply undoes nothing.
+func TestADeliveredReplyUndoesNothing(t *testing.T) {
+	path := sockPath(t)
+	ready := make(chan struct{})
+	close(ready)
+	var u *undone
+	// Registered before serveUndoing's, so it runs after the daemon has
+	// stopped and every reply has been written.
+	t.Cleanup(func() {
+		if u == nil {
+			return
+		}
+		if released, dropped := u.got(); len(released) != 0 || len(dropped) != 0 {
+			t.Errorf("released %v, dropped %v; want nothing undone", released, dropped)
+		}
+	})
+	u = serveUndoing(t, path, protocol.Decision{Allow: true, LeaseID: "lease-a-1", Ticket: "ticket-a-1"}, ready)
+	rep, err := client.Do(context.Background(), path, time.Second, protocol.Request{Op: protocol.OpCheck,
+		Check: &protocol.CheckRequest{Worktree: "w1", Command: "docker run x"}})
+	if err != nil || rep.Decision == nil || rep.Decision.LeaseID != "lease-a-1" {
+		t.Fatalf("reply %+v, %v", rep, err)
 	}
 }

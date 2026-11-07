@@ -3836,6 +3836,31 @@ func TestADenyWaitingCannotFixEndsTheTicket(t *testing.T) {
 	}
 }
 
+// A waiting call whose reply was lost drops its ticket (#271): it is gone
+// from the queue, and the call behind it is no longer held for it. An
+// unknown ticket drops nothing.
+func TestADroppedTicketHoldsNothing(t *testing.T) {
+	b, _, _ := book(t)
+	a := b.Check(waits("w1", 8*gib, ""), room(3*gib), cfg)
+	bb := b.Check(waits("w2", gib, ""), room(3*gib), cfg)
+	s := room(8 * gib)
+	if d := b.Check(waits("w2", gib, bb.Ticket), s, cfg); d.Allow {
+		t.Fatalf("B took A's room: %+v", d)
+	}
+	if !b.DropTicket(a.Ticket) {
+		t.Fatalf("DropTicket(%s) = false", a.Ticket)
+	}
+	if got := tickets(b); !slices.Equal(got, []string{bb.Ticket}) {
+		t.Fatalf("queue %q, want only B's", got)
+	}
+	if d := b.Check(waits("w2", gib, bb.Ticket), s, cfg); !d.Allow {
+		t.Fatalf("B is still held for A: %+v", d)
+	}
+	if b.DropTicket(a.Ticket) || b.DropTicket("ticket-x-1") {
+		t.Fatal("dropping an unknown ticket returned true")
+	}
+}
+
 // A ticket the book does not know (the daemon restarted, or it ended
 // unasked) joins the back of the queue with a new one (#72).
 func TestAnUnknownTicketQueuesAtTheBack(t *testing.T) {

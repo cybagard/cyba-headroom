@@ -570,6 +570,7 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 	d.SetDerive(derive(book, cfg.BudgetParams()))
 	d.SetCheck(gateCheckOn(book, cfg.PolicyConfig(), docker, cfg.Docker.Socket))
 	d.SetRelease(book.Release)
+	d.SetDropTicket(book.DropTicket)
 	book.SetDaemonTimeout(cfg.Policy.DaemonTimeout.Duration)
 	book.SetDefaultTartBytes(cfg.BudgetParams().DefaultTartBytes)
 	return book

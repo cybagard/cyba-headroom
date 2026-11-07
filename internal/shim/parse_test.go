@@ -118,6 +118,17 @@ func TestParse(t *testing.T) {
 		{"docker-compose --host=tcp://h:1 --log-level debug --tls --tlsverify --debug up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true}},
 		{"docker-compose -H=tcp://h:1 --context=c --log-level=info up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true, Context: "c"}},
 		{"docker-compose -p proj run web", Call{Kind: "compose", Op: "run", Command: "docker compose run", Target: "proj"}},
+		// Docker's options anywhere in the leading run of options, up to a
+		// compose option with a separate value (#266 plan amendment 1).
+		{"docker-compose --compatibility -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
+		{"docker-compose --dry-run=false -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
+		{"docker-compose --dry-run -H unix:///var/run/docker.sock up", Call{}},
+		{"docker-compose --project-name=x -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "x", Host: "unix:///var/run/docker.sock", HasHost: true}},
+		{"docker-compose --ansi=never --host=unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
+		{"docker-compose --profile=a --context nope up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Context: "nope"}},
+		{"docker-compose -D --compatibility -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
+		{"docker-compose -p x -H unix:///var/run/docker.sock up", Call{}},
+		{"docker-compose -f c.yml -H unix:///var/run/docker.sock up", Call{}},
 		{"docker-compose -c x up", Call{}},
 		{"docker-compose --config x up", Call{}},
 		{"docker-compose -l info up", Call{}},
@@ -474,6 +485,7 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"run", "web"}, nil},
 		{[]string{"--dry-run", "up"}, nil},
 		{[]string{"-c", "x", "up"}, nil},
+		{[]string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "--compatibility", "-f", "a.yml", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker-compose", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -498,6 +510,11 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 	want = []string{"-H", "h", "-f", "a.yml", "config", "--format", "json"}
 	if !ok || !slices.Equal(got, want) {
 		t.Fatalf("docker-compose: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, false)
+	want = []string{"-H", "h", "--compatibility", "-f", "a.yml", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose, a docker option after a compose one: ComposeConfig = %q, %v; want %q", got, ok, want)
 	}
 	if _, ok := ComposeConfig("docker-compose", []string{"--config", "d", "up"}, false); ok {
 		t.Fatal("docker-compose --config: the call fails")

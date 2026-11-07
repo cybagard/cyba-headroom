@@ -486,37 +486,45 @@ func parseCompose(engine Call, words, args []string) Call {
 }
 
 // asDockerCompose returns a docker-compose call's args as the docker compose
-// call it is (#266): its leading docker options, "compose" at lead, then the
-// rest. The standalone binary takes only a few of docker's options, and only
-// before any of compose's. ok is false for -v and --version, and for a docker
-// option among compose's: the real call fails on it.
+// call it is (#266): its docker options, "compose" at lead, then the rest.
+// The standalone binary takes only a few of docker's options, anywhere in
+// the leading run of options, which ends at a compose option with a
+// separate value (-f x) or the first word (plan amendment 1); they move
+// before "compose", and compose's keep their order. ok is false for -v and
+// --version, and for a docker option after that run: the real call fails
+// on it.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
+	var docker, compose []string
+	i := 0
 loop:
-	for lead < len(args) {
-		a := args[lead]
+	for i < len(args) {
+		a := args[i]
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]
+		own, isCompose := composeGlobal[f]
 		switch {
 		case a == "-v" || a == "--version":
 			return nil, 0, false
 		case known && takes && joined, known && !takes && !joined:
-			lead++ // a boolean takes no =value
+			docker, i = append(docker, a), i+1 // a boolean takes no =value
 		case known && takes:
-			lead = min(lead+2, len(args))
+			docker, i = append(docker, args[i:min(i+2, len(args))]...), min(i+2, len(args))
+		case isCompose && (joined || !own):
+			compose, i = append(compose, a), i+1
 		default:
 			break loop
 		}
 	}
 	rejected := false
-	scanPast(args[lead:], withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
+	scanPast(args[i:], withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
 		_, own := composeGlobal[f]
 		rejected = rejected || !own
 	})
 	if rejected {
 		return nil, 0, false
 	}
-	all = slices.Concat(args[:lead], []string{"compose"}, args[lead:])
-	return all, lead, true
+	all = slices.Concat(docker, []string{"compose"}, compose, args[i:])
+	return all, len(docker), true
 }
 
 // isComposeCommand reports whether w is a compose command; it tells an

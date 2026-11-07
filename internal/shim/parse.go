@@ -509,8 +509,8 @@ loop:
 			docker, i = append(docker, a), i+1 // a boolean takes no =value
 		case known && takes:
 			docker, i = append(docker, args[i:min(i+2, len(args))]...), min(i+2, len(args))
-		case isCompose && (joined || !own):
-			compose, i = append(compose, a), i+1
+		case isCompose && (joined || !own), joinedShort(a):
+			compose, i = append(compose, a), i+1 // -fc.yml too
 		default:
 			break loop
 		}
@@ -525,6 +525,12 @@ loop:
 	}
 	all = slices.Concat(docker, []string{"compose"}, compose, args[i:])
 	return all, len(docker), true
+}
+
+// joinedShort reports whether a is one of compose's global shorthands that
+// take a value, with its value joined: -fc.yml, -pproj.
+func joinedShort(a string) bool {
+	return len(a) > 2 && a[0] == '-' && a[1] != '-' && composeGlobal[a[:2]]
 }
 
 // isComposeCommand reports whether w is a compose command; it tells an

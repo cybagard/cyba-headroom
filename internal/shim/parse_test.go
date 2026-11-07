@@ -127,6 +127,9 @@ func TestParse(t *testing.T) {
 		{"docker-compose --ansi=never --host=unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
 		{"docker-compose --profile=a --context nope up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Context: "nope"}},
 		{"docker-compose -D --compatibility -H unix:///var/run/docker.sock up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "unix:///var/run/docker.sock", HasHost: true}},
+		{"docker-compose -fc.yml -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"c.yml"}, Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
+		{"docker-compose -pproj -H unix:///var/run/docker.sock up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "proj", Host: "unix:///var/run/docker.sock", HasHost: true, ComposeDetached: true}},
+		{"docker-compose -fc.yml -D up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"c.yml"}, ComposeDetached: true}},
 		{"docker-compose -p x -H unix:///var/run/docker.sock up", Call{}},
 		{"docker-compose -f c.yml -H unix:///var/run/docker.sock up", Call{}},
 		{"docker-compose -c x up", Call{}},
@@ -486,6 +489,7 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"--dry-run", "up"}, nil},
 		{[]string{"-c", "x", "up"}, nil},
 		{[]string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "--compatibility", "-f", "a.yml", "up", "-d"}},
+		{[]string{"-fa.yml", "-H", "h", "up", "-d"}, []string{"-H", "h", "--dry-run", "-fa.yml", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker-compose", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -515,6 +519,11 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 	want = []string{"-H", "h", "--compatibility", "-f", "a.yml", "config", "--format", "json"}
 	if !ok || !slices.Equal(got, want) {
 		t.Fatalf("docker-compose, a docker option after a compose one: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"-fa.yml", "-pproj", "-H", "h", "up", "-d"}, false)
+	want = []string{"-H", "h", "-fa.yml", "-pproj", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose, joined shorthands: ComposeConfig = %q, %v; want %q", got, ok, want)
 	}
 	if _, ok := ComposeConfig("docker-compose", []string{"--config", "d", "up"}, false); ok {
 		t.Fatal("docker-compose --config: the call fails")

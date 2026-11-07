@@ -144,28 +144,31 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 func (d *Daemon) handle(c net.Conn) {
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(connTimeout))
-	rep := d.answer(c)
+	var check *protocol.CheckRequest
+	rep := d.answer(c, &check)
 	rep.V = protocol.Version
 	if err := json.NewEncoder(c).Encode(rep); err != nil {
 		d.log.Debug("reply failed", "err", err)
 		if rep.Decision != nil {
-			d.undo(rep.Decision, err)
+			d.undo(check, rep.Decision, err)
 		}
 	}
 }
 
-// undo treats a check whose reply was lost (its client closed, or
-// connTimeout passed) as never gated: the shim ran its call without the
-// lease's label, so the lease would never bind (#271). It releases the
-// lease, as an exec failure does, and drops the ticket, so the calls
-// behind it move up now. A reply written just before the client gave up
-// still succeeds: that lease is held.
-func (d *Daemon) undo(dec *protocol.Decision, err error) {
+// undo settles a check whose reply was lost (its client closed, or
+// connTimeout passed), whose call the shim ran ungated (#271). A labelled
+// call's lease (a run or create) would never bind, its container lacking
+// the label: it is released, as an exec failure's is. Any other binds by
+// name what the call starts, so it stays (plan amendment 1). The ticket
+// is dropped, so the calls behind it move up now. A reply written just
+// before the client gave up still succeeds: that lease is held.
+func (d *Daemon) undo(check *protocol.CheckRequest, dec *protocol.Decision, err error) {
 	if dec.LeaseID == "" && dec.Ticket == "" {
 		return
 	}
-	d.log.Info("reply lost", "lease", dec.LeaseID, "ticket", dec.Ticket, "err", err)
-	if dec.LeaseID != "" && d.release != nil {
+	release := dec.LeaseID != "" && check.Labelled && d.release != nil
+	d.log.Info("reply lost", "lease", dec.LeaseID, "released", release, "ticket", dec.Ticket, "err", err)
+	if release {
 		d.release(dec.LeaseID)
 	}
 	if dec.Ticket != "" && d.drop != nil {
@@ -173,7 +176,9 @@ func (d *Daemon) undo(dec *protocol.Decision, err error) {
 	}
 }
 
-func (d *Daemon) answer(c net.Conn) protocol.Reply {
+// answer replies to the request read from c; for a check, it sets *check
+// to the request.
+func (d *Daemon) answer(c net.Conn, check **protocol.CheckRequest) protocol.Reply {
 	sc := bufio.NewScanner(c)
 	sc.Buffer(make([]byte, 0, 4096), protocol.MaxLine)
 	if !sc.Scan() {
@@ -195,6 +200,7 @@ func (d *Daemon) answer(c net.Conn) protocol.Reply {
 		if d.check == nil || req.Check == nil {
 			return protocol.Reply{Error: "check: not supported by this daemon"}
 		}
+		*check = req.Check
 		dec := d.check(req.Check, d.Snapshot())
 		return protocol.Reply{OK: true, Decision: &dec}
 	case protocol.OpRelease:

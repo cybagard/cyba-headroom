@@ -318,7 +318,7 @@ func (m *model) check(r policy.Request) protocol.Decision {
 	taking := m.taking
 	m.taking = nil
 	if m.lost {
-		d = m.loseReply(d)
+		d = m.loseReply(r, d)
 	}
 	if !d.Allow && m.headroom == plenty && !m.lost {
 		m.fail("%s denied: %+v", r.Command, d)
@@ -349,13 +349,22 @@ func (m *model) check(r policy.Request) protocol.Decision {
 }
 
 // loseReply is the daemon's undo of a check whose reply was lost (#271):
-// the shim gave up before it came, so its lease is released and its
-// ticket dropped. To the model the call was denied for good: it starts
-// nothing gated, and its waiter leaves the queue. What the shim then runs
-// ungated is a raw run (op 8). An allow still renewed the leases that
-// cover the call, which the shim runs: it is the last allowed call.
-func (m *model) loseReply(d protocol.Decision) protocol.Decision {
-	m.step("reply lost: lease %q, ticket %q", d.LeaseID, d.Ticket)
+// the shim gave up before it came, and runs the call ungated. An
+// unlabelled call's lease binds by name what it starts, so it stays, and
+// the call runs as allowed (plan amendment 1). A labelled call's lease is
+// released, and a ticket dropped: to the model that call was denied for
+// good, starting nothing gated, and its waiter leaves the queue. What the
+// shim then runs ungated is a raw run (op 8). An allow still renewed the
+// leases that cover the call, which the shim runs: it is the last
+// allowed call.
+func (m *model) loseReply(r policy.Request, d protocol.Decision) protocol.Decision {
+	m.step("reply lost: lease %q (labelled %v), ticket %q", d.LeaseID, r.Labelled, d.Ticket)
+	if d.Allow && !r.Labelled {
+		if d.LeaseID != "" {
+			m.outcomes["reply lost: kept"]++
+		}
+		return d
+	}
 	if d.Allow {
 		m.last = m.c.t
 	}
@@ -1626,7 +1635,7 @@ func TestTheLeaseModel(t *testing.T) {
 	if seeds >= 300 {
 		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker",
 			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled",
-			"queue: takeover held", "start: already runs", "reply lost: released", "reply lost: dropped"} {
+			"queue: takeover held", "start: already runs", "reply lost: released", "reply lost: kept", "reply lost: dropped"} {
 			if outcomes[k] == 0 {
 				t.Errorf("no %s ran: %v", k, outcomes)
 			}

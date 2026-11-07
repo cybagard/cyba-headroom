@@ -378,15 +378,15 @@ func serveUndoing(t *testing.T, path string, dec protocol.Decision, ready <-chan
 	return u
 }
 
-// loseReply sends a check and closes the connection before reading its
+// loseReply sends check and closes the connection before reading its
 // reply, then lets the slow check answer: the daemon's write fails.
-func loseReply(t *testing.T, path string, ready chan<- struct{}) {
+func loseReply(t *testing.T, path, check string, ready chan<- struct{}) {
 	t.Helper()
 	c, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(c, `{"v":`+strconv.Itoa(protocol.Version)+`,"op":"check","check":{"worktree":"w1","command":"docker run x"}}`+"\n"); err != nil {
+	if _, err := io.WriteString(c, `{"v":`+strconv.Itoa(protocol.Version)+`,"op":"check","check":`+check+`}`+"\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Close(); err != nil {
@@ -404,13 +404,14 @@ func waitUndone(t *testing.T, u *undone) {
 	}
 }
 
-// A check whose client closed before reading its reply was never gated:
-// its lease is released, so it holds no cost to the timeout (#271).
+// A labelled check whose client closed before reading its reply was
+// never gated: the shim ran it without the lease's label, so its lease is
+// released, and holds no cost to the timeout (#271).
 func TestALostReplyReleasesItsLease(t *testing.T) {
 	path := sockPath(t)
 	ready := make(chan struct{})
 	u := serveUndoing(t, path, protocol.Decision{Allow: true, LeaseID: "lease-a-1"}, ready)
-	loseReply(t, path, ready)
+	loseReply(t, path, `{"worktree":"w1","command":"docker run x","labelled":true}`, ready)
 	waitUndone(t, u)
 	if released, dropped := u.got(); !slices.Equal(released, []string{"lease-a-1"}) || len(dropped) != 0 {
 		t.Fatalf("released %v, dropped %v; want lease-a-1 released", released, dropped)
@@ -423,11 +424,32 @@ func TestALostReplyDropsItsTicket(t *testing.T) {
 	path := sockPath(t)
 	ready := make(chan struct{})
 	u := serveUndoing(t, path, protocol.Decision{Retry: true, Ticket: "ticket-a-1"}, ready)
-	loseReply(t, path, ready)
+	loseReply(t, path, `{"worktree":"w1","command":"docker run x","labelled":true,"wait":true}`, ready)
 	waitUndone(t, u)
 	if released, dropped := u.got(); len(released) != 0 || !slices.Equal(dropped, []string{"ticket-a-1"}) {
 		t.Fatalf("released %v, dropped %v; want ticket-a-1 dropped", released, dropped)
 	}
+}
+
+// An unlabelled check's lost reply keeps its lease: it binds by name what
+// the shim's fail-open call starts (a compose up's stack), so it still
+// holds that room (#271, plan amendment 1).
+func TestALostReplyKeepsALeaseThatBindsByName(t *testing.T) {
+	path := sockPath(t)
+	ready := make(chan struct{})
+	var u *undone
+	// Registered before serveUndoing's, so it runs after the daemon has
+	// stopped and the lost reply has been handled.
+	t.Cleanup(func() {
+		if u == nil {
+			return
+		}
+		if released, dropped := u.got(); len(released) != 0 || len(dropped) != 0 {
+			t.Errorf("released %v, dropped %v; want the lease kept", released, dropped)
+		}
+	})
+	u = serveUndoing(t, path, protocol.Decision{Allow: true, LeaseID: "lease-a-1"}, ready)
+	loseReply(t, path, `{"worktree":"w1","kind":"compose","op":"up","command":"docker compose up","target":"app"}`, ready)
 }
 
 // A delivered reply undoes nothing.

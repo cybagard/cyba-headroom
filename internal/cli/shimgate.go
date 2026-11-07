@@ -116,6 +116,10 @@ func (e Env) withDefaults() Env {
 	return e // wait stays nil until a wait starts: see gate
 }
 
+// dockerCLI reports whether the shim called name is Docker's CLI, which
+// picks its engine as docker does: docker, or docker-compose (#266).
+func dockerCLI(name string) bool { return name == "docker" || name == "docker-compose" }
+
 // gate asks the daemon whether call c may start (R5, #28). Calls that start
 // nothing, calls already checked and calls to a remote engine are not asked
 // about; nor, failing open (R7), is anything when the config or the daemon
@@ -134,7 +138,7 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	case c.Kind == "tart", c.Kind == "machine":
 		// A Tart VM or Podman machine runs on this Mac, whatever engine
 		// the call names.
-	case name == "docker":
+	case dockerCLI(name):
 		engine = dockerEndpointIn(getenv, c)
 		remote = engine != "" && shim.Remote("docker", engine, getenv)
 	default:
@@ -188,12 +192,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	req := callerRequest(getenv, h.ancestors, h.getwd)
 	req.Kind, req.Command, req.CostBytes = c.Kind, c.Command, c.MemoryBytes
 	req.Target, req.Name, req.Op = c.Target, c.Name, c.Op
-	if name == "docker" {
+	if dockerCLI(name) {
 		req.Engine = engine
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool
-	if c.Kind == "compose" && name == "docker" {
+	if c.Kind == "compose" && dockerCLI(name) {
 		// Compose names the project (-p needs no asking; podman compose is
 		// not asked), and says whether a detached up starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
@@ -206,18 +210,18 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			// Its file is on stdin, which the call needs: not asked.
 			req.Target, unnamed = composeStdinKey(c, lookupEnv, h.getwd)
 		} else {
-			req.Target, req.Guessed = composeKey(bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
+			req.Target, req.Guessed = composeKey(name, bin, e.Args[1:], c, lookupEnv, h.getwd, h.composeAsk, h.now, h.stat)
 			// Only a detached up: an attached up's dry run stops before
 			// Compose would start anything ("interactive run is not
 			// supported"), and a restart's lists each container as
 			// restarting, running or not.
-			if c.Op == "up" && c.ComposeDetached && composePlain(bin, e.Args[1:], h.composeAsk) {
-				idle = func() bool { return composeIdle(bin, e.Args[1:], h.composeDry) }
+			if c.Op == "up" && c.ComposeDetached && composePlain(name, bin, e.Args[1:], h.composeAsk) {
+				idle = func() bool { return composeIdle(name, bin, e.Args[1:], h.composeDry) }
 			}
 		}
 		// The dir Compose labels it with, within what is left of the
 		// budget (#158).
-		req.ComposeDir = composeDir(e.Args[1:], c, lookupEnv, h.getwd, asked.Add(composeTimeout).Sub(h.now()), h.stat)
+		req.ComposeDir = composeDir(name, e.Args[1:], c, lookupEnv, h.getwd, asked.Add(composeTimeout).Sub(h.now()), h.stat)
 		if unnamed && req.ComposeDir != "" {
 			// Its name is one the shim cannot know: the dir keys its
 			// lease (#122). Target stays the dir's name, an older
@@ -517,15 +521,16 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 
 // composeProject is a compose call's project, as Compose itself names it
 // (#33): -p (target), else the name docker compose config gives, run with
-// the call's own global options (args: -f, --project-directory,
+// the call's own global options (args, of name: docker or docker-compose:
+// -f, --project-directory,
 // --env-file, --config, ...) in its own environment and working directory.
 // Compose labels each container with the project, so the name is the
 // lease's key. Asking Compose, rather than reading .env, override files and
 // name: the way it does, keeps the two from parting. When Compose cannot
 // say (its config fails or times out), the name it gives by default
 // (composeDefaultProject, #84).
-func composeProject(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
-	project, _ := composeKey(bin, args, c, lookupEnv, getwd, ask, time.Now, os.Stat)
+func composeProject(name, bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), ask func(bin string, args []string) ([]byte, error)) string {
+	project, _ := composeKey(name, bin, args, c, lookupEnv, getwd, ask, time.Now, os.Stat)
 	return project
 }
 
@@ -533,12 +538,12 @@ func composeProject(bin string, args []string, c shim.Call, lookupEnv func(strin
 // Compose gives by default, its config having failed, which misses a name
 // Compose finds elsewhere (#85). The lease book trusts a guess less (#84).
 // now and stat are the clock and os.Stat.
-func composeKey(bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error),
+func composeKey(name, bin string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error),
 	ask func(bin string, args []string) ([]byte, error), now func() time.Time, stat func(string) (fs.FileInfo, error)) (project string, guessed bool) {
 	if c.Target != "" {
 		return c.Target, false
 	}
-	cargs, ok := shim.ComposeConfig(args, false)
+	cargs, ok := shim.ComposeConfig(name, args, false)
 	if !ok {
 		return "", false
 	}
@@ -642,16 +647,16 @@ func composeFileEnv(getenv func(string) string) []string {
 // composeProjectDir, with the working directory from getwd, which keeps a
 // shell's $PWD. Within left, what is left of the call's compose budget.
 // It is "" whenever the shim cannot be sure, never a guess: args (after
-// docker) give --workdir, Compose's hidden alias of --project-directory;
+// name) give --workdir, Compose's hidden alias of --project-directory;
 // the working directory is unknown and the dir would be relative to it;
 // the search finds no compose file or gives up; the file is remote (a git
 // or OCI reference); a COMPOSE_FILE entry is stdin (-); or, with neither
 // --project-directory nor an -f, an env file sets, or could set
 // (composeEnvFileValue), COMPOSE_FILE when the call's environment has
 // none, or COMPOSE_PATH_SEPARATOR when it has COMPOSE_FILE but not that.
-func composeDir(args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), left time.Duration,
+func composeDir(name string, args []string, c shim.Call, lookupEnv func(string) (string, bool), getwd func() (string, error), left time.Duration,
 	stat func(string) (fs.FileInfo, error)) string {
-	global, ok := shim.ComposeConfig(args, false)
+	global, ok := shim.ComposeConfig(name, args, false)
 	if !ok || slices.ContainsFunc(global[:len(global)-3], func(a string) bool { return a == "--workdir" || strings.HasPrefix(a, "--workdir=") }) {
 		return ""
 	}
@@ -796,7 +801,7 @@ func expandUser(p, home string) string {
 // dry run; a pull or build (--pull always, --build, a pull_policy other
 // than missing or never) is not done, so a newer image's recreate is not
 // shown. Config, with the call's own options, runs none of them.
-func composePlain(bin string, args []string, ask func(bin string, args []string) ([]byte, error)) bool {
+func composePlain(name, bin string, args []string, ask func(bin string, args []string) ([]byte, error)) bool {
 	for i, a := range args {
 		if a == "--build" || a == "--pull=always" || a == "--pull" && i+1 < len(args) && args[i+1] == "always" {
 			return false
@@ -808,7 +813,7 @@ func composePlain(bin string, args []string, ask func(bin string, args []string)
 			}
 		}
 	}
-	cargs, ok := shim.ComposeConfig(args, true)
+	cargs, ok := shim.ComposeConfig(name, args, true)
 	if !ok {
 		return false
 	}
@@ -854,8 +859,8 @@ var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // than reading its config against what runs, leaves what it does (profiles,
 // replicas, --scale, pull policies, a changed file or image) to Compose.
 // false when it cannot say: the call holds its estimate.
-func composeIdle(bin string, args []string, dry func(bin string, args []string) ([]byte, error)) bool {
-	dryArgs, ok := shim.DryRun(args)
+func composeIdle(name, bin string, args []string, dry func(bin string, args []string) ([]byte, error)) bool {
+	dryArgs, ok := shim.DryRun(name, args)
 	if !ok {
 		return false
 	}

@@ -277,7 +277,7 @@ func (in *installer) installShims(bin, prefix string) bool {
 		fmt.Fprintf(in.errw, "headroom: linking the shims in %s: %v\n", in.shimDir, err)
 		return false
 	}
-	fmt.Fprintf(in.out, "  shims   %s (docker, podman, tart)\n", in.shimDir)
+	fmt.Fprintf(in.out, "  shims   %s (%s)\n", in.shimDir, strings.Join(shimList(), ", "))
 	var lines []string
 	for _, a := range orcaAgents {
 		if in.lookPath != nil && in.lookPath(a) {

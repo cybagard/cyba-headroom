@@ -70,7 +70,7 @@ func TestDaemonLinksTheShimsToItsStartPath(t *testing.T) {
 	start := selfLink(t, filepath.Join(dir, "opt", "headroom", "bin", "headroom"))
 	logPath := filepath.Join(dir, "daemon.log")
 	startDaemon(t, map[string]string{"HEADROOM_CONFIG_DIR": dir}, logPath, start, "daemon", "--link-shims", "--log", logPath)
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != start {
 			t.Errorf("%s -> %q, %v; want %s", n, target, err, start)
 		}
@@ -178,7 +178,7 @@ func TestASecondDaemonLeavesTheShimsAlone(t *testing.T) {
 		Stdout: &errb, Stderr: &errb, Getenv: env, Context: ctx}); code == 0 {
 		t.Errorf("second daemon exited 0: %s", errb.String())
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != first {
 			t.Errorf("%s -> %q, %v; want %s", n, target, err, first)
 		}
@@ -225,7 +225,7 @@ func TestASecondDaemonWithWaitStartsWhenTheFirstStops(t *testing.T) {
 	if strings.Contains(read(), "daemon started") {
 		t.Fatalf("second daemon started beside the first:\n%s", read())
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != first {
 			t.Errorf("while waiting: %s -> %q, %v; want %s", n, target, err, first)
 		}
@@ -237,7 +237,7 @@ func TestASecondDaemonWithWaitStartsWhenTheFirstStops(t *testing.T) {
 	if n := strings.Count(read(), "waiting for it to stop"); n != 1 {
 		t.Errorf("logged the wait %d times:\n%s", n, read())
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if target, err := os.Readlink(filepath.Join(dir, "shims", n)); err != nil || target != second {
 			t.Errorf("after the first stopped: %s -> %q, %v; want %s", n, target, err, second)
 		}
@@ -400,7 +400,7 @@ func TestADaemonThatWaitedLinksItsShimsAgain(t *testing.T) {
 			if !strings.Contains(read(), "checking the shims again") {
 				t.Errorf("the re-check is not logged:\n%s", read())
 			}
-			for _, n := range []string{"docker", "podman", "tart"} {
+			for _, n := range shimList() {
 				want := second
 				if name == "a shim removed, another replaced" && n == "podman" {
 					want = "/opt/other/podman"

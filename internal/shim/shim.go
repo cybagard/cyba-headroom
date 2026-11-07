@@ -22,6 +22,8 @@ var ErrNotFound = errors.New("not found on PATH (other than headroom's shim)")
 // starting with "~/" is under HOME. Tart's are the daemon's.
 var Fallbacks = map[string][]string{
 	"docker": {"/usr/local/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker", "/opt/homebrew/bin/docker"},
+	"docker-compose": {"/usr/local/bin/docker-compose", "/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose",
+		"/opt/homebrew/bin/docker-compose"},
 	"podman": {"/opt/homebrew/bin/podman", "/opt/podman/bin/podman", "/usr/local/bin/podman"},
 	"tart":   tart.Fallbacks,
 }

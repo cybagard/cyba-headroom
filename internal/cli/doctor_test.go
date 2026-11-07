@@ -42,7 +42,11 @@ func newDoctorRig(t *testing.T) *doctorRig {
 	t.Cleanup(func() { _ = os.RemoveAll(cfg) })
 	r := &doctorRig{cfg: cfg, shims: filepath.Join(cfg, "shims"), tools: filepath.Join(cfg, "tools"),
 		bin: filepath.Join(cfg, "bin", "headroom")}
-	for _, p := range []string{r.bin, filepath.Join(r.tools, "docker"), filepath.Join(r.tools, "podman"), filepath.Join(r.tools, "tart")} {
+	paths := []string{r.bin}
+	for _, n := range shimList() {
+		paths = append(paths, filepath.Join(r.tools, n))
+	}
+	for _, p := range paths {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -133,8 +137,8 @@ func TestDoctorAllGood(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 	wantMark(t, out, "config", "✓", r.cfg)
-	wantMark(t, out, "shims", "✓", "docker, podman, tart", r.bin)
-	wantMark(t, out, "PATH", "✓", "docker, podman, tart")
+	wantMark(t, out, "shims", "✓", "docker, docker-compose, podman, tart", r.bin)
+	wantMark(t, out, "PATH", "✓", "docker, docker-compose, podman, tart")
 	wantMark(t, out, "daemon", "✓")
 	wantMark(t, out, "identity", "✓", `"Fix login"`, "HEADROOM_WORKTREE")
 	wantMark(t, out, "login", "✓")
@@ -218,7 +222,7 @@ func TestDoctorRealToolInTheShimDirIsNotAShim(t *testing.T) {
 
 func TestDoctorNothingThroughTheShimsFails(t *testing.T) {
 	r := newDoctorRig(t)
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if err := os.Remove(filepath.Join(r.tools, n)); err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +276,7 @@ func TestDoctorBrokenShimsOnPATHFail(t *testing.T) {
 	if err := os.Remove(r.bin); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if err := os.Remove(filepath.Join(r.tools, n)); err != nil {
 			t.Fatal(err)
 		}

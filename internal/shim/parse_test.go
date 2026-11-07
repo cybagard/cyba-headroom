@@ -112,6 +112,25 @@ func TestParse(t *testing.T) {
 		{"docker compose up web --help", Call{}},
 		{"docker compose run web echo --dry-run", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
 		{"docker compose up -d --dry-run", Call{}},
+		// docker-compose is docker compose, with fewer of docker's globals (#266).
+		{"docker-compose -f a.yml up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"a.yml"}, ComposeDetached: true}},
+		{"docker-compose -H tcp://h:1 --context c -D up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true, Context: "c"}},
+		{"docker-compose --host=tcp://h:1 --log-level debug --tls --tlsverify --debug up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true}},
+		{"docker-compose -H=tcp://h:1 --context=c --log-level=info up", Call{Kind: "compose", Op: "up", Command: "docker compose up", Host: "tcp://h:1", HasHost: true, Context: "c"}},
+		{"docker-compose -p proj run web", Call{Kind: "compose", Op: "run", Command: "docker compose run", Target: "proj"}},
+		{"docker-compose -c x up", Call{}},
+		{"docker-compose --config x up", Call{}},
+		{"docker-compose -l info up", Call{}},
+		{"docker-compose --tlscacert ca.pem up", Call{}},
+		{"docker-compose -Htcp://h:1 up", Call{}},
+		{"docker-compose -DH tcp://h:1 up", Call{}},
+		{"docker-compose --tls=false up", Call{}},
+		{"docker-compose -f a.yml -H h up", Call{}},
+		{"docker-compose -v", Call{}},
+		{"docker-compose -v up", Call{}},
+		{"docker-compose --version", Call{}},
+		{"docker-compose down", Call{}},
+		{"docker-compose", Call{}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -439,23 +458,48 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "up", "--dry-run=0", "-d"}, nil},
 		{[]string{"compose", "--dry-run", "up"}, nil},
 	} {
-		got, ok := DryRun(tc.args)
+		got, ok := DryRun("docker", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
 			t.Errorf("DryRun(%q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+	}
+	// docker-compose has no compose word: --dry-run follows its docker options.
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"up", "-d"}, []string{"--dry-run", "up", "-d"}},
+		{[]string{"-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "-f", "a.yml", "up", "-d"}},
+		{[]string{"--context=x", "-D", "restart"}, []string{"--context=x", "-D", "--dry-run", "restart"}},
+		{[]string{"run", "web"}, nil},
+		{[]string{"--dry-run", "up"}, nil},
+		{[]string{"-c", "x", "up"}, nil},
+	} {
+		got, ok := DryRun("docker-compose", tc.args)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("DryRun(docker-compose %q) = %q, %v; want %q", tc.args, got, ok, tc.want)
 		}
 	}
 }
 
 func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
-	got, ok := ComposeConfig([]string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
+	got, ok := ComposeConfig("docker", []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
 	want := []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "--profile", "*", "config", "--format", "json"}
 	if !ok || !slices.Equal(got, want) {
 		t.Fatalf("ComposeConfig = %q, %v; want %q", got, ok, want)
 	}
-	if got, _ := ComposeConfig([]string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
+	if got, _ := ComposeConfig("docker", []string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
 		t.Fatalf("one profile set: %q", got)
 	}
-	if _, ok := ComposeConfig([]string{"run", "alpine"}, false); ok {
+	if _, ok := ComposeConfig("docker", []string{"run", "alpine"}, false); ok {
 		t.Fatal("not compose")
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"-H", "h", "-f", "a.yml", "up", "-d"}, false)
+	want = []string{"-H", "h", "-f", "a.yml", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	if _, ok := ComposeConfig("docker-compose", []string{"--config", "d", "up"}, false); ok {
+		t.Fatal("docker-compose --config: the call fails")
 	}
 }

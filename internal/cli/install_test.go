@@ -653,7 +653,7 @@ func TestUninstallRefusesWhenOnlyHomebrewRunsTheDaemon(t *testing.T) {
 			if msg := f.errb.String(); !strings.Contains(msg, "`brew uninstall cybagard/tap/headroom`") || strings.Contains(msg, "`brew uninstall headroom`") {
 				t.Errorf("refusal does not name the tap:\n%s", msg)
 			}
-			for _, n := range []string{"docker", "podman", "tart"} {
+			for _, n := range shimList() {
 				if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != link {
 					t.Errorf("%s -> %q, %v", n, got, err)
 				}
@@ -734,14 +734,14 @@ func TestUninstallWithBothAgentsKeepsHomebrewsShims(t *testing.T) {
 				if code := f.in.uninstall(context.Background()); code != 0 {
 					t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
 				}
-				for _, n := range []string{"docker", "podman", "tart"} {
+				for _, n := range shimList() {
 					if got, err := os.Readlink(filepath.Join(f.in.shimDir, n)); err != nil || got != opt {
 						t.Errorf("Homebrew's %s shim: -> %q, %v", n, got, err)
 					}
 				}
 				_, out, _ := strings.Cut(f.out.String(), "removed from launchd.")
 				removed, kept, _ := strings.Cut(out, "kept:")
-				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" (docker, podman, tart), Homebrew's\n") {
+				if strings.Contains(removed, "shims") || !strings.Contains(kept, "shims    "+f.in.shimDir+" ("+strings.Join(shimList(), ", ")+"), Homebrew's\n") {
 					t.Errorf("output does not list Homebrew's shims as kept:\n%s", out)
 				}
 				if strings.Contains(kept, "such as Homebrew's") {

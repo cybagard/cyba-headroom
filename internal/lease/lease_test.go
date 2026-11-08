@@ -3336,7 +3336,6 @@ func TestAnUndecidedContainerIsDecidedWhenItsUpEnds(t *testing.T) {
 	first := upIn("w1", "/src/w1")
 	first.CostBytes = gib
 	d := b.Check(first, snap(), cfg)
-	b.Check(upIn("w2", "/src/w2"), snap(), cfg)
 	c.t = c.t.Add(time.Second)
 	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
 	b.ContainerEvent("start", "b1", "b1", stackLabels("/src/w1"))
@@ -3346,6 +3345,7 @@ func TestAnUndecidedContainerIsDecidedWhenItsUpEnds(t *testing.T) {
 		b.Observe(read(addContainer(s, protocol.Container{ID: "b1", Name: "b1", MemoryBytes: mem, Labels: stackLabels("/src/w1")}, "w1"), c.t))
 	}
 	reading(gib / 2) // a1 undecided: w1's up keys it but for its dir
+	b.Check(upIn("w2", "/src/w2"), snap(), cfg)
 	if u := b.Ungated(); len(u) != 0 {
 		t.Fatalf("ungated %+v, want none while w1's up is open", u)
 	}
@@ -3359,6 +3359,66 @@ func TestAnUndecidedContainerIsDecidedWhenItsUpEnds(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "ungated: ") || !strings.Contains(log.String(), "name=a1") {
 		t.Errorf("no ungated warning of a1:\n%s", log)
+	}
+}
+
+// A container that w1's up (the oldest) and w2's wrong-dir up both key when
+// it is first undecided stays undecided while either is open: w1's ends,
+// two flickered readings judge nothing, and the next, which attributes it
+// to w2, binds it to w2's up (#222 amendment 1, #208 amendment 3).
+func TestAnUndecidedContainerWaitsForEveryLeaseThatKeyedIt(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	first := upIn("w1", "/src/w1")
+	first.CostBytes = gib
+	b.Check(first, snap(), cfg)
+	d := b.Check(upIn("w2", "/src/x"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/c"))
+	b.ContainerEvent("start", "b1", "b1", stackLabels("/src/w1"))
+	reading := func(mem uint64, wt string) {
+		c.t = c.t.Add(5 * time.Second)
+		s := addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/c")}, wt)
+		b.Observe(read(addContainer(s, protocol.Container{ID: "b1", Name: "b1", MemoryBytes: mem, Labels: stackLabels("/src/w1")}, "w1"), c.t))
+	}
+	reading(gib/2, "") // a1 undecided: both ups key it but for its dir
+	reading(gib, "")   // b1 uses w1's up's cost: it ends
+	if ls := b.List(); len(ls) != 1 || ls[0].ID != d.LeaseID {
+		t.Fatalf("leases %+v, want only w2's up", ls)
+	}
+	reading(gib, "") // a flicker: w2's up is open still
+	if u := b.Ungated(); len(u) != 0 {
+		t.Fatalf("ungated %+v, want none while w2's up is open\n%s", u, log)
+	}
+	reading(gib, "w2")
+	if got := lease.Bindings(b, "a1"); !slices.Equal(got, []string{d.LeaseID}) {
+		t.Errorf("a1 bound by %q, want by w2's up %s", got, d.LeaseID)
+	}
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "name=a1") {
+		t.Errorf("ungated %+v, want none, and no warning of a1:\n%s", u, log)
+	}
+}
+
+// The lease that takes over one that keyed an undecided container keeps it
+// undecided in its place (#222 amendment 1).
+func TestAnUndecidedContainerWaitsForATakeover(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	d := b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	reading := func() {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, ""), c.t))
+	}
+	reading() // a1 undecided: w1's up keys it but for its dir
+	b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	if ls := b.List(); len(ls) != 1 || ls[0].ID == d.LeaseID {
+		t.Fatalf("leases %+v, want only w1's second up, which took the first over", ls)
+	}
+	reading()
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "name=a1") {
+		t.Errorf("ungated %+v, want none while the up that took the first over is open:\n%s", u, log)
 	}
 }
 

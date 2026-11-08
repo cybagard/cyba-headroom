@@ -104,11 +104,11 @@ type mcont struct {
 	owned, pending, verdict bool
 	verdictAt               time.Time
 	// undecided is set while the last reading, with no attribution, left it
-	// new (undecides). window is the up that first left this life of it new,
-	// "" until a reading has: it stays new only while that up is open
-	// (#222).
+	// new (undecides). window are the ups open when a reading first left
+	// this life of it new, nil until one has: it stays new only while one
+	// of them, or an up that took one over, is open (#222).
 	undecided bool
-	window    string
+	window    []string
 	// guess is the guessed up that started it as its own stack's (a hit),
 	// until its first reading, which decides whether the guess binds it, or
 	// another call's start, whose lease it is then (lease.go keyed).
@@ -272,7 +272,7 @@ func (m *model) start(x *mcont, by string) {
 	crashed := m.crashedToBook(x) // before it starts: the book's word for its start event
 	x.shown = m.inLast(x)
 	x.running, x.cur, x.startedBy, x.startedAt, x.raw, x.crashed, x.heldBy, x.missedAt = true, 0, by, m.c.t, by == "", time.Time{}, "", 0
-	x.began, x.guess, x.taken, x.unbound, x.pending, x.window = m.ticks, "", false, false, false, ""
+	x.began, x.guess, x.taken, x.unbound, x.pending, x.window = m.ticks, "", false, false, false, nil
 	if by != "" {
 		m.starts[by]++
 	}
@@ -529,6 +529,11 @@ func (m *model) composeUp(st stack, guess int) bool {
 		if taken[x.heldBy] {
 			x.heldBy = d.LeaseID // it stays held
 		}
+		for i, id := range x.window {
+			if taken[id] {
+				x.window[i] = d.LeaseID // it keeps x undecided in its place (lease.go undecides)
+			}
+		}
 	}
 	for _, sv := range []string{"a", "b"} {
 		x := have[sv]
@@ -686,7 +691,7 @@ func (m *model) restart(x *mcont) {
 	}
 	x.shown = m.inLast(x)
 	x.running, x.cur, x.startedBy, x.startedAt, x.crashed, x.missedAt = true, 0, "", m.c.t, time.Time{}, 0
-	x.began, x.window = m.ticks, ""
+	x.began, x.window = m.ticks, nil
 	m.event("start", x)
 	m.ranAgain(x, crashed)
 	if id != "" {
@@ -860,8 +865,8 @@ func (m *model) tick() {
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
 	for _, x := range m.conts {
 		x.undecided = m.undecides(x)
-		if x.undecided && x.window == "" {
-			x.window = m.upElsewhere(x) // the oldest (lease.go undecides)
+		if x.undecided && x.window == nil {
+			x.window = m.upsElsewhere(x) // every one that keys it (lease.go undecides)
 		}
 		if x.raw && x.project != "" && x.running && !x.missing {
 			switch {
@@ -869,7 +874,7 @@ func (m *model) tick() {
 				m.outcomes["raw up: undecided, verdict kept"]++
 			case x.undecided:
 				m.outcomes["raw up: undecided"]++
-			case x.window != "" && x.read <= x.began && m.upElsewhere(x) != "":
+			case x.window != nil && x.read <= x.began && m.upElsewhere(x) != "":
 				m.outcomes["raw up: decided, another up open"]++ // its window's up ended
 			}
 		}
@@ -1063,29 +1068,39 @@ func (m *model) binder(x *mcont) string {
 // undecides reports whether this reading, which lost its attribution or
 // never had it, leaves x new (lease.go undecides): x, of a project, is new
 // to it, and binds no lease, but another worktree's open up of its project
-// keys it but for its dir. Only while the up that first left this life of
-// it new is open (window): the first reading after it ends reads x as new
-// (#222). A verdict it keeps stays as it was. The next reading with
+// keys it but for its dir. Only while an up open when a reading first left
+// this life of it new is open, or one that took it over (window): the
+// first reading after the last ends reads x as new (#222). A verdict it keeps stays as it was. The next reading with
 // attribution reads it as new.
 func (m *model) undecides(x *mcont) bool {
 	if !m.flick && x.wt != "" || !x.running || x.missing || x.project == "" || x.read > x.began || x.shown ||
 		m.bound(x) || m.binder(x) != "" {
 		return false
 	}
-	if x.window != "" {
-		return m.isOpen(x.window)
+	if x.window != nil {
+		return slices.ContainsFunc(x.window, m.isOpen)
 	}
 	return m.upElsewhere(x) != ""
 }
 
 // upElsewhere is the oldest open up of x's project in another worktree.
 func (m *model) upElsewhere(x *mcont) string {
-	for _, l := range m.b.List() {
-		if l.Worktree != x.wt && m.leases[l.ID] == upCommand(x.project) {
-			return l.ID
-		}
+	if ups := m.upsElsewhere(x); len(ups) > 0 {
+		return ups[0]
 	}
 	return ""
+}
+
+// upsElsewhere are the open ups of x's project in other worktrees, oldest
+// first.
+func (m *model) upsElsewhere(x *mcont) []string {
+	var out []string
+	for _, l := range m.b.List() {
+		if l.Worktree != x.wt && m.leases[l.ID] == upCommand(x.project) {
+			out = append(out, l.ID)
+		}
+	}
+	return out
 }
 
 // eventBinder is the open lease x's start event binds it to (lease.go
@@ -1501,7 +1516,7 @@ func (m *model) run(ops []op) {
 			m.tick()
 			x.missing, x.missedAt = false, m.ticks
 			if twice {
-				x.heldBy, x.window = "", "" // gone: back, it is a new life
+				x.heldBy, x.window = "", nil // gone: back, it is a new life
 			}
 		case 17:
 			// Docker's restart policy restarts a crashed container, with a
@@ -1798,22 +1813,24 @@ func TestTheLeaseModelOn208(t *testing.T) {
 	}
 }
 
-// TestTheLeaseModelOn222 plays seed 2, shrunk, and #222's other half. A
+// TestTheLeaseModelOn222 plays seed 2's shape, and #222's other half. A
 // stack run past the shim in a checkout no worktree holds stays undecided
-// only while the up that first left it new is open: w2's up of app starts
-// c1 and c2, w1's starts c3 and c4, which compose down removes, and a raw
-// up starts c5. w2's lease ends when c1 and c2 use its cost; w1's is open
-// still, and c5 is ungated then. And one that keeps its ungated verdict is
+// only while an up open at its first reading is: a later up never joins
+// (amendment 1). w2's up of app starts c1 and c2, and a raw up c3, which
+// the reading leaves undecided; w1's up of app starts c4 and c5, which
+// compose down removes. w2's lease ends when c1 and c2 use its cost; w1's
+// is open still, and c3 is ungated then. And one that keeps its ungated verdict is
 // listed while it is undecided: a raw up starts c1, judged ungated, which
 // stops and goes; w1's up of app starts c2 and c3; a raw up starts c1
 // again.
 func TestTheLeaseModelOn222(t *testing.T) {
 	for name, ops := range map[string][]op{
 		"the window ends with its up": {
-			{0, 3, 0},            // w2: compose up app starts c1 and c2
-			{0, 2, 0},            // w1: compose up app starts c3 and c4
-			{4, 2, 0},            // compose down c3 and c4
-			{9 | rawStart, 0, 0}, // a raw up starts c5; wait 1m
+			{0, 3, 0},             // w2: compose up app starts c1 and c2
+			{10 | rawStart, 0, 0}, // a raw up starts c3; tick: undecided
+			{0, 2, 0},             // w1: compose up app starts c4 and c5
+			{4, 2, 0},             // compose down c4 and c5
+			{9, 0, 0},             // wait 1m
 		},
 		"a kept verdict stays listed": {
 			{10 | rawStart, 0, 0},  // a raw up starts c1; tick: ungated

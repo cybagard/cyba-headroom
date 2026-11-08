@@ -90,10 +90,10 @@ type Book struct {
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
 	// undecided are the compose containers a reading left new
-	// (Book.undecides), and none has shown since, each with the open lease
+	// (Book.undecides), and none has shown since, each with the open leases
 	// that first left it new: the next reading that shows one binds or
 	// judges it as new. A gone one is dropped, as from prev.
-	undecided map[string]string
+	undecided map[string][]string
 	// based says which sources (container, vm) prev holds a fresh reading
 	// of: until then, every resource of that source may have been there
 	// already.
@@ -1167,7 +1167,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// source's first reading, only a key nothing else can match (a label,
 	// a container ID) binds: anything else may have been there already.
 	var unbound []resource
-	undecided := map[string]string{}
+	undecided := map[string][]string{}
 	for _, r := range fresh {
 		if e := b.binder(r); e != nil {
 			e.bind(r)
@@ -1196,15 +1196,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				b.judge(r, gated, now)
 			}
 			b.boundBy(r, e)
-		} else if id := b.undecides(r); id != "" {
-			undecided[r.key] = id
+		} else if ids := b.undecides(r); ids != nil {
+			undecided[r.key] = ids
 		} else {
 			unbound = append(unbound, r)
 		}
 	}
-	for k, id := range b.undecided {
+	for k, ids := range b.undecided {
 		if _, ok := present[k]; !ok {
-			undecided[k] = id // only missing: still new when it is back (pruned with prev)
+			undecided[k] = ids // only missing: still new when it is back (pruned with prev)
 		}
 	}
 	b.undecided = undecided
@@ -1972,35 +1972,43 @@ func (e *entry) binds(r resource, based, open bool) bool {
 		r.dir != "" && (e.inDir(r) || e.Worktree != "" && r.worktree == e.Worktree))
 }
 
-// undecides returns the lease for which a reading leaves r, bound to no
-// lease, new, "" if none: for a compose container new to it, with no
-// worktree, the oldest open compose lease that knows its dir and keys r but
-// for that dir. It neither judges r nor touches a verdict r keeps. The
-// reading may have lost its attribution (a flicker), and only one that has
-// it says whether r is that lease's worktree's (binds). Until that lease
-// ends: the first reading after it reads r as new, and judges it if it
-// places r in no worktree, whatever lease of r's project is open then
-// (#208, #222). So one with no verdict yet goes unwarned for at most that
-// lease (its timeout at the latest).
-func (b *Book) undecides(r resource) string {
+// undecides returns the leases for which a reading leaves r, bound to no
+// lease, new, nil if none: for a compose container new to it, with no
+// worktree, the open compose leases that know its dir and key r but for
+// that dir. It neither judges r nor touches a verdict r keeps. The reading
+// may have lost its attribution (a flicker), and only one that has it says
+// whether r is one of those leases' worktree's (binds). Until they end, or
+// those that took them over (entry.took): a later lease never joins them.
+// The first reading after the last ends reads r as new, and judges it if
+// it places r in no worktree, whatever lease of r's project is open then
+// (#208, #222). So one with no verdict yet goes unwarned for at most those
+// leases (their timeout at the latest).
+func (b *Book) undecides(r resource) []string {
 	if r.kind != "compose" || r.worktree != "" {
-		return ""
+		return nil
 	}
-	if id, ok := b.undecided[r.key]; ok {
-		if slices.ContainsFunc(b.open, func(e *entry) bool { return e.ID == id }) {
-			return id
+	if ids, ok := b.undecided[r.key]; ok {
+		if slices.ContainsFunc(b.open, func(e *entry) bool { return slices.ContainsFunc(ids, e.is) }) {
+			return ids
 		}
-		return ""
+		return nil
 	}
 	if b.prev[r.key] {
-		return ""
+		return nil
 	}
-	if i := slices.IndexFunc(b.open, func(e *entry) bool { // oldest first
-		return e.Kind == "compose" && e.dir != "" && e.key(r, b.based[source(r.kind)])
-	}); i >= 0 {
-		return b.open[i].ID
+	var ids []string
+	for _, e := range b.open {
+		if e.Kind == "compose" && e.dir != "" && e.key(r, b.based[source(r.kind)]) {
+			ids = append(ids, e.ID)
+		}
 	}
-	return ""
+	return ids
+}
+
+// is reports whether e is lease id, or took it over, at its check or
+// through one it took over.
+func (e *entry) is(id string) bool {
+	return e.ID == id || slices.ContainsFunc(e.took, func(o *entry) bool { return o.is(id) })
 }
 
 // inDir reports whether e is a compose lease whose dir is the one Compose

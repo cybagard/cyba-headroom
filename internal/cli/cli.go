@@ -439,7 +439,13 @@ func runShim(e Env, name string) int {
 		fmt.Fprintf(e.Stderr, "headroom: %s %v\n", name, err)
 		return 127 // as the shell says for a missing command
 	}
-	c := shim.Parse(name, e.Args[1:])
+	// A docker that is podman is podman's call, from its parse to its
+	// label (#270); the agent is shown what it typed.
+	engine := shim.Engine(name, target)
+	c := shim.Parse(engine, e.Args[1:])
+	if rest, ok := strings.CutPrefix(c.Command, engine); ok && engine != name {
+		c.Command = name + rest
+	}
 	if getenv("HEADROOM_SHIM_DEBUG") != "" {
 		gate := "pass"
 		if c.Kind != "" {
@@ -448,10 +454,10 @@ func runShim(e Env, name string) int {
 				gate += ", " + units.Size(c.MemoryBytes)
 			}
 		}
-		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, shim.Engine(name, target), gate)
+		fmt.Fprintf(e.Stderr, "headroom: %s → %s (%s; %s)\n", name, target, engine, gate)
 	}
 	h := e.withDefaults()
-	g := gate(e, name, target, c, getenv)
+	g := gate(e, engine, target, c, getenv)
 	if g.signal != nil {
 		// Die of it, as the real binary would have, so a shell loop
 		// around the call stops too.
@@ -470,7 +476,7 @@ func runShim(e Env, name string) int {
 	if g.lease != "" {
 		// The container carries its lease, so the daemon tells it from one
 		// started past the shim (#33).
-		if la, ok := shim.Labelled(name, args, protocol.LeaseLabel, g.lease); ok {
+		if la, ok := shim.Labelled(engine, args, protocol.LeaseLabel, g.lease); ok {
 			args = la
 		}
 	}

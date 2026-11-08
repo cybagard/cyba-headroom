@@ -2176,6 +2176,21 @@ func (b *Book) Release(id string) bool {
 	return true
 }
 
+// DropTicket ends the waiting call's ticket id, whose check reply was lost
+// (#271), so the calls behind it are no longer held for it; false if no
+// such ticket is queued.
+func (b *Book) DropTicket(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.ticket(id)
+	if w == nil {
+		return false
+	}
+	b.waiting = slices.DeleteFunc(b.waiting, func(o *waiter) bool { return o == w })
+	b.log.Debug("ticket dropped: its reply was lost", "ticket", id, "worktree", w.Worktree)
+	return true
+}
+
 // List returns the open leases of worktrees' calls, oldest first, each
 // with what it still reserves. Manual calls' leases reserve nothing and
 // are left out.

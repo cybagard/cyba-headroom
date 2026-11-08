@@ -90,10 +90,10 @@ type Book struct {
 	// Empty until a reading: no baseline yet.
 	prev map[string]bool
 	// undecided are the compose containers a reading left new
-	// (Book.undecides), and none has shown since: the next reading that
-	// shows one binds or judges it as new. A gone one is dropped, as from
-	// prev.
-	undecided map[string]bool
+	// (Book.undecides), and none has shown since, each with the open lease
+	// that first left it new: the next reading that shows one binds or
+	// judges it as new. A gone one is dropped, as from prev.
+	undecided map[string]string
 	// based says which sources (container, vm) prev holds a fresh reading
 	// of: until then, every resource of that source may have been there
 	// already.
@@ -1147,7 +1147,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			// the reading's to bind or judge (#131).
 			continue
 		}
-		if (!b.prev[r.key] || b.missed[r.key] > 0 && !b.gone(r.key) || b.undecided[r.key]) && !bound[r.key] {
+		if _, undecided := b.undecided[r.key]; (!b.prev[r.key] || b.missed[r.key] > 0 && !b.gone(r.key) || undecided) && !bound[r.key] {
 			fresh = append(fresh, b.unmark(r))
 		}
 	}
@@ -1167,11 +1167,11 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	// source's first reading, only a key nothing else can match (a label,
 	// a container ID) binds: anything else may have been there already.
 	var unbound []resource
-	undecided := map[string]bool{}
+	undecided := map[string]string{}
 	for _, r := range fresh {
 		if e := b.binder(r); e != nil {
 			e.bind(r)
-			if b.prev[r.key] && !b.undecided[r.key] {
+			if _, ok := b.undecided[r.key]; b.prev[r.key] && !ok {
 				// Back after one reading it was missing from: with no
 				// events, a stop the call started again, or a stats blip
 				// across its check (#87). Held, so it binds without its
@@ -1196,15 +1196,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				b.judge(r, gated, now)
 			}
 			b.boundBy(r, e)
-		} else if b.undecides(r) {
-			undecided[r.key] = true
+		} else if id := b.undecides(r); id != "" {
+			undecided[r.key] = id
 		} else {
 			unbound = append(unbound, r)
 		}
 	}
-	for k := range b.undecided {
+	for k, id := range b.undecided {
 		if _, ok := present[k]; !ok {
-			undecided[k] = true // only missing: still new when it is back (pruned with prev)
+			undecided[k] = id // only missing: still new when it is back (pruned with prev)
 		}
 	}
 	b.undecided = undecided
@@ -1240,10 +1240,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	for _, r := range res {
 		v := b.verdicts[r.key]
-		switch {
-		case undecided[r.key]:
-			continue // a kept verdict keeps when the last reading showed it
-		case v == nil:
+		if _, ok := undecided[r.key]; ok {
+			if v != nil {
+				v.present = true // still listed (#222); it keeps when the last reading showed it
+			}
+			continue
+		}
+		if v == nil {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present, v.missedOut = now, true, false
@@ -1271,7 +1274,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 				since = v.event
 			}
 		}
-		if !v.present && !undecided[k] && now.Sub(since) >= keep {
+		if _, ok := undecided[k]; !v.present && !ok && now.Sub(since) >= keep {
 			delete(b.verdicts, k) // an undecided one's waits for the reading that decides it
 		}
 	}
@@ -1969,18 +1972,35 @@ func (e *entry) binds(r resource, based, open bool) bool {
 		r.dir != "" && (e.inDir(r) || e.Worktree != "" && r.worktree == e.Worktree))
 }
 
-// undecides reports whether a reading leaves r, bound to no lease, new: a
-// compose container new to it (or left new by the last), with no worktree,
-// which an open compose lease that knows its dir keys but for that dir. It
-// neither judges r nor touches a verdict r keeps. The reading may have
-// lost its attribution (a flicker), and only one that has it says whether
-// r is that lease's worktree's (binds). Until that lease ends: a reading
-// that places r in no worktree judges it then (#208).
-func (b *Book) undecides(r resource) bool {
-	return r.kind == "compose" && r.worktree == "" && (!b.prev[r.key] || b.undecided[r.key]) &&
-		slices.ContainsFunc(b.open, func(e *entry) bool {
-			return e.Kind == "compose" && e.dir != "" && e.key(r, b.based[source(r.kind)])
-		})
+// undecides returns the lease for which a reading leaves r, bound to no
+// lease, new, "" if none: for a compose container new to it, with no
+// worktree, the oldest open compose lease that knows its dir and keys r but
+// for that dir. It neither judges r nor touches a verdict r keeps. The
+// reading may have lost its attribution (a flicker), and only one that has
+// it says whether r is that lease's worktree's (binds). Until that lease
+// ends: the first reading after it reads r as new, and judges it if it
+// places r in no worktree, whatever lease of r's project is open then
+// (#208, #222). So one with no verdict yet goes unwarned for at most that
+// lease (its timeout at the latest).
+func (b *Book) undecides(r resource) string {
+	if r.kind != "compose" || r.worktree != "" {
+		return ""
+	}
+	if id, ok := b.undecided[r.key]; ok {
+		if slices.ContainsFunc(b.open, func(e *entry) bool { return e.ID == id }) {
+			return id
+		}
+		return ""
+	}
+	if b.prev[r.key] {
+		return ""
+	}
+	if i := slices.IndexFunc(b.open, func(e *entry) bool { // oldest first
+		return e.Kind == "compose" && e.dir != "" && e.key(r, b.based[source(r.kind)])
+	}); i >= 0 {
+		return b.open[i].ID
+	}
+	return ""
 }
 
 // inDir reports whether e is a compose lease whose dir is the one Compose

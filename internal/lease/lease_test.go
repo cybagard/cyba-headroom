@@ -3297,6 +3297,71 @@ func TestAnUndecidedContainerKeepsItsVerdict(t *testing.T) {
 	}
 }
 
+// The same container is listed at every reading that leaves it undecided:
+// its kept verdict still runs (#222).
+func TestAnUndecidedContainerStaysListed(t *testing.T) {
+	b, c, _ := book(t)
+	b.Observe(read(snap(), c.t))
+	a1 := func() *protocol.Snapshot {
+		return addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, "")
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(a1(), c.t)) // no lease open: ungated
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("stop", "a1", "a1", stackLabels("/src/a"))
+	b.ContainerEvent("die", "a1", "a1", stackLabels("/src/a"))
+	for range 2 { // gone
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.Check(upIn("w2", "/src/b"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	for i := 0; len(b.List()) > 0; i++ {
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(a1(), c.t))
+		if u := b.Ungated(); len(u) != 1 || u[0].Name != "a1" {
+			t.Fatalf("reading %d, the up open: ungated %+v, want a1", i, u)
+		}
+	}
+}
+
+// A container no reading places in a worktree, started while w1's up of
+// its project is open, stays undecided only until that up's lease ends,
+// though w2's up of it opened meanwhile: the next reading judges it
+// ungated, and warns (#222).
+func TestAnUndecidedContainerIsDecidedWhenItsUpEnds(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	first := upIn("w1", "/src/w1")
+	first.CostBytes = gib
+	d := b.Check(first, snap(), cfg)
+	b.Check(upIn("w2", "/src/w2"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	b.ContainerEvent("start", "b1", "b1", stackLabels("/src/w1"))
+	reading := func(mem uint64) {
+		c.t = c.t.Add(5 * time.Second)
+		s := addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, "")
+		b.Observe(read(addContainer(s, protocol.Container{ID: "b1", Name: "b1", MemoryBytes: mem, Labels: stackLabels("/src/w1")}, "w1"), c.t))
+	}
+	reading(gib / 2) // a1 undecided: w1's up keys it but for its dir
+	if u := b.Ungated(); len(u) != 0 {
+		t.Fatalf("ungated %+v, want none while w1's up is open", u)
+	}
+	reading(gib) // b1 uses w1's up's cost: it ends
+	if ls := b.List(); len(ls) != 1 || ls[0].ID == d.LeaseID {
+		t.Fatalf("leases %+v, want only w2's up", ls)
+	}
+	reading(gib)
+	if u := b.Ungated(); len(u) != 1 || u[0].Name != "a1" {
+		t.Errorf("ungated %+v, want a1 once w1's up ended, w2's open", u)
+	}
+	if !strings.Contains(log.String(), "ungated: ") || !strings.Contains(log.String(), "name=a1") {
+		t.Errorf("no ungated warning of a1:\n%s", log)
+	}
+}
+
 // w2's up of app is open when w1's guessed up of app starts a container in
 // w1's dir (#109 review B1): at its start event the dir does not give it to
 // w2's up, whose dir it is not, so the reading gives it to w1's guess and

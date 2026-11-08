@@ -864,6 +864,12 @@ func TestPodmanMachineMemory(t *testing.T) {
 		{"bad TOML", map[string]string{user: "[machine\n"}, nil, 2048},
 		{"missing CONTAINERS_CONF", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF=gone.conf"}, 2048},
 		{"memory=0", map[string]string{user: mem(0)}, nil, 2048},
+		// Podman ignores an empty CONTAINERS_CONF or override, and reads an
+		// empty XDG_CONFIG_HOME as the working directory.
+		{"empty CONTAINERS_CONF", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF="}, 3000},
+		{"empty CONTAINERS_CONF_OVERRIDE", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF_OVERRIDE="}, 3000},
+		{"empty XDG_CONFIG_HOME", map[string]string{user: mem(3000), "cwd/containers/containers.conf": mem(3700)}, []string{"XDG_CONFIG_HOME="}, 3700},
+		{"empty XDG_CONFIG_HOME, no cwd file", map[string]string{user: mem(3000), "cwd/.keep": ""}, []string{"XDG_CONFIG_HOME="}, 2048},
 	} {
 		dir, err := os.MkdirTemp("/tmp", "hr")
 		if err != nil {
@@ -881,9 +887,13 @@ func TestPodmanMachineMemory(t *testing.T) {
 		env := []string{"HOME=" + filepath.Join(dir, "home")}
 		for _, kv := range c.env {
 			k, v, _ := strings.Cut(kv, "=")
-			env = append(env, k+"="+filepath.Join(dir, v))
+			if v != "" {
+				v = filepath.Join(dir, v)
+			}
+			env = append(env, k+"="+v)
 		}
-		if got := podmanMachineMemory(lookupIn(env)); got != c.want<<20 {
+		getwd := func() (string, error) { return filepath.Join(dir, "cwd"), nil }
+		if got := podmanMachineMemory(lookupIn(env), getwd); got != c.want<<20 {
 			t.Errorf("%s: %d MiB, want %d", c.name, got>>20, c.want)
 		}
 		_ = os.RemoveAll(dir)

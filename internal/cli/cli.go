@@ -51,7 +51,7 @@ import (
 var Version = "dev"
 
 // ShimNames are the argv[0] basenames that select shim mode.
-var ShimNames = map[string]bool{"docker": true, "podman": true, "tart": true}
+var ShimNames = map[string]bool{"docker": true, "docker-compose": true, "podman": true, "tart": true}
 
 // Env carries the process environment so Run is testable without globals.
 type Env struct {

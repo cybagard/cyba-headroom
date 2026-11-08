@@ -218,6 +218,76 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// docker-compose is docker compose with fewer of docker's options, which it
+// reads anywhere in its leading run of options: every row measured on the
+// real v5.6.1 (#266: the plan, its amendment 1 and review rounds 2 and 3).
+// A call it fails on gives Call{}, or is gated: never a wrong allow.
+func TestDockerComposeLeadingRun(t *testing.T) {
+	const sock = "unix:///var/run/docker.sock"
+	type want struct {
+		compose               bool
+		host, context, target string
+		files                 []string
+	}
+	up := func(host, context string) want { return want{compose: true, host: host, context: context} }
+	for _, tc := range []struct {
+		argv string
+		want want
+	}{
+		// The plan's table.
+		{"-f a.yml up -d", want{compose: true, files: []string{"a.yml"}}},
+		{"-p proj run web", want{compose: true, target: "proj"}},
+		{"-H S up -d", up(sock, "")},
+		{"--context c up -d", up("", "c")},
+		{"-H S --context c -D up -d", up(sock, "c")},
+		{"--host=S --log-level debug --tls --tlsverify --debug up -d", up(sock, "")},
+		{"-H=S --context=c --log-level=info up -d", up(sock, "c")},
+		{"-c x up -d", want{}},
+		{"--config x up -d", want{}},
+		{"-l info up -d", want{}},
+		{"--tlscacert ca.pem up -d", want{}},
+		{"-HS up -d", want{}},
+		{"-DH S up -d", want{}},
+		{"--tls=false up -d", want{}},
+		{"-f a.yml -H S up -d", want{}},
+		{"-v", want{}},
+		{"-v up -d", want{}},
+		{"--version", want{}},
+		{"down", want{}},
+		{"", want{}},
+		// Amendment 1.
+		{"--compatibility -H S up -d", up(sock, "")},
+		{"--dry-run -H S up -d", want{}}, // a dry run starts nothing
+		{"--dry-run=false -H S up -d", up(sock, "")},
+		{"--project-name=x -H S up -d", want{compose: true, host: sock, target: "x"}},
+		{"--ansi=never --host=S up -d", up(sock, "")},
+		{"--profile=a --context nope up -d", up("", "nope")},
+		{"-D --compatibility -H S up -d", up(sock, "")},
+		{"-p x -H S up -d", want{}},
+		{"-f c.yml -H S up -d", want{}},
+		// Round 2: a shorthand's joined value.
+		{"-fc.yml -H S up -d", want{compose: true, host: sock, files: []string{"c.yml"}}},
+		{"-pproj -H S up -d", want{compose: true, host: sock, target: "proj"}},
+		{"-fc.yml -D up -d", want{compose: true, files: []string{"c.yml"}}},
+		// Round 3: compose's hidden flags, and any other.
+		{"--no-ansi -H S up -d", up(sock, "")},
+		{"--verbose -H S up -d", up(sock, "")},
+		{"--verbose=true -H S up -d", up(sock, "")},
+		{"--workdir=. -H S up -d", up(sock, "")},
+		{"--bogus -H S up -d", up(sock, "")},
+		{"-- -H S up -d", want{}},
+		{"--profile a -H S up -d", want{}},
+		{"--workdir . -H S up -d", want{}},
+	} {
+		args := strings.Fields(strings.ReplaceAll(tc.argv, "S", sock))
+		c := Parse("docker-compose", args)
+		got := want{compose: c.Kind == "compose", host: c.Host, context: c.Context, target: c.Target, files: c.ComposeFiles}
+		if !reflect.DeepEqual(got, tc.want) || c.HasHost != (tc.want.host != "") {
+			t.Errorf("docker-compose %s:\n got %+v\nwant %+v", tc.argv, got, tc.want)
+		}
+	}
+}
+
 func TestParseBytes(t *testing.T) {
 	for in, want := range map[string]uint64{
 		"512": 512, "512b": 512, "4k": 4 << 10, "4K": 4 << 10, "256m": 256 << 20, "256MB": 256 << 20,
@@ -439,23 +509,60 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "up", "--dry-run=0", "-d"}, nil},
 		{[]string{"compose", "--dry-run", "up"}, nil},
 	} {
-		got, ok := DryRun(tc.args)
+		got, ok := DryRun("docker", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
 			t.Errorf("DryRun(%q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+	}
+	// docker-compose has no compose word: --dry-run follows its docker options.
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"up", "-d"}, []string{"--dry-run", "up", "-d"}},
+		{[]string{"-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "-f", "a.yml", "up", "-d"}},
+		{[]string{"--context=x", "-D", "restart"}, []string{"--context=x", "-D", "--dry-run", "restart"}},
+		{[]string{"run", "web"}, nil},
+		{[]string{"--dry-run", "up"}, nil},
+		{[]string{"-c", "x", "up"}, nil},
+		{[]string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "--compatibility", "-f", "a.yml", "up", "-d"}},
+		{[]string{"-fa.yml", "-H", "h", "up", "-d"}, []string{"-H", "h", "--dry-run", "-fa.yml", "up", "-d"}},
+	} {
+		got, ok := DryRun("docker-compose", tc.args)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("DryRun(docker-compose %q) = %q, %v; want %q", tc.args, got, ok, tc.want)
 		}
 	}
 }
 
 func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
-	got, ok := ComposeConfig([]string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
+	got, ok := ComposeConfig("docker", []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "up", "-d", "web"}, true)
 	want := []string{"--context", "x", "compose", "-p", "evil", "--env-file", "e", "--profile", "*", "config", "--format", "json"}
 	if !ok || !slices.Equal(got, want) {
 		t.Fatalf("ComposeConfig = %q, %v; want %q", got, ok, want)
 	}
-	if got, _ := ComposeConfig([]string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
+	if got, _ := ComposeConfig("docker", []string{"compose", "-p", "x", "up"}, false); !slices.Equal(got, []string{"compose", "-p", "x", "config", "--format", "json"}) {
 		t.Fatalf("one profile set: %q", got)
 	}
-	if _, ok := ComposeConfig([]string{"run", "alpine"}, false); ok {
+	if _, ok := ComposeConfig("docker", []string{"run", "alpine"}, false); ok {
 		t.Fatal("not compose")
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"-H", "h", "-f", "a.yml", "up", "-d"}, false)
+	want = []string{"-H", "h", "-f", "a.yml", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, false)
+	want = []string{"-H", "h", "--compatibility", "-f", "a.yml", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose, a docker option after a compose one: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	got, ok = ComposeConfig("docker-compose", []string{"-fa.yml", "-pproj", "-H", "h", "up", "-d"}, false)
+	want = []string{"-H", "h", "-fa.yml", "-pproj", "config", "--format", "json"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("docker-compose, joined shorthands: ComposeConfig = %q, %v; want %q", got, ok, want)
+	}
+	if _, ok := ComposeConfig("docker-compose", []string{"--config", "d", "up"}, false); ok {
+		t.Fatal("docker-compose --config: the call fails")
 	}
 }

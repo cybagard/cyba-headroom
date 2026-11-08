@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -63,7 +64,7 @@ func newShimRig(t testing.TB) *shimRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte("#!real\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1377,18 +1378,18 @@ func TestComposeProjectAsksCompose(t *testing.T) {
 	// Compose's name wins over its defaults, which it has already weighed.
 	env := envMap(map[string]string{"COMPOSE_PROJECT_NAME": "other"})
 	wd := func() (string, error) { return "/Users/dev/src/project-a", nil }
-	if got := composeProject("/usr/local/bin/docker", call, shim.Parse("docker", call), env, wd, ask); got != "shop" {
+	if got := composeProject("docker", "/usr/local/bin/docker", call, shim.Parse("docker", call), env, wd, ask); got != "shop" {
 		t.Fatalf("project = %q", got)
 	}
 	want := []string{"/usr/local/bin/docker", "compose", "-f", "a.yml", "-f", "b.yml", "--project-directory", "/srv", "--env-file", "x.env", "config", "--format", "json"}
 	if len(asked) != 1 || !slices.Equal(asked[0], want) {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
-	if got := composeProject("/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, shim.Call{Target: "p"}, noEnv, noWd, ask); got != "p" || len(asked) != 1 {
+	if got := composeProject("docker", "/usr/local/bin/docker", []string{"compose", "-p", "p", "up"}, shim.Call{Target: "p"}, noEnv, noWd, ask); got != "p" || len(asked) != 1 {
 		t.Fatalf("-p: %q, asked again: %v", got, len(asked) != 1)
 	}
 	failing := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	if got := composeProject("/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, noWd, failing); got != "" {
+	if got := composeProject("docker", "/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, noWd, failing); got != "" {
 		t.Fatalf("neither Compose nor its defaults could say: %q, want no key", got)
 	}
 }
@@ -1453,7 +1454,7 @@ func TestComposeProjectWhenConfigFails(t *testing.T) {
 		}
 		wd := func() (string, error) { return tc.wd, nil }
 		for how, ask := range asks {
-			if got := composeProject("/usr/local/bin/docker", tc.args, c, getenv, wd, ask); got != tc.want {
+			if got := composeProject("docker", "/usr/local/bin/docker", tc.args, c, getenv, wd, ask); got != tc.want {
 				t.Errorf("%s, config %s: project = %q, want %q", tc.name, how, got, tc.want)
 			}
 		}
@@ -1514,7 +1515,7 @@ func TestComposeProjectWhenConfigFailsReadsEnvFiles(t *testing.T) {
 		c := shim.Parse("docker", tc.args)
 		getenv := envMap(tc.env)
 		wd := func() (string, error) { return filepath.Join(root, tc.wd), nil }
-		got, guessed := composeKey("/usr/local/bin/docker", tc.args, c, getenv, wd, failing, time.Now, os.Stat)
+		got, guessed := composeKey("docker", "/usr/local/bin/docker", tc.args, c, getenv, wd, failing, time.Now, os.Stat)
 		if got != tc.want || !guessed {
 			t.Errorf("%s: project = %q, guessed %v, want %q, guessed", tc.name, got, guessed, tc.want)
 		}
@@ -1561,7 +1562,7 @@ func TestComposeFileSearchStopsWithinTheBudget(t *testing.T) {
 		}
 		done := make(chan key, 1)
 		go func() {
-			p, g := composeKey("/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, wd, ask, clock, stat)
+			p, g := composeKey("docker", "/usr/local/bin/docker", []string{"compose", "up"}, shim.Call{}, noEnv, wd, ask, clock, stat)
 			done <- key{p, g}
 		}()
 		select {
@@ -1593,7 +1594,7 @@ func TestComposeProjectNormalisedAsCompose(t *testing.T) {
 		"Éü":           "",
 	} {
 		args := []string{"compose", "--project-directory", "/srv/" + dir, "up"}
-		if got := composeProject("/usr/local/bin/docker", args, shim.Parse("docker", args), noEnv, wd, failing); got != want {
+		if got := composeProject("docker", "/usr/local/bin/docker", args, shim.Parse("docker", args), noEnv, wd, failing); got != want {
 			t.Errorf("%q: project = %q, want %q", dir, got, want)
 		}
 	}
@@ -1617,7 +1618,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 	write("compose.override.yaml", "name: ${STACK}-shop\n")
 	write(".env", "STACK=blue\n")
 	ask := func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, os.Environ(), dir) }
-	if got := composeProject(bin, []string{"compose", "up"}, shim.Call{}, noEnv, noWd, ask); got != "blue-shop" {
+	if got := composeProject("docker", bin, []string{"compose", "up"}, shim.Call{}, noEnv, noWd, ask); got != "blue-shop" {
 		t.Fatalf("project = %q, want blue-shop", got)
 	}
 }
@@ -1625,7 +1626,7 @@ func TestComposeProjectFromRealCompose(t *testing.T) {
 func TestComposeProjectForwardsDockersConfig(t *testing.T) {
 	var asked []string
 	ask := func(_ string, args []string) ([]byte, error) { asked = args; return []byte(`{"name":"x"}`), nil }
-	composeProject("/d", []string{"--config", "/work/.docker", "compose", "up"}, shim.Call{}, noEnv, noWd, ask)
+	composeProject("docker", "/d", []string{"--config", "/work/.docker", "compose", "up"}, shim.Call{}, noEnv, noWd, ask)
 	if len(asked) < 3 || asked[0] != "--config" || asked[1] != "/work/.docker" || asked[2] != "compose" {
 		t.Fatalf("asked %q", asked)
 	}
@@ -1650,6 +1651,59 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	r.run("podman", "compose", "up", "-d")
 	if asked != 2 || dry != 1 {
 		t.Fatalf("podman: asked %d, dry %d", asked, dry)
+	}
+	// docker-compose is docker compose, asked through its own binary in
+	// its own shape (#266).
+	var probes [][]string
+	r.composeAsk = func(bin string, args []string) ([]byte, error) {
+		probes = append(probes, append([]string{bin}, args...))
+		return []byte(`{"name":"x"}`), nil
+	}
+	r.composeDry = func(bin string, args []string) ([]byte, error) {
+		probes = append(probes, append([]string{bin}, args...))
+		return []byte(" Container x-a-1 Running \n"), nil
+	}
+	r.run("docker-compose", "up", "-d")
+	bin := filepath.Join(r.dir, "docker-compose")
+	want := [][]string{
+		{bin, "config", "--format", "json"},
+		{bin, "--profile", "*", "config", "--format", "json"},
+		{bin, "--dry-run", "up", "-d"},
+	}
+	if len(r.asked) != 4 || r.asked[3].Kind != "compose" || r.asked[3].Target != "x" || !r.asked[3].Idle || !reflect.DeepEqual(probes, want) {
+		t.Fatalf("docker-compose: asked %+v, probes %q", r.asked, probes)
+	}
+}
+
+// docker-compose picks its engine as docker does (#266): a remote one is
+// not asked about, a local one is.
+func TestDockerComposeFollowsDockersEngine(t *testing.T) {
+	for name, c := range map[string]struct {
+		args  []string
+		env   []string
+		gated bool
+	}{
+		"a remote DOCKER_HOST": {nil, []string{"DOCKER_HOST=tcp://203.0.113.5:2376"}, false},
+		"a remote --context":   {[]string{"--context", "remote"}, nil, false},
+		"a local -H":           {[]string{"-H", "unix:///var/run/docker.sock"}, []string{"DOCKER_HOST=tcp://203.0.113.5:2376"}, true},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		r.composeAsk = func(string, []string) ([]byte, error) { return []byte(`{"name":"x"}`), nil }
+		dc := filepath.Join(r.dir, "dc")
+		sum := sha256.Sum256([]byte("remote"))
+		meta := filepath.Join(dc, "contexts", "meta", hex.EncodeToString(sum[:]))
+		if err := os.MkdirAll(meta, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "meta.json"), []byte(`{"Endpoints":{"docker":{"Host":"ssh://dev@build.example"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(append(r.env, "DOCKER_CONFIG="+dc), c.env...)
+		argv := append(append([]string{"docker-compose"}, c.args...), "up", "-d")
+		if code, _ := r.run(argv...); code != 0 || r.execed == "" || (len(r.asked) == 1) != c.gated {
+			t.Errorf("%s: code %d, execed %q, asked %d, want gated %v", name, code, r.execed, len(r.asked), c.gated)
+		}
 	}
 }
 
@@ -2044,14 +2098,14 @@ func TestComposeIdleIsComposesOwnPlan(t *testing.T) {
 			}
 			return []byte(out), nil
 		}
-		if got := composeIdle("/d", []string{"compose", "up", "-d"}, dry); got != want {
+		if got := composeIdle("docker", "/d", []string{"compose", "up", "-d"}, dry); got != want {
 			t.Errorf("%q: idle = %v, want %v", out, got, want)
 		}
 	}
 	failing := func(string, []string) ([]byte, error) {
 		return []byte(" Container a Running \n"), errors.New("exit status 1")
 	}
-	if composeIdle("/d", []string{"compose", "up"}, failing) {
+	if composeIdle("docker", "/d", []string{"compose", "up"}, failing) {
 		t.Fatal("a failed dry run says nothing")
 	}
 }
@@ -2592,7 +2646,7 @@ func TestComposeDir(t *testing.T) {
 		{"a remote COMPOSE_FILE", nil, map[string]string{"COMPOSE_FILE": "git@github.com:org/repo.git;x.yaml", "COMPOSE_PATH_SEPARATOR": ";"}, wd, found, time.Second, ""},
 	} {
 		args := slices.Concat([]string{"compose"}, tc.args, []string{"up", "-d"})
-		got := composeDir(args, shim.Parse("docker", args), envMap(tc.env), tc.wd, tc.left, tc.stat)
+		got := composeDir("docker", args, shim.Parse("docker", args), envMap(tc.env), tc.wd, tc.left, tc.stat)
 		if got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
 		}
@@ -2647,7 +2701,7 @@ func TestComposeDirWithEnvFiles(t *testing.T) {
 			write(".env", tc.dot)
 		}
 		args := slices.Concat([]string{"compose"}, tc.args, []string{"up", "-d"})
-		if got := composeDir(args, shim.Parse("docker", args), envMap(tc.env), wd, time.Second, os.Stat); got != tc.want {
+		if got := composeDir("docker", args, shim.Parse("docker", args), envMap(tc.env), wd, time.Second, os.Stat); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -2674,7 +2728,7 @@ func TestComposeDirKeepsALogicalWorkingDir(t *testing.T) {
 	t.Chdir(filepath.Join(link, "sub"))
 	t.Setenv("PWD", filepath.Join(link, "sub")) // as a shell's cd sets it
 	args := []string{"compose", "up", "-d"}
-	if got := composeDir(args, shim.Parse("docker", args), noEnv, os.Getwd, time.Second, os.Stat); got != link {
+	if got := composeDir("docker", args, shim.Parse("docker", args), noEnv, os.Getwd, time.Second, os.Stat); got != link {
 		t.Errorf("%q, want %q", got, link)
 	}
 }

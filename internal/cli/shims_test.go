@@ -15,7 +15,7 @@ func TestLinkShims(t *testing.T) {
 	if err != nil || len(notes) != 0 {
 		t.Fatalf("notes %q, err %v", notes, err)
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if target, err := os.Readlink(filepath.Join(dir, n)); err != nil || target != bin {
 			t.Fatalf("%s -> %q, %v", n, target, err)
 		}
@@ -177,10 +177,10 @@ func TestUnlinkShimsTakesALinkGoneUnderItAsGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
-	if strings.Join(removed, " ") != "podman tart" {
-		t.Errorf("removed %q, want podman and tart", removed)
+	if strings.Join(removed, " ") != "docker-compose podman tart" {
+		t.Errorf("removed %q, want docker-compose, podman and tart", removed)
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if _, err := os.Lstat(filepath.Join(dir, n)); !os.IsNotExist(err) {
 			t.Errorf("%s stayed: %v", n, err)
 		}
@@ -212,10 +212,10 @@ func TestUnlinkShimsKeepsAFolderFilledUnderIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
-	if strings.Join(removed, " ") != "docker podman tart" || strings.Join(kept, " ") != "docker podman tart" {
-		t.Errorf("removed %q, kept %q; want all three each", removed, kept)
+	if strings.Join(removed, " ") != "docker docker-compose podman tart" || strings.Join(kept, " ") != "docker docker-compose podman tart" {
+		t.Errorf("removed %q, kept %q; want all four each", removed, kept)
 	}
-	for _, n := range []string{"docker", "podman", "tart"} {
+	for _, n := range shimList() {
 		if got, err := os.Readlink(filepath.Join(dir, n)); err != nil || got != opt {
 			t.Errorf("%s -> %q, %v", n, got, err)
 		}

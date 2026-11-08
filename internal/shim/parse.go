@@ -79,6 +79,13 @@ func Parse(name string, args []string) Call {
 	case "docker", "podman":
 		c, _ := parseEngine(name, args)
 		return c
+	case "docker-compose":
+		all, _, ok := asDockerCompose(args)
+		if !ok {
+			return Call{}
+		}
+		c, _ := parseEngine("docker", all)
+		return c
 	case "tart":
 		return parseTart(args)
 	}
@@ -341,43 +348,73 @@ func SetsLabel(args []string, key string) bool {
 
 // DryRun returns a docker compose call's args with --dry-run added as a
 // compose option, so Compose says what the call would do and does none of
-// it. ok is false for any other call, for a compose run (its one-off
-// container is always new), one whose file is on stdin (the call needs it)
-// and one that sets --dry-run itself.
-func DryRun(args []string) (out []string, ok bool) {
-	c, at := parseEngine("docker", args)
+// it; for docker-compose, after its docker options. ok is false for any
+// other call, for a compose run (its one-off container is always new), one
+// whose file is on stdin (the call needs it) and one that sets --dry-run
+// itself.
+func DryRun(name string, args []string) (out []string, ok bool) {
+	all, lead, ok := asDocker(name, args)
+	if !ok {
+		return nil, false
+	}
+	c, at := parseEngine("docker", all)
 	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
 		return nil, false
 	}
-	if slices.ContainsFunc(args, func(a string) bool { return a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") }) {
+	if slices.ContainsFunc(all, func(a string) bool { return a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") }) {
 		// It sets --dry-run itself, and the last value wins: with
 		// --dry-run=false after ours, the dry run would be the real call.
 		return nil, false
 	}
-	out = append(out, args[:at]...)
+	out = append(out, all[:at]...)
 	out = append(out, "--dry-run")
-	return append(out, args[at:]...), true
+	return fromDocker(append(out, all[at:]...), lead), true
 }
 
 // ComposeConfig returns the args that ask Compose for a docker compose
 // call's project as JSON: the call's own global options (-p, -f,
 // --env-file, --config, --context), which Compose interpolates, then
-// config; with every profile's services if all. ok is false for any other
-// call.
-func ComposeConfig(args []string, all bool) (out []string, ok bool) {
-	c, at := parseEngine("docker", args)
+// config; with every profile's services if all. name is docker or
+// docker-compose, whose args have no compose word. ok is false for any
+// other call.
+func ComposeConfig(name string, args []string, all bool) (out []string, ok bool) {
+	dockerArgs, lead, ok := asDocker(name, args)
+	if !ok {
+		return nil, false
+	}
+	c, at := parseEngine("docker", dockerArgs)
 	if c.Kind != "compose" || at < 0 {
 		return nil, false
 	}
-	rest, res, _ := scanPast(args[at:], composeGlobal, isComposeCommand, nil)
+	rest, res, _ := scanPast(dockerArgs[at:], composeGlobal, isComposeCommand, nil)
 	if res == askedHelp || len(rest) == 0 {
 		return nil, false
 	}
-	out = slices.Clone(args[:len(args)-len(rest)])
+	out = slices.Clone(dockerArgs[:len(dockerArgs)-len(rest)])
 	if all {
 		out = append(out, "--profile", "*")
 	}
-	return append(out, "config", "--format", "json"), true
+	return fromDocker(append(out, "config", "--format", "json"), lead), true
+}
+
+// asDocker returns a docker or docker-compose call's args as docker's, and
+// where docker-compose's had no compose word (-1 for docker).
+func asDocker(name string, args []string) (all []string, lead int, ok bool) {
+	switch name {
+	case "docker":
+		return args, -1, true
+	case "docker-compose":
+		return asDockerCompose(args)
+	}
+	return nil, -1, false
+}
+
+// fromDocker undoes asDocker: it drops the compose word at lead, if any.
+func fromDocker(args []string, lead int) []string {
+	if lead < 0 {
+		return args
+	}
+	return slices.Delete(args, lead, lead+1)
 }
 
 // parseCompose parses a compose call; engine holds the docker call's global
@@ -446,6 +483,46 @@ func parseCompose(engine Call, words, args []string) Call {
 	c.Kind, c.Op, c.Target = "compose", op, project
 	c.ComposeFiles, c.ComposeProjectDir, c.ComposeEnvFiles, c.ComposeDetached = files, projectDir, envFiles, detached
 	return c.named(append(words, op))
+}
+
+// asDockerCompose returns a docker-compose call's args as the docker compose
+// call it is (#266): its docker options, "compose" at lead, then the rest.
+// The standalone binary takes only a few of docker's options, anywhere in
+// the leading run of options, as its first pass does: it reads docker's,
+// takes any other option for compose's, and stops at the first word or
+// "--". So a compose option with a separate value (-f x) ends the run at
+// its value (plan amendment 1). Docker's options move before "compose",
+// compose's keep their order. ok is false for -v and --version, and for a
+// docker option in compose's part: the real call fails on it. A compose
+// option it does not know only gates a call that fails.
+func asDockerCompose(args []string) (all []string, lead int, ok bool) {
+	var docker, compose []string
+	i := 0
+	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' && args[i] != "--" {
+		a := args[i]
+		f, _, joined := strings.Cut(a, "=")
+		takes, known := composeDocker[f]
+		switch {
+		case a == "-v" || a == "--version":
+			return nil, 0, false
+		case known && takes && joined, known && !takes && !joined:
+			docker, i = append(docker, a), i+1 // a boolean takes no =value
+		case known && takes:
+			docker, i = append(docker, args[i:min(i+2, len(args))]...), min(i+2, len(args))
+		default:
+			compose, i = append(compose, a), i+1
+		}
+	}
+	rest := slices.Concat(compose, args[i:])
+	rejected := false
+	scanPast(rest, withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
+		_, own := composeGlobal[f]
+		rejected = rejected || !own
+	})
+	if rejected {
+		return nil, 0, false
+	}
+	return slices.Concat(docker, []string{"compose"}, rest), len(docker), true
 }
 
 // isComposeCommand reports whether w is a compose command; it tells an
@@ -753,6 +830,9 @@ var (
 	containerStart = flags( // start and restart
 		"--detach-keys --filter --signal --time --timeout -f -s -t",
 		"--all --attach --interactive --running -a -i")
+	// The options of docker that docker-compose takes; measured, as its
+	// help text does not list them (#266).
+	composeDocker = flags("--context --host --log-level -H", "--debug --tls --tlsverify -D")
 	composeGlobal = flags(
 		"--ansi --env-file --file --parallel --profile --progress --project-directory --project-name -f -p",
 		"--all-resources --compatibility --dry-run")

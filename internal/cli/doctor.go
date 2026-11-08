@@ -336,7 +336,7 @@ func worktreeName(snap *protocol.Snapshot, id string) string {
 }
 
 // loginScript prints where a login shell finds each tool.
-const loginScript = `for c in docker podman tart; do printf '%s=%s\n' "$c" "$(command -v "$c")"; done`
+const loginScript = `for c in docker docker-compose podman tart; do printf '%s=%s\n' "$c" "$(command -v "$c")"; done`
 
 // askLoginShell runs loginScript in a login shell, which runs path_helper
 // and the user's whole profile (oh-my-zsh, nvm and the like take seconds),
@@ -386,7 +386,7 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error), 
 		}
 	}
 	if found == 0 {
-		return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` finds none of docker, podman, tart", sh)}
+		return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` finds none of %s", sh, strings.Join(shimList(), ", "))}
 	}
 	if len(ungated) > 0 {
 		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated, and headroom shows them as ungated", sh, strings.Join(ungated, ", "))}

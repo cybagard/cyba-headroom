@@ -2,6 +2,7 @@ package lease_test
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -106,9 +107,11 @@ type mcont struct {
 	// undecided is set while the last reading, with no attribution, left it
 	// new (undecides). window are the ups open when a reading first left
 	// this life of it new, nil until one has: it stays new only while one
-	// of them, or an up that took one over, is open (#222).
+	// of them, or an up that took one over, is open, and for the timeout
+	// at most from that reading, windowAt (#222).
 	undecided bool
 	window    []string
+	windowAt  time.Time
 	// guess is the guessed up that started it as its own stack's (a hit),
 	// until its first reading, which decides whether the guess binds it, or
 	// another call's start, whose lease it is then (lease.go keyed).
@@ -165,8 +168,8 @@ type op struct{ kind, a, b int }
 // (#271): the daemon undoes it (loseReply).
 const lostReply = 1 << 8
 
-// rawStart, set in an op's kind, runs a stack past the shim before the op
-// (rawCompose, #222).
+// rawStart, set in an op's kind, makes op 8's start past the shim a
+// stack's (rawCompose, #222).
 const rawStart = 1 << 9
 
 type model struct {
@@ -289,9 +292,9 @@ func (m *model) crashedToBook(x *mcont) bool {
 
 // inLast reports whether the last reading showed x, or only missed it
 // after the one before showed it: it is still there to the book (lease.go
-// prev).
+// prev). A read of 0 is none: the first reading showed no container.
 func (m *model) inLast(x *mcont) bool {
-	return m.ticks > 0 && (x.read == m.ticks || x.missedAt == m.ticks && x.read == m.ticks-1)
+	return m.ticks > 0 && x.read > 0 && (x.read == m.ticks || x.missedAt == m.ticks && x.read == m.ticks-1)
 }
 
 func (m *model) newCont(project, service, wt string, labels map[string]string) *mcont {
@@ -866,7 +869,7 @@ func (m *model) tick() {
 	for _, x := range m.conts {
 		x.undecided = m.undecides(x)
 		if x.undecided && x.window == nil {
-			x.window = m.upsElsewhere(x) // every one that keys it (lease.go undecides)
+			x.window, x.windowAt = m.upsElsewhere(x), m.c.t // every one that keys it (lease.go undecides)
 		}
 		if x.raw && x.project != "" && x.running && !x.missing {
 			switch {
@@ -1069,8 +1072,9 @@ func (m *model) binder(x *mcont) string {
 // never had it, leaves x new (lease.go undecides): x, of a project, is new
 // to it, and binds no lease, but another worktree's open up of its project
 // keys it but for its dir. Only while an up open when a reading first left
-// this life of it new is open, or one that took it over (window): the
-// first reading after the last ends reads x as new (#222). A verdict it keeps stays as it was. The next reading with
+// this life of it new is open, or one that took it over (window), and for
+// the timeout at most: the first reading after either reads x as new
+// (#222). A verdict it keeps stays as it was. The next reading with
 // attribution reads it as new.
 func (m *model) undecides(x *mcont) bool {
 	if !m.flick && x.wt != "" || !x.running || x.missing || x.project == "" || x.read > x.began || x.shown ||
@@ -1078,7 +1082,7 @@ func (m *model) undecides(x *mcont) bool {
 		return false
 	}
 	if x.window != nil {
-		return slices.ContainsFunc(x.window, m.isOpen)
+		return slices.ContainsFunc(x.window, m.isOpen) && m.c.t.Sub(x.windowAt) < timeout
 	}
 	return m.upElsewhere(x) != ""
 }
@@ -1367,9 +1371,6 @@ func (m *model) run(ops []op) {
 		o.kind &^= rawStart
 		m.cur = o
 		m.c.t = m.c.t.Add(10 * time.Millisecond) // calls and events take time
-		if raw {
-			m.rawCompose()
-		}
 		st := m.stackAt(o.a)
 		switch o.kind {
 		case 0, 1, 2, 5, 7:
@@ -1403,7 +1404,11 @@ func (m *model) run(ops []op) {
 				m.step("stop/crash(%v) %s", o.b%2 == 0, x.id)
 			}
 		case 8:
-			m.rawRun()
+			if raw {
+				m.rawCompose()
+			} else {
+				m.rawRun()
+			}
 		case 12:
 			m.forgeCompose()
 		case 13:
@@ -1656,6 +1661,50 @@ func shrink(t *testing.T, ops []op, kind string) []op {
 	return ops
 }
 
+// walk is seed's random ops.
+func walk(seed int) []op {
+	rng := rand.New(rand.NewPCG(uint64(seed), 1))
+	ops := make([]op, 80)
+	for i := range ops {
+		ops[i] = op{rng.IntN(23), rng.IntN(1000), rng.IntN(1000)}
+	}
+	// A stream of its own picks the ops whose first check's reply is
+	// lost (#271), so the ops above are those of earlier walks.
+	lose := rand.New(rand.NewPCG(uint64(seed), 2))
+	for i := range ops {
+		if lose.IntN(16) == 0 {
+			ops[i].kind |= lostReply
+		}
+	}
+	// And another the raw starts (op 8) that are a stack's (#222): the ops
+	// stay those of earlier walks (TestTheModelsWalksAreUnchanged).
+	raw := rand.New(rand.NewPCG(uint64(seed), 3))
+	for i := range ops {
+		if raw.IntN(2) == 0 {
+			ops[i].kind |= rawStart
+		}
+	}
+	return ops
+}
+
+// The walks' ops, less which raw starts are a stack's, are those of the
+// walks before #222: the hash of seeds 0 to 299's, as main 8520e47's
+// generator made them. A raw start that is a stack's replaces op 8's raw
+// run, and inserts no op, so a seed walks as before but at those.
+func TestTheModelsWalksAreUnchanged(t *testing.T) {
+	h := sha256.New()
+	for seed := range 300 {
+		ops := walk(seed)
+		for i := range ops {
+			ops[i].kind &^= rawStart
+		}
+		fmt.Fprint(h, ops)
+	}
+	if got, want := fmt.Sprintf("%x", h.Sum(nil)), "a59e2835dbf57ff42c6f06c8198ca5043d76c0d4114b96a773fd5b6bd5704e8a"; got != want {
+		t.Errorf("seeds 0 to 299 walk ops hashing to %s, want main's %s", got, want)
+	}
+}
+
 // TestTheLeaseModel runs HEADROOM_MODEL_SEEDS random runs (default 300)
 // and shows each failure shrunk to the ops it needs. HEADROOM_MODEL_OPEN
 // turns on the cases of open bugs (openBugs).
@@ -1666,27 +1715,7 @@ func TestTheLeaseModel(t *testing.T) {
 	}
 	kinds, outcomes := map[string]int{}, map[string]int{}
 	for seed := range seeds {
-		rng := rand.New(rand.NewPCG(uint64(seed), 1))
-		ops := make([]op, 80)
-		for i := range ops {
-			ops[i] = op{rng.IntN(23), rng.IntN(1000), rng.IntN(1000)}
-		}
-		// A stream of its own picks the ops whose first check's reply is
-		// lost (#271), so the ops above are those of earlier walks.
-		lose := rand.New(rand.NewPCG(uint64(seed), 2))
-		for i := range ops {
-			if lose.IntN(16) == 0 {
-				ops[i].kind |= lostReply
-			}
-		}
-		// And another the ops before which a stack runs past the shim
-		// (#222).
-		raw := rand.New(rand.NewPCG(uint64(seed), 3))
-		for i := range ops {
-			if raw.IntN(16) == 0 {
-				ops[i].kind |= rawStart
-			}
-		}
+		ops := walk(seed)
 		f, n := playCounting(t, ops)
 		for k, v := range n {
 			outcomes[k] += v
@@ -1826,18 +1855,21 @@ func TestTheLeaseModelOn208(t *testing.T) {
 func TestTheLeaseModelOn222(t *testing.T) {
 	for name, ops := range map[string][]op{
 		"the window ends with its up": {
-			{0, 3, 0},             // w2: compose up app starts c1 and c2
-			{10 | rawStart, 0, 0}, // a raw up starts c3; tick: undecided
-			{0, 2, 0},             // w1: compose up app starts c4 and c5
-			{4, 2, 0},             // compose down c4 and c5
-			{9, 0, 0},             // wait 1m
+			{0, 3, 0},            // w2: compose up app starts c1 and c2
+			{8 | rawStart, 0, 0}, // a raw up starts c3
+			{10, 0, 0},           // tick: undecided
+			{0, 2, 0},            // w1: compose up app starts c4 and c5
+			{4, 2, 0},            // compose down c4 and c5
+			{9, 0, 0},            // wait 1m
 		},
 		"a kept verdict stays listed": {
-			{10 | rawStart, 0, 0},  // a raw up starts c1; tick: ungated
+			{8 | rawStart, 0, 0},   // a raw up starts c1
+			{10, 0, 0},             // tick: ungated
 			{6, 0, 1},              // stop c1
 			{10, 0, 0}, {10, 0, 0}, // tick, tick: gone
-			{0, 2, 0},             // w1: compose up app starts c2 and c3
-			{10 | rawStart, 0, 0}, // a raw up starts c1 again; tick
+			{0, 2, 0},            // w1: compose up app starts c2 and c3
+			{8 | rawStart, 0, 0}, // a raw up starts c1 again
+			{10, 0, 0},           // tick
 			{10, 0, 0},
 		},
 	} {

@@ -3422,6 +3422,43 @@ func TestAnUndecidedContainerWaitsForATakeover(t *testing.T) {
 	}
 }
 
+// w1 re-runs its up every 50 s, each taking the last over: the container
+// those ups keep undecided is decided at the first reading lease_timeout
+// after its window began, ungated and warned, the chain still open (#222
+// amendment 2).
+func TestAnUndecidedContainersWindowEndsAtTheTimeout(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	var began time.Time
+	for i := 1; ; i++ {
+		c.t = c.t.Add(5 * time.Second)
+		if i%10 == 0 {
+			b.Check(upIn("w1", "/src/w1"), snap(), cfg) // takes the last over
+		}
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, ""), c.t))
+		if began.IsZero() {
+			began = c.t
+		}
+		listed := len(b.Ungated()) == 1
+		if c.t.Before(began.Add(2 * time.Minute)) {
+			if listed {
+				t.Fatalf("reading %d, %s into the window: ungated %+v, want none yet", i, c.t.Sub(began), b.Ungated())
+			}
+			continue
+		}
+		if len(b.List()) == 0 {
+			t.Fatalf("leases ended, want w1's chain of ups open")
+		}
+		if !listed || !strings.Contains(log.String(), "name=a1") {
+			t.Fatalf("reading %d, %s into the window: ungated %+v, want a1, and warned:\n%s", i, c.t.Sub(began), b.Ungated(), log)
+		}
+		return
+	}
+}
+
 // w2's up of app is open when w1's guessed up of app starts a container in
 // w1's dir (#109 review B1): at its start event the dir does not give it to
 // w2's up, whose dir it is not, so the reading gives it to w1's guess and

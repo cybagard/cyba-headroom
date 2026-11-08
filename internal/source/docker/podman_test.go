@@ -29,20 +29,39 @@ const recordedSocket = "/var/folders/00/T/podman/podman-machine-default-api.sock
 // fakePodman answers the podman CLI from recorded output: list is
 // `podman machine list --format json`'s, and inspect, by machine name,
 // `podman machine inspect <name>`'s, with recordedSocket swapped for the
-// socket in sockets. It records each call.
+// socket in sockets. It records each call, and the deadline it ran
+// under. A call that begins with block runs until its context ends.
 type fakePodman struct {
 	mu      sync.Mutex
 	list    string
 	inspect map[string]string // machine name → recorded file
 	sockets map[string]string // machine name → socket
+	block   string
 	calls   []string
+	runs    []run
 }
 
-func (f *fakePodman) Run(_ context.Context, args ...string) ([]byte, error) {
+// run is a call's context: its deadline, when it was called, and why it
+// ended if it blocked.
+type run struct {
+	deadline, at time.Time
+	err          error
+}
+
+func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	call := strings.Join(args, " ")
 	f.calls = append(f.calls, call)
+	d, _ := ctx.Deadline()
+	f.runs = append(f.runs, run{deadline: d, at: time.Now()})
+	if f.block != "" && strings.HasPrefix(call, f.block) {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		f.runs[len(f.runs)-1].err = ctx.Err()
+		return nil, ctx.Err()
+	}
 	switch {
 	case call == "machine list --format json":
 		return read(f.list)
@@ -92,7 +111,7 @@ var t0 = time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 func TestPodmanSocketFromInspect(t *testing.T) {
 	sock := listen(t, filepath.Join(shortDir(t), "api.sock"))
 	p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
-	got := p.Candidates()
+	got := p.Candidates(context.Background())
 	want := []docker.Candidate{{Socket: sock, Trusted: true, Machine: "podman-machine-default"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %v, want %v", got, want)
@@ -105,11 +124,11 @@ func TestPodmanInspectNotRunWhileTheSocketAnswers(t *testing.T) {
 	cli := machine(sock)
 	clock := &fakeClock{t0}
 	p := docker.NewPodman(cli, clock.now, quiet)
-	p.Candidates()
+	p.Candidates(context.Background())
 	ran := cli.count()
 	for range 5 {
 		clock.t = clock.t.Add(time.Minute)
-		if got := p.Candidates(); len(got) != 1 || got[0].Socket != sock {
+		if got := p.Candidates(context.Background()); len(got) != 1 || got[0].Socket != sock {
 			t.Fatalf("candidates = %v", got)
 		}
 	}
@@ -131,18 +150,18 @@ func TestPodmanInspectRereadAfterTheSocketRefuses(t *testing.T) {
 	cli := machine(old)
 	clock := &fakeClock{t0}
 	p := docker.NewPodman(cli, clock.now, quiet)
-	p.Candidates()
+	p.Candidates(context.Background())
 	_ = ln.Close()
 	cli.sockets["podman-machine-default"] = listen(t, filepath.Join(dir, "new.sock"))
 	ran := cli.count()
 
 	// Within 30 s of the last inspect, the dead socket stands.
 	clock.t = t0.Add(29 * time.Second)
-	if got := p.Candidates(); len(got) != 1 || got[0].Socket != old || cli.count() != ran {
+	if got := p.Candidates(context.Background()); len(got) != 1 || got[0].Socket != old || cli.count() != ran {
 		t.Fatalf("at 29 s: candidates = %v, calls = %v; want the old socket, no inspect", got, cli.calls)
 	}
 	clock.t = t0.Add(30 * time.Second)
-	if got := p.Candidates(); len(got) != 1 || got[0].Socket != filepath.Join(dir, "new.sock") || cli.count() == ran {
+	if got := p.Candidates(context.Background()); len(got) != 1 || got[0].Socket != filepath.Join(dir, "new.sock") || cli.count() == ran {
 		t.Fatalf("at 30 s: candidates = %v, calls = %v; want the new socket, from inspect", got, cli.calls)
 	}
 }
@@ -154,23 +173,106 @@ func TestPodmanStoppedMachineIsInspectedEvery30s(t *testing.T) {
 	cli := machine(gone)
 	clock := &fakeClock{t0}
 	p := docker.NewPodman(cli, clock.now, quiet)
-	p.Candidates()
+	p.Candidates(context.Background())
 	first := cli.count()
 	for s := 5; s < 30; s += 5 { // the daemon's ticks
 		clock.t = t0.Add(time.Duration(s) * time.Second)
-		p.Candidates()
+		p.Candidates(context.Background())
 	}
 	if cli.count() != first {
 		t.Fatalf("within 30 s: podman ran %v", cli.calls)
 	}
 	clock.t = t0.Add(30 * time.Second)
-	p.Candidates()
+	p.Candidates(context.Background())
 	if cli.count() != 2*first {
 		t.Fatalf("at 30 s: podman ran %v, want inspect again", cli.calls)
 	}
 	// Its path is still the candidate: Candidates leaves a missing one out.
-	if got := docker.Candidates("", env(nil), quiet, p.Candidates()...); len(got) != 0 {
+	if got := docker.Candidates("", env(nil), quiet, p.Candidates(context.Background())...); len(got) != 0 {
 		t.Fatalf("candidates = %v, want none for a stopped machine", got)
+	}
+}
+
+// stalled is a source whose Podman socket was found, then refused, 30 s
+// ago, so that Collect runs the podman CLI again, and the CLI blocks on
+// calls that begin with block.
+func stalled(t *testing.T, block string) (*docker.Source, *fakePodman, string) {
+	t.Helper()
+	old := filepath.Join(shortDir(t), "api.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: old, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.SetUnlinkOnClose(false) // the file stays: it refuses
+	cli := machine(old)
+	clock := &fakeClock{t0}
+	p := docker.NewPodman(cli, clock.now, quiet)
+	if got := p.Candidates(context.Background()); len(got) != 1 {
+		t.Fatalf("candidates = %v", got)
+	}
+	_ = ln.Close()
+	clock.t = t0.Add(30 * time.Second)
+	cli.block, cli.runs = block, nil
+	return docker.Discover(p.Candidates, fakeVMs{podmanVM}), cli, old
+}
+
+// The podman CLI runs within a second, list and inspect together, and
+// within Collect's context: one that hangs costs a reading no more than
+// that, and the last socket found stands (#238).
+func TestPodmanCLIRunsWithinASecondOfCollect(t *testing.T) {
+	for _, tc := range []struct {
+		block   string
+		timeout time.Duration
+	}{
+		{"machine list", 3 * time.Second},
+		{"machine inspect", 3 * time.Second},
+		{"machine inspect", 200 * time.Millisecond},
+	} {
+		src, cli, old := stalled(t, tc.block)
+		ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+		start := time.Now()
+		r, err := src.Collect(ctx)
+		took := time.Since(start)
+		deadline, _ := ctx.Deadline()
+		cancel()
+		if took > min(tc.timeout, time.Second)+100*time.Millisecond {
+			t.Errorf("%s, %v: Collect took %v", tc.block, tc.timeout, took)
+		}
+		if len(cli.runs) == 0 {
+			t.Fatalf("%s, %v: podman did not run", tc.block, tc.timeout)
+		}
+		for i, r := range cli.runs {
+			if r.deadline.IsZero() || r.deadline.After(deadline) || r.deadline.After(r.at.Add(time.Second)) || !r.deadline.Equal(cli.runs[0].deadline) {
+				t.Errorf("%s, %v: podman %s ran until %v, called at %v; want one deadline, no later than Collect's, %v, nor a second on",
+					tc.block, tc.timeout, cli.calls[i], r.deadline, r.at, deadline)
+			}
+		}
+		if tc.timeout < time.Second {
+			continue // Collect's context ended before any engine was read
+		}
+		if err != nil {
+			t.Fatalf("%s, %v: Collect: %v", tc.block, tc.timeout, err)
+		}
+		var s protocol.Snapshot
+		r.Apply(&s)
+		if len(s.Engines) != 1 || s.Engines[0].Socket != old || s.Engines[0].Running {
+			t.Errorf("%s, %v: engines = %+v, want the last socket, not running", tc.block, tc.timeout, s.Engines)
+		}
+	}
+}
+
+// Collect's context ending ends the podman CLI it runs (#238).
+func TestPodmanCLIEndsWithCollect(t *testing.T) {
+	src, cli, _ := stalled(t, "machine list")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	_, _ = src.Collect(ctx)
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("Collect took %v after its context was cancelled at 50ms", took)
+	}
+	if len(cli.runs) != 1 || !errors.Is(cli.runs[0].err, context.Canceled) {
+		t.Errorf("podman runs = %+v, want one cancelled", cli.runs)
 	}
 }
 
@@ -183,7 +285,7 @@ func TestPodmanFirstRunningMachineWithoutADefault(t *testing.T) {
 		sockets: map[string]string{"b": sock},
 	}
 	p := docker.NewPodman(cli, (&fakeClock{t0}).now, quiet)
-	if got := p.Candidates(); len(got) != 1 || got[0].Socket != sock || got[0].Machine != "b" {
+	if got := p.Candidates(context.Background()); len(got) != 1 || got[0].Socket != sock || got[0].Machine != "b" {
 		t.Fatalf("candidates = %v, calls = %v; want machine b's", got, cli.calls)
 	}
 }
@@ -200,7 +302,7 @@ func TestPodmanNoCLIOrNoMachineIsNoCandidateLoggedOnce(t *testing.T) {
 		clock := &fakeClock{t0}
 		p := docker.NewPodman(cli, clock.now, slog.New(slog.NewTextHandler(&log, nil)))
 		for range 20 {
-			if got := p.Candidates(); len(got) != 0 {
+			if got := p.Candidates(context.Background()); len(got) != 0 {
 				t.Fatalf("%s: candidates = %v, want none", name, got)
 			}
 			clock.t = clock.t.Add(5 * time.Second)
@@ -217,7 +319,7 @@ func TestPodmanCandidateComesAfterDockerDesktops(t *testing.T) {
 	desktop := listen(t, filepath.Join(home, ".docker", "run", "docker.sock"))
 	sock := listen(t, filepath.Join(home, "api.sock"))
 	p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
-	got := docker.Candidates("", env(map[string]string{"HOME": home}), quiet, p.Candidates()...)
+	got := docker.Candidates("", env(map[string]string{"HOME": home}), quiet, p.Candidates(context.Background())...)
 	want := []docker.Candidate{{Socket: desktop, Trusted: true}, {Socket: sock, Trusted: true, Machine: "podman-machine-default"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %v, want %v", got, want)
@@ -229,7 +331,7 @@ func TestPodmanCandidateComesAfterDockerDesktops(t *testing.T) {
 func TestPodmanSocketNamedTwiceKeepsItsMachine(t *testing.T) {
 	sock := listen(t, filepath.Join(shortDir(t), "api.sock"))
 	p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
-	got := docker.Candidates("", env(map[string]string{"DOCKER_HOST": "unix://" + sock}), quiet, p.Candidates()...)
+	got := docker.Candidates("", env(map[string]string{"DOCKER_HOST": "unix://" + sock}), quiet, p.Candidates(context.Background())...)
 	want := []docker.Candidate{{Socket: sock, Trusted: true, Machine: "podman-machine-default"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %v, want %v", got, want)
@@ -260,13 +362,13 @@ func TestPodmanEngineWithItsContainersAndVM(t *testing.T) {
 	sock := podmanEngine(t, `{}`)
 	p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
 	vms := fakeVMs{{PID: 2, Kind: vmproc.Docker, FootprintBytes: 1709280520}, {PID: 31, Kind: vmproc.Podman, Name: "other", FootprintBytes: 1}, podmanVM}
-	got := found(t, vms, p.Candidates()...)
+	got := found(t, vms, p.Candidates(context.Background())...)
 	if len(got) != 1 {
 		t.Fatalf("engines = %+v, want one", got)
 	}
 	e := got[0]
 	if e.Kind != protocol.EnginePodman || e.Machine != "podman-machine-default" || !e.Running || e.Socket != sock ||
-		e.ID != "podman:podman-machine-default" || e.VMLimitBytes != 2037100544 {
+		e.ID != "podman:podman-machine-default" || e.VMLimitBytes != 2035257344 {
 		t.Errorf("engine = %+v", e)
 	}
 	if len(e.Containers) != 1 || e.Containers[0].ID != podmanID || e.Containers[0].Name != "cache" || e.Containers[0].MemoryBytes != 1<<20 {
@@ -341,7 +443,7 @@ func TestPodmanEngineWithoutAMachineIsItsSocket(t *testing.T) {
 	if err := os.Symlink(sock, link); err != nil {
 		t.Fatal(err)
 	}
-	src := docker.Discover(func() []docker.Candidate { return []docker.Candidate{{Socket: link, Trusted: true}} }, fakeVMs{})
+	src := docker.Discover(func(context.Context) []docker.Candidate { return []docker.Candidate{{Socket: link, Trusted: true}} }, fakeVMs{})
 	resolved, err := filepath.EvalSymlinks(sock)
 	if err != nil {
 		t.Fatal(err)
@@ -465,7 +567,7 @@ func TestPodmanEngineNamesEachContainersPod(t *testing.T) {
 	for _, libpod := range []bool{true, false} {
 		sock, _ := engine(t, routes(libpod))
 		p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
-		got := found(t, fakeVMs{podmanVM}, p.Candidates()...)
+		got := found(t, fakeVMs{podmanVM}, p.Candidates(context.Background())...)
 		if len(got) != 1 || !got[0].Running || len(got[0].Containers) != 2 {
 			t.Fatalf("libpod %v: engines = %+v", libpod, got)
 		}

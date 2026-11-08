@@ -31,7 +31,7 @@ func engines(t *testing.T, vms vmproc.Lister, sockets ...string) []protocol.Engi
 // found collects once from a source that finds the given candidates.
 func found(t *testing.T, vms vmproc.Lister, cands ...docker.Candidate) []protocol.Engine {
 	t.Helper()
-	src := docker.Discover(func() []docker.Candidate { return cands }, vms)
+	src := docker.Discover(func(context.Context) []docker.Candidate { return cands }, vms)
 	r, err := src.Collect(context.Background())
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -146,7 +146,7 @@ func TestCPUPerEngine(t *testing.T) {
 	}
 	a, setA := engine(t, route("00000000-0000-4000-8000-000000000001"))
 	b, _ := engine(t, route("00000000-0000-4000-8000-000000000002"))
-	src := docker.Discover(func() []docker.Candidate {
+	src := docker.Discover(func(context.Context) []docker.Candidate {
 		return []docker.Candidate{{Socket: a, Trusted: true}, {Socket: b, Trusted: true}}
 	}, fakeVMs{})
 	collectOnce := func() []protocol.Engine {
@@ -174,7 +174,7 @@ func collectWithin(t *testing.T, cands ...docker.Candidate) ([]protocol.Engine, 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	r, err := docker.Discover(func() []docker.Candidate { return cands }, fakeVMs{}).Collect(ctx)
+	r, err := docker.Discover(func(context.Context) []docker.Candidate { return cands }, fakeVMs{}).Collect(ctx)
 	took := time.Since(start)
 	if err != nil {
 		return nil, took, err
@@ -339,7 +339,7 @@ func TestADroppedCandidatesClientIsClosed(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var tick int
-	src := docker.Discover(func() []docker.Candidate {
+	src := docker.Discover(func(context.Context) []docker.Candidate {
 		name := filepath.Join(dir, fmt.Sprintf("%02d.sock", tick))
 		if err := os.Link(sock, name); err != nil {
 			t.Fatal(err)

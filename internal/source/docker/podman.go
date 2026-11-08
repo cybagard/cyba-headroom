@@ -13,10 +13,11 @@ import (
 // Podman's engine socket is known only from podman machine inspect, in a
 // per-user temp dir (spike #49, P2). A stopped machine's socket is gone, so
 // inspect is asked again when the socket stops answering, but no more often
-// than podmanRetry; each run of the CLI has podmanTimeout.
+// than podmanRetry; list and inspect have podmanTimeout together, within
+// Collect's context (#238).
 const (
 	podmanRetry   = 30 * time.Second
-	podmanTimeout = 2 * time.Second
+	podmanTimeout = time.Second
 )
 
 // PodmanCLI runs the podman CLI: binpath.Exec.
@@ -48,15 +49,15 @@ func NewPodman(cli PodmanCLI, now func() time.Time, log *slog.Logger) *Podman {
 // Candidates returns Podman's socket, a trusted candidate of its machine,
 // or none. A socket that is known but dead is still returned: Candidates
 // leaves it out if it is missing, and Collect reads one that refuses as an
-// engine not running.
-func (p *Podman) Candidates() []Candidate {
+// engine not running. The CLI runs under ctx, Collect's.
+func (p *Podman) Candidates(ctx context.Context) []Candidate {
 	if p.cli == nil {
 		p.note("no podman CLI: Podman's engine is not looked for")
 		return nil
 	}
 	if (p.cand.Socket == "" || !answers(p.cand.Socket)) && (!p.ran || p.now().Sub(p.asked) >= podmanRetry) {
 		p.ran, p.asked = true, p.now()
-		c, err := p.inspect()
+		c, err := p.inspect(ctx)
 		switch {
 		case err == nil:
 			p.cand = c
@@ -89,9 +90,10 @@ func (p *Podman) note(why string) {
 var errNoMachine = errors.New("podman: no machine")
 
 // inspect reads the socket from podman machine inspect, of the machine
-// podman machine list names default, else the first running one.
-func (p *Podman) inspect() (Candidate, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), podmanTimeout)
+// podman machine list names default, else the first running one, both
+// within podmanTimeout of ctx.
+func (p *Podman) inspect(ctx context.Context) (Candidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, podmanTimeout)
 	defer cancel()
 	out, err := p.cli.Run(ctx, "machine", "list", "--format", "json")
 	if err != nil {

@@ -66,7 +66,7 @@ func TestATrustedNonSocketFailsTheReading(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := docker.Discover(func() []docker.Candidate { return []docker.Candidate{{Socket: file, Trusted: true}} }, fakeVMs{})
+	src := docker.Discover(func(context.Context) []docker.Candidate { return []docker.Candidate{{Socket: file, Trusted: true}} }, fakeVMs{})
 	if _, err := src.Collect(context.Background()); err == nil {
 		t.Fatal("Collect: want an error for a configured socket that is no socket")
 	}

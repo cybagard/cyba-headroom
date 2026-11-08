@@ -127,7 +127,7 @@ func TestParse(t *testing.T) {
 		{"podman machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start"}},
 		{"podman machine start -q dev", Call{Kind: "machine", Op: "start", Command: "podman machine start dev", Target: "dev"}},
 		{"podman --connection remote machine start", Call{Kind: "machine", Op: "start", Command: "podman machine start", Context: "remote"}},
-		{"podman machine start --log-level debug big", Call{Kind: "machine", Op: "start", Command: "podman machine start", Guessed: true}},
+		{"podman machine start --log-level debug big", Call{Kind: "machine", Op: "start", Command: "podman machine start big", Target: "big"}},
 		// Creating starts nothing: pod create has no --start (podman 6.1),
 		// and kube play --start=false only creates. --down tears down.
 		{"podman pod create --name web", Call{}},
@@ -146,9 +146,11 @@ func TestParse(t *testing.T) {
 		{"podman container pod start web", Call{}},
 		// The rest that start something, each only with its start flag
 		// (#241): machine init --now, sized by its --memory (MiB), else
-		// Podman's 2048; pod clone --start and container clone --run, keyed
-		// by the new name (NAME, else --name); pod restart, as pod start.
-		{"podman machine init --now", Call{Kind: "machine", Op: "init", Command: "podman machine init", MemoryBytes: 2048 << 20}},
+		// 0, for the shim to read containers.conf (#243); pod clone --start
+		// and container clone --run, keyed by the new name (NAME, else
+		// --name) and sized by -m; pod restart, as pod start.
+		{"podman machine init --now", Call{Kind: "machine", Op: "init", Command: "podman machine init"}},
+		{"podman machine init --now m", Call{Kind: "machine", Op: "init", Command: "podman machine init m", Target: "m"}},
 		{"podman machine init --now --memory 4096 vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init vm-a", Target: "vm-a", MemoryBytes: 4 << 30}},
 		{"podman machine init -m=1024 -v /src:/src --now=true vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init vm-a", Target: "vm-a", MemoryBytes: 1 << 30}},
 		{"podman machine init --memory 4096 vm-a", Call{}},
@@ -156,7 +158,8 @@ func TestParse(t *testing.T) {
 		{"podman machine init --now vm-a --help", Call{}},
 		{"podman machine init --now --future x vm-a", Call{Kind: "machine", Op: "init", Command: "podman machine init", Guessed: true}},
 		{"podman pod clone --start src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
-		{"podman pod clone -h host -m 1g --start src", Call{Kind: "pod", Op: "clone", Command: "podman pod clone"}},
+		{"podman pod clone -h host -m 1g --start src", Call{Kind: "pod", Op: "clone", Command: "podman pod clone", MemoryBytes: g}},
+		{"podman pod clone --start -m 1g src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new", MemoryBytes: g}},
 		{"podman pod clone --start -n new src", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
 		{"podman pod clone --start --name other src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
 		{"podman pod clone src new", Call{}},
@@ -168,7 +171,8 @@ func TestParse(t *testing.T) {
 		{"podman pod restart web --help", Call{}},
 		{"podman pod restart --future web", Call{Kind: "pod", Op: "restart", Command: "podman pod restart", Guessed: true}},
 		{"podman container clone --run c new img", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new"}},
-		{"podman container clone -m 2g --run c", Call{Kind: "container", Op: "clone", Command: "podman container clone"}},
+		{"podman container clone -m 2g --run c", Call{Kind: "container", Op: "clone", Command: "podman container clone", MemoryBytes: 2 * g}},
+		{"podman container clone --run -m 512m a b", Call{Kind: "container", Op: "clone", Command: "podman container clone b", Target: "b", Name: "b", MemoryBytes: 512 << 20}},
 		{"podman container clone --run --name new c", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new"}},
 		{"podman --connection m1 container clone --run c new", Call{Kind: "container", Op: "clone", Command: "podman container clone new", Target: "new", Name: "new", Context: "m1"}},
 		{"podman container clone c new", Call{}},
@@ -176,6 +180,24 @@ func TestParse(t *testing.T) {
 		{"podman container clone --run --future x c new", Call{Kind: "container", Op: "clone", Command: "podman container clone", Guessed: true}},
 		{"docker container clone --run c new", Call{}},
 		{"podman clone --run c new", Call{}},
+		// Podman takes --log-level and --storage-opt after the subcommand
+		// too, and no other global option (#243). -v there is --volume.
+		{"podman pod clone --start --log-level info src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod clone --start --log-level=info src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod clone --start --storage-opt x src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman pod restart --log-level info p", Call{Kind: "pod", Op: "restart", Command: "podman pod restart p", Target: "p"}},
+		{"podman pod restart --storage-opt x p", Call{Kind: "pod", Op: "restart", Command: "podman pod restart p", Target: "p"}},
+		{"podman pod start --log-level info p", Call{Kind: "pod", Op: "start", Command: "podman pod start p", Target: "p"}},
+		{"podman pod start --storage-opt=x p", Call{Kind: "pod", Op: "start", Command: "podman pod start p", Target: "p"}},
+		{"podman kube play --log-level info a.yml", Call{Kind: "pod", Op: "play", Command: "podman kube play", KubeFiles: []string{"a.yml"}}},
+		{"podman kube play --storage-opt x a.yml", Call{Kind: "pod", Op: "play", Command: "podman kube play", KubeFiles: []string{"a.yml"}}},
+		{"podman container clone --run --log-level info a b", Call{Kind: "container", Op: "clone", Command: "podman container clone b", Target: "b", Name: "b"}},
+		{"podman container clone --run --storage-opt x a b", Call{Kind: "container", Op: "clone", Command: "podman container clone b", Target: "b", Name: "b"}},
+		{"podman machine start --storage-opt x m", Call{Kind: "machine", Op: "start", Command: "podman machine start m", Target: "m"}},
+		{"podman machine init --log-level info --now m", Call{Kind: "machine", Op: "init", Command: "podman machine init m", Target: "m"}},
+		{"podman machine init --storage-opt x --now m", Call{Kind: "machine", Op: "init", Command: "podman machine init m", Target: "m"}},
+		{"podman pod clone -v /a:/b --start src new", Call{Kind: "pod", Op: "clone", Command: "podman pod clone new", Target: "new"}},
+		{"podman machine init -v /a:/b --now m", Call{Kind: "machine", Op: "init", Command: "podman machine init m", Target: "m"}},
 		// Tart.
 		{"tart run ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},
 		{"tart run --no-graphics --dir src:/tmp/src ci-vm", Call{Kind: "tart", Op: "run", Command: "tart run ci-vm", Target: "ci-vm"}},

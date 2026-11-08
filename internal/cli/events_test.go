@@ -299,3 +299,42 @@ func TestOfferFollowsPodmansEngineOnce(t *testing.T) {
 type noVMs struct{}
 
 func (noVMs) List(context.Context) ([]vmproc.VM, error) { return nil, nil }
+
+// While an engine is down, each reconnect falls back as before: that is
+// logged at Info once per reason, and at Debug while the same reason
+// repeats, so a quit engine does not log a line every 30 s for a day. A
+// different reason logs Info again, and so does a failure after a replay
+// that succeeded (#238).
+func TestFollowEventsLogsAReasonRepeatedAtDebug(t *testing.T) {
+	const newest = 1_000_000 * sec
+	refused := errors.New("dial unix /tmp/hr/api.sock: connect: connection refused")
+	gone := errors.New("dial unix /tmp/hr/api.sock: connect: no such file or directory")
+	// Each reconnect's Clock error, nil for one that replays.
+	clockErrs := []error{refused, refused, refused, gone, nil, gone}
+	streams := []fakeStream{{events: []fakeEvent{{"start", "a", "a", newest}}}}
+	for _, err := range clockErrs {
+		if err == nil {
+			streams = append(streams, fakeStream{}) // the replay, bounded
+		}
+		streams = append(streams, fakeStream{err: errRefused})
+	}
+	f := &fakeEvents{streams: streams, vmNow: func() int64 { return newest + sec }}
+	var log strings.Builder
+	ctx, cancel := context.WithCancel(context.Background())
+	f.cancel = cancel
+	followEvents(ctx, f, func(time.Time, string, string, string, map[string]string) {}, time.Now,
+		slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		func(_ context.Context, _ time.Duration) {
+			f.clockErr = clockErrs[0]
+			clockErrs = clockErrs[1:]
+		})
+	var levels []string
+	for line := range strings.Lines(log.String()) {
+		if strings.Contains(line, `msg="docker events replayed as before"`) {
+			levels = append(levels, strings.Fields(strings.SplitN(line, "level=", 2)[1])[0])
+		}
+	}
+	if want := []string{"INFO", "DEBUG", "DEBUG", "INFO", "INFO"}; fmt.Sprint(levels) != fmt.Sprint(want) {
+		t.Errorf("replayed as before at %v, want %v\n%s", levels, want, log.String())
+	}
+}

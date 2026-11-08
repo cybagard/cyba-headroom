@@ -120,6 +120,18 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 		})
 	}
 	live := func(int64) time.Time { return time.Time{} }
+	// asBefore logs a replay that falls back as before: at Info when its
+	// reason is not the last one logged, else at Debug, so an engine that
+	// stays down logs it once, not every wait (#238).
+	var reason string
+	asBefore := func(err error) {
+		level := slog.LevelInfo
+		if err.Error() == reason {
+			level = slog.LevelDebug
+		}
+		reason = err.Error()
+		log.Log(ctx, level, "docker events replayed as before", "reason", err)
+	}
 	// replay delivers the events from a second before the newest to the
 	// VM's time, dated, and returns that time; ok is false if it did not.
 	replay := func() (until int64, ok bool) {
@@ -127,7 +139,7 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 		defer cancel()
 		offset, until, err := vmOffset(rctx, src, now)
 		if err != nil {
-			log.Info("docker events replayed as before", "reason", err)
+			asBefore(err)
 			return 0, false
 		}
 		since := newest - sec
@@ -150,9 +162,10 @@ func followEvents(ctx context.Context, src Eventer, fn func(at time.Time, action
 			}
 			return at
 		}); err != nil {
-			log.Info("docker events replayed as before", "reason", err)
+			asBefore(err)
 			return 0, false
 		}
+		reason = ""
 		return until, true
 	}
 	for ctx.Err() == nil {

@@ -369,17 +369,20 @@ func DryRun(name string, args []string) (out []string, ok bool) {
 		// --dry-run=false after ours, the dry run would be the real call.
 		return nil, false
 	}
-	out = append(out, all[:at]...)
-	out = append(out, "--dry-run")
-	return fromDocker(append(out, all[at:]...), lead), true
+	before, moved, command, ok := composeParts(all, at)
+	if !ok {
+		return nil, false
+	}
+	out = slices.Concat(all[:at], []string{"--dry-run"}, before[at:], moved, command)
+	return fromDocker(out, lead), true
 }
 
 // ComposeConfig returns the args that ask Compose for a docker compose
 // call's project as JSON: the call's own global options (-p, -f,
-// --env-file, --config, --context), which Compose interpolates, then
-// config; with every profile's services if all. name is docker or
-// docker-compose, whose args have no compose word. ok is false for any
-// other call.
+// --env-file, --config, --context), which Compose interpolates, those
+// after the command too, then config; with every profile's services if
+// all. name is docker or docker-compose, whose args have no compose word.
+// ok is false for any other call.
 func ComposeConfig(name string, args []string, all bool) (out []string, ok bool) {
 	dockerArgs, lead, ok := asDocker(name, args)
 	if !ok {
@@ -389,15 +392,96 @@ func ComposeConfig(name string, args []string, all bool) (out []string, ok bool)
 	if c.Kind != "compose" || at < 0 {
 		return nil, false
 	}
-	rest, res, _ := scanPast(dockerArgs[at:], composeGlobal, isComposeCommand, nil)
-	if res == askedHelp || len(rest) == 0 {
+	before, moved, _, ok := composeParts(dockerArgs, at)
+	if !ok {
 		return nil, false
 	}
-	out = slices.Clone(dockerArgs[:len(dockerArgs)-len(rest)])
+	out = slices.Concat(before, moved)
 	if all {
 		out = append(out, "--profile", "*")
 	}
 	return fromDocker(append(out, "config", "--format", "json"), lead), true
+}
+
+// composeParts splits a docker compose call's args, whose compose options
+// start at at, into those before the command, the global options given
+// after the command (which the parser reads), and the command without
+// them. A probe puts the moved ones before the command, in their order, so
+// it asks about the project the Call is keyed on (#278).
+func composeParts(args []string, at int) (before, moved, command []string, ok bool) {
+	rest, res, _ := scanPast(args[at:], composeGlobal, isComposeCommand, nil)
+	if res == askedHelp || len(rest) == 0 {
+		return nil, nil, nil, false
+	}
+	before = args[:len(args)-len(rest)]
+	op := rest[0]
+	own, flags := composeOwn(op), composeFlags(op)
+	global := func(f string) bool {
+		_, g := composeGlobal[f]
+		_, o := own[f]
+		// As parseCompose: run's and restart's -f is no file.
+		return g && !o && (f != "-f" || op != "run" && op != "restart")
+	}
+	command = []string{op}
+	args = rest[1:]
+	for i := 0; i < len(args); {
+		a := args[i]
+		// n is how many words the option takes, its value's included.
+		n := 1
+		switch {
+		case a == "--":
+			return before, moved, append(command, args[i:]...), true
+		case strings.HasPrefix(a, "--"):
+			f, _, hasValue := strings.Cut(a, "=")
+			takes, known := flags[f]
+			if !hasValue && (known && takes || !known && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-")) {
+				n = 2 // an unknown flag's value is a guess, as scanPast's
+			}
+			n = min(n, len(args)-i)
+			if global(f) && (hasValue || !takes || n == 2) { // not one missing its value
+				moved = append(moved, args[i:i+n]...)
+			} else {
+				command = append(command, args[i:i+n]...)
+			}
+		case len(a) > 1 && a[0] == '-':
+			// A cluster: its own flags stay, a global one (-f or -p, which
+			// take the rest as their value) moves.
+			for j := 1; j < len(a); j++ {
+				f := "-" + a[j:j+1]
+				takes, known := flags[f]
+				if !known {
+					if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						n = 2
+					}
+					command = append(command, args[i:i+n]...)
+					break
+				}
+				if !takes && !strings.HasPrefix(a[j+1:], "=") && j+1 < len(a) {
+					continue
+				}
+				missing := takes && a[j+1:] == ""
+				if missing && i+1 < len(args) {
+					n, missing = 2, false
+				}
+				if !global(f) || missing {
+					command = append(command, args[i:i+n]...)
+					break
+				}
+				if j > 1 {
+					command = append(command, a[:j])
+				}
+				moved = append(moved, append([]string{"-" + a[j:]}, args[i+1:i+n]...)...)
+				break
+			}
+		case op == "run":
+			// The words after its service are its command's.
+			return before, moved, append(command, args[i:]...), true
+		default:
+			command = append(command, a)
+		}
+		i += n
+	}
+	return before, moved, command, true
 }
 
 // asDocker returns a docker or docker-compose call's args as docker's, and
@@ -536,23 +620,32 @@ func isComposeCommand(w string) bool { return composeCommands[w] }
 func isEngineCommand(w string) bool { return engineCommands[w] }
 
 // composeFlags is the flag table of a compose command that starts
-// containers; nil for the others.
+// containers, compose's global flags included; nil for the others.
 func composeFlags(op string) flagSet {
+	if own := composeOwn(op); own != nil {
+		return withGlobals(own) // Compose takes its global flags after the command too
+	}
+	return nil
+}
+
+// composeOwn is the flag table of a compose command that starts
+// containers, without compose's global flags; nil for the others.
+func composeOwn(op string) flagSet {
 	switch op {
 	case "up":
-		return composeUpAll
+		return composeUp
 	case "run":
-		return composeRunAll
+		return composeRun
 	case "start":
-		return composeStartAll
+		return composeStart
 	case "restart":
-		return composeRestartAll
+		return composeRestart
 	case "create":
-		return composeCreateAll
+		return composeCreate
 	case "scale":
-		return composeScaleAll
+		return composeScale
 	case "watch":
-		return composeWatchAll // builds and starts the services first
+		return composeWatch // builds and starts the services first
 	}
 	return nil
 }
@@ -856,14 +949,6 @@ var (
 		"--build --dry-run --force-recreate --no-build --no-recreate --quiet-pull --remove-orphans --yes -y")
 	composeScale = flags("", "--dry-run --no-deps")
 	composeWatch = flags("", "--dry-run --no-up --prune --quiet")
-	// Compose takes its global flags after the command too.
-	composeUpAll      = withGlobals(composeUp)
-	composeRunAll     = withGlobals(composeRun)
-	composeStartAll   = withGlobals(composeStart)
-	composeRestartAll = withGlobals(composeRestart)
-	composeCreateAll  = withGlobals(composeCreate)
-	composeScaleAll   = withGlobals(composeScale)
-	composeWatchAll   = withGlobals(composeWatch)
 
 	// The commands, from the help text, that tell an unknown flag's value
 	// from the command after it.

@@ -84,7 +84,7 @@ No layer sees the others. Orca knows an agent is "working", not that it holds 6 
 **R5 — Gate shim for `docker`, `podman` and `tart` (authoritative).** One global shim directory, put first on PATH by the Orca launch environment (R9). It is the only enforcement point; agent hooks and MCP are advisory.
 
 - [ ] Finds the real binary by removing its own directory from PATH; never calls itself
-- [ ] Parses global flags and long forms (`docker --context x run`, `docker container run`, `docker compose -f a.yml up`) to recognize resource-creating calls: `run`, `create`, `start`, `compose up`, `tart run`, `tart clone`
+- [ ] Parses global flags and long forms (`docker --context x run`, `docker container run`, `docker compose -f a.yml up`) to recognize resource-creating calls: `run`, `create`, `start`, `compose up`, `tart run` (not `tart clone`, which costs disk, not memory or a slot: #29)
 - [ ] Everything else passes straight through without contacting the daemon
 - [ ] Resolves identity in order: `HEADROOM_WORKTREE`, then `ORCA_WORKTREE_ID`, then the Orca worktree whose path holds the cwd (or its symlink-resolved form), then process ancestry; calls with no Orca worktree (a human typing `docker`) pass through and are attributed as **manual**
 - [ ] On allow, replaces itself with the real binary (`exec`), so TTY, signals and exit codes behave as if the shim were not there

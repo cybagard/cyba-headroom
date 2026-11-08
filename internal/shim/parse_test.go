@@ -112,6 +112,11 @@ func TestParse(t *testing.T) {
 		{"docker compose up web --help", Call{}},
 		{"docker compose run web echo --dry-run", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
 		{"docker compose up -d --dry-run", Call{}},
+		// After the command, run's -p is --publish and the words after the
+		// service are its command's (#278).
+		{"docker compose run -p 80:80 a true", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
+		{"docker compose run a true -f x", Call{Kind: "compose", Op: "run", Command: "docker compose run"}},
+		{"docker compose up -d -- a", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -530,6 +535,19 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "--dry-run=false", "up", "-d"}, nil},
 		{[]string{"compose", "up", "--dry-run=0", "-d"}, nil},
 		{[]string{"compose", "--dry-run", "up"}, nil},
+		// Compose's global options after the command move before it, in
+		// their order: the parser reads them there (#278).
+		{[]string{"compose", "up", "-p", "proj", "-d"}, []string{"compose", "--dry-run", "-p", "proj", "up", "-d"}},
+		{[]string{"compose", "up", "-d", "-f", "c.yml"}, []string{"compose", "--dry-run", "-f", "c.yml", "up", "-d"}},
+		{[]string{"compose", "up", "-d", "-fc.yml"}, []string{"compose", "--dry-run", "-fc.yml", "up", "-d"}},
+		{[]string{"compose", "up", "--env-file", "e", "-d"}, []string{"compose", "--dry-run", "--env-file", "e", "up", "-d"}},
+		{[]string{"compose", "up", "--profile", "x", "-d"}, []string{"compose", "--dry-run", "--profile", "x", "up", "-d"}},
+		{[]string{"compose", "-f", "a.yml", "up", "-d", "--file=b.yml", "web", "-p", "proj"},
+			[]string{"compose", "--dry-run", "-f", "a.yml", "--file=b.yml", "-p", "proj", "up", "-d", "web"}},
+		{[]string{"compose", "up", "-dp", "proj"}, []string{"compose", "--dry-run", "-p", "proj", "up", "-d"}}, // a cluster's own flags stay
+		{[]string{"compose", "up", "-d", "--", "-f", "x"}, []string{"compose", "--dry-run", "up", "-d", "--", "-f", "x"}},
+		{[]string{"compose", "restart", "-f", "x"}, []string{"compose", "--dry-run", "restart", "-f", "x"}}, // not a file
+		{[]string{"compose", "up", "-d", "-p"}, []string{"compose", "--dry-run", "up", "-d", "-p"}},         // no value to move
 	} {
 		got, ok := DryRun("docker", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -549,6 +567,9 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"-c", "x", "up"}, nil},
 		{[]string{"--compatibility", "-H", "h", "-f", "a.yml", "up", "-d"}, []string{"-H", "h", "--dry-run", "--compatibility", "-f", "a.yml", "up", "-d"}},
 		{[]string{"-fa.yml", "-H", "h", "up", "-d"}, []string{"-H", "h", "--dry-run", "-fa.yml", "up", "-d"}},
+		{[]string{"up", "-p", "proj", "-d"}, []string{"--dry-run", "-p", "proj", "up", "-d"}},
+		{[]string{"-H", "h", "up", "-d", "-fc.yml"}, []string{"-H", "h", "--dry-run", "-fc.yml", "up", "-d"}},
+		{[]string{"up", "--env-file", "e", "--profile", "x", "-d"}, []string{"--dry-run", "--env-file", "e", "--profile", "x", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker-compose", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -586,5 +607,36 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 	}
 	if _, ok := ComposeConfig("docker-compose", []string{"--config", "d", "up"}, false); ok {
 		t.Fatal("docker-compose --config: the call fails")
+	}
+	// Compose's global options after the command move before it, in their
+	// order: the parser reads them there, so the probe asks about the
+	// project the Call is keyed on (#278).
+	for _, tc := range []struct {
+		name       string
+		args, want []string
+	}{
+		{"docker", []string{"compose", "up", "-p", "proj", "-d"}, []string{"compose", "-p", "proj", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-d", "-f", "c.yml"}, []string{"compose", "-f", "c.yml", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-d", "-fc.yml"}, []string{"compose", "-fc.yml", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-d", "-f", "c.yml", "--env-file", "e"}, []string{"compose", "-f", "c.yml", "--env-file", "e", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "--env-file", "e", "-d"}, []string{"compose", "--env-file", "e", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "--profile", "x", "-d"}, []string{"compose", "--profile", "x", "config", "--format", "json"}},
+		{"docker", []string{"compose", "-f", "a.yml", "up", "-d", "--file=b.yml", "web", "-p", "proj"},
+			[]string{"compose", "-f", "a.yml", "--file=b.yml", "-p", "proj", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-dp", "proj"}, []string{"compose", "-p", "proj", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-d", "--", "-f", "x"}, []string{"compose", "config", "--format", "json"}},
+		// run's -p is --publish, and the words after its service are its
+		// command's; restart's -f is not a file.
+		{"docker", []string{"compose", "run", "-p", "80:80", "a", "true", "-f", "x"}, []string{"compose", "config", "--format", "json"}},
+		{"docker", []string{"compose", "restart", "-f", "x"}, []string{"compose", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-d", "-p"}, []string{"compose", "config", "--format", "json"}},
+		{"docker", []string{"compose", "up", "-dp"}, []string{"compose", "config", "--format", "json"}},
+		{"docker-compose", []string{"up", "-p", "proj", "-d"}, []string{"-p", "proj", "config", "--format", "json"}},
+		{"docker-compose", []string{"-H", "h", "up", "-d", "-fc.yml"}, []string{"-H", "h", "-fc.yml", "config", "--format", "json"}},
+		{"docker-compose", []string{"up", "--env-file", "e", "--profile", "x", "-d"}, []string{"--env-file", "e", "--profile", "x", "config", "--format", "json"}},
+	} {
+		if got, ok := ComposeConfig(tc.name, tc.args, false); !ok || !slices.Equal(got, tc.want) {
+			t.Errorf("ComposeConfig(%s %q) = %q, %v; want %q", tc.name, tc.args, got, ok, tc.want)
+		}
 	}
 }

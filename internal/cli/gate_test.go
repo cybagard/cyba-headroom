@@ -186,6 +186,9 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 		// First seen with a duplicate run listed last, which then exits (R3-B1).
 		{"two runs at first, then the first alone", reading{q, []int{p, q}}, false, []reading{{p, []int{p}}}, `mac1 (worktree "A"`, false},
 		{"another run alone", reading{}, false, []reading{{q, []int{q}}}, "mac1 (manual)", true},
+		// The old run lingers beside the new one, then exits (#215).
+		{"#215 a lingering old run", reading{}, false, []reading{{p, []int{p, q}}, {q, []int{q}}}, "mac1 (manual)", true},
+		{"#215 checked", reading{}, true, []reading{{p, []int{p, q}}, {q, []int{q}}}, `mac1 (worktree "A"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			book := lease.New(time.Minute, time.Now, discardLog())
@@ -241,6 +244,9 @@ func TestDeriveTellsAVMRunAgainByItsRunPID(t *testing.T) {
 			ungated := slices.ContainsFunc(s.Ungated, func(u protocol.Ungated) bool { return u.Name == "mac1" })
 			if ungated != tc.ungated {
 				t.Fatalf("mac1 ungated = %v, want %v: %+v", ungated, tc.ungated, s.Ungated)
+			}
+			if l := book.List(); len(l) != 0 {
+				t.Fatalf("a lease still waits: %+v", l) // a checked run's binds and uses its cost
 			}
 		})
 	}

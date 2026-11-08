@@ -286,9 +286,9 @@ type verdict struct {
 	// event says nothing of whose a container is (#89).
 	owner string
 	lease string // the worktree of the lease it last bound
-	// runPIDs are the tart runs a VM was judged or last seen with, none
-	// while unknown: a known set that shares none of them is another run
-	// (#205).
+	// runPIDs are the tart runs a VM was judged with, narrowed to those
+	// each reading since still listed, none while unknown: a known set
+	// that shares none of them is another run (#205, #215).
 	runPIDs []int
 	// crashed is set when it died without a stop, until a reading begun
 	// after its last event shows it again: one begun before the die may
@@ -1079,12 +1079,13 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 		present[r.key] = r.bytes
 		// A VM whose tart runs share none with those it was last seen
 		// with is run again, with no reading between: new, as after a
-		// reading without it (#205). Runs unknown on either side: no
-		// change.
+		// reading without it (#205), and the lease that bound it ends, as
+		// a gap ends it (#213). Runs unknown on either side: no change.
 		v, runs := b.verdicts[r.key], r.runs()
 		if r.kind == "vm" && v != nil && len(v.runPIDs) > 0 && len(runs) > 0 &&
 			!slices.ContainsFunc(runs, func(pid int) bool { return slices.Contains(v.runPIDs, pid) }) {
 			delete(b.prev, r.key)
+			b.open = slices.DeleteFunc(b.open, func(e *entry) bool { return e.bound[r.key] })
 		}
 	}
 	// A start of several's container that died, back in a reading begun
@@ -1246,9 +1247,15 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			v = b.judge(r, baseline, now) // there before the first reading
 		}
 		v.last, v.present, v.missedOut = now, true, false
-		// No run known (a failed launch read): keep the last.
+		// No run known (a failed launch read): keep the last. One life
+		// narrows to the runs still listed: one that appears beside them
+		// is not the VM's (#215).
 		if runs := r.runs(); len(runs) > 0 {
-			v.runPIDs = runs
+			if kept := slices.DeleteFunc(slices.Clone(v.runPIDs), func(pid int) bool { return !slices.Contains(runs, pid) }); len(kept) > 0 {
+				v.runPIDs = kept
+			} else {
+				v.runPIDs = runs
+			}
 		}
 		v.u.Worktree = r.worktree // attribution can change, or come late
 		v.owner = cmp.Or(r.worktree, v.owner)

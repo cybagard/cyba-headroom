@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -323,6 +324,36 @@ func TestAVMRunAgainPastTheShimIsUngated(t *testing.T) {
 	b.Observe(vm) // run again with the real tart
 	if got := ungatedKeys(b); len(got) != 1 || got[0] != "vm:ci" {
 		t.Fatalf("ungated = %v", got)
+	}
+}
+
+// A VM run again within a tick, by hand, while the lease of its first run
+// is open (it costs more than the VM uses): a new run, ungated, and that
+// lease ends (#213).
+func TestAVMRunAgainWhileItsLeaseIsOpenIsUngated(t *testing.T) {
+	b, _, _ := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	b.Observe(snap())
+	c := cfg
+	c.MaxMacOSVMs = 2
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run mac1", CostBytes: 8 * gib, MacOS: true, PID: 10, Target: "mac1"}, snap(), c); !d.Allow {
+		t.Fatalf("tart run mac1: %+v", d)
+	}
+	vm := func(pid int) *protocol.Snapshot {
+		s := snap()
+		s.Tart.VMs, s.Tart.MacOSRunning = []protocol.TartVM{{Name: "mac1", OS: "darwin", MemoryBytes: 4 * gib, RunPID: pid}}, 1
+		return s
+	}
+	b.Observe(vm(10))
+	if len(b.List()) != 1 {
+		t.Fatalf("the lease did not stay open: %+v", b.List())
+	}
+	b.Observe(vm(11)) // tart stop, then the real tart run, within a tick
+	if got := ungatedKeys(b); len(got) != 1 || got[0] != "vm:mac1" {
+		t.Fatalf("ungated = %v", got)
+	}
+	if len(b.List()) != 0 {
+		t.Fatalf("the first run's lease is still open: %+v", b.List())
 	}
 }
 

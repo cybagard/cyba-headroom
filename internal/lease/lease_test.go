@@ -659,6 +659,43 @@ func TestARestartedVMBindsItsNewLease(t *testing.T) {
 	}
 }
 
+// A VM run again within a tick through the shim, while the lease of its
+// first run is open: the new lease binds it, the old one ends, and the VM
+// holds one slot (#213).
+func TestAVMRunAgainWhileItsLeaseIsOpenBindsTheNewLease(t *testing.T) {
+	b, _, log := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	c := cfg
+	c.MaxMacOSVMs = 2
+	s := func(pids ...int) *protocol.Snapshot {
+		s := snap()
+		s.Budget.HeadroomBytes = i64(int64(32 * gib))
+		for i, pid := range pids {
+			s.Tart.VMs = append(s.Tart.VMs, protocol.TartVM{Name: []string{"mac1", "held"}[i], OS: "darwin", MemoryBytes: 4 * gib, RunPID: pid})
+		}
+		s.Tart.MacOSRunning = len(pids)
+		return s
+	}
+	b.Observe(s())
+	mac1 := func(wt string, pid int) {
+		t.Helper()
+		if d := b.Check(policy.Request{Worktree: wt, Kind: "tart", Command: "tart run mac1", CostBytes: 8 * gib, MacOS: true, PID: pid, Target: "mac1"}, s(), c); !d.Allow {
+			t.Fatalf("tart run mac1 from %s: %+v", wt, d)
+		}
+	}
+	mac1("w1", 10)
+	b.Observe(s(10))
+	mac1("w2", 11) // tart stop, then tart run from B, within a tick
+	b.Observe(s(11, 20))
+	if l := b.List(); len(l) != 1 || l[0].Worktree != "w2" {
+		t.Fatalf("leases = %+v, want B's alone (%s)", l, log)
+	}
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run mac2", CostBytes: gib, MacOS: true, Target: "mac2"}, s(11, 20), c)
+	if d.Allow || !strings.Contains(d.Message, "2 of 2 in use)") {
+		t.Fatalf("a third macOS VM: %+v", d)
+	}
+}
+
 func TestACheckBeforeTheFirstTickBindsItsContainer(t *testing.T) {
 	b, _, _ := book(t)
 	d := b.Check(req("w1", gib), &protocol.Snapshot{}, cfg) // the daemon has no reading yet

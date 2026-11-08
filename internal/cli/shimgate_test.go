@@ -56,6 +56,9 @@ type shimRig struct {
 	getwd func() (string, error)
 	// machineAsk stands in for podman machine inspect.
 	machineAsk func(string, []string) ([]byte, error)
+	// ping stands in for the daemon's ping when set; else it answers.
+	ping  func() error
+	pings int
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -164,6 +167,13 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 				return r.machineAsk(bin, args)
 			}
 			return nil, errors.New("no podman machine here")
+		},
+		ping: func(config.Config) (int, error) {
+			r.pings++
+			if r.ping != nil {
+				return 0, r.ping()
+			}
+			return 1, nil
 		},
 	})
 	return code, errb.String()
@@ -305,6 +315,19 @@ func TestShimGateFailsOpen(t *testing.T) {
 	code, stderr := r.run("docker", "run", "alpine")
 	if code != 0 || r.execed == "" || !strings.Contains(stderr, "not gated") {
 		t.Fatalf("exit %d, exec %q, stderr %q", code, r.execed, stderr)
+	}
+	// A compose call with the daemon down runs no compose probe: one ping
+	// says so first, within policy.daemon_timeout (R7, #278).
+	r = newShimRig(t)
+	r.ping = func() error { return errors.New("connection refused") }
+	r.ask = allow
+	probes := 0
+	r.composeAsk = func(string, []string) ([]byte, error) { probes++; return []byte(`{"name":"x"}`), nil }
+	r.composeDry = func(string, []string) ([]byte, error) { probes++; return []byte(" Container x-a-1 Running \n"), nil }
+	code, stderr = r.run("docker", "compose", "up", "-d")
+	if code != 0 || r.execed == "" || probes != 0 || r.pings != 1 || len(r.asked) != 0 ||
+		!strings.Contains(stderr, "not gated") || !strings.Contains(stderr, "daemon unreachable: connection refused") {
+		t.Fatalf("compose: exit %d, exec %q, probes %d, pings %d, asked %d, stderr %q", code, r.execed, probes, r.pings, len(r.asked), stderr)
 	}
 }
 
@@ -1750,9 +1773,12 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	if asked != 2 || dry != 1 || r.asked[1].Target != "x" || !r.asked[1].Idle { // name, then providers
 		t.Fatalf("asked %d, dry %d, %+v", asked, dry, r.asked[1])
 	}
+	if r.pings != 2 { // one per docker compose call, before its probes (#278)
+		t.Fatalf("pinged %d times", r.pings)
+	}
 	r.run("podman", "compose", "up", "-d")
-	if asked != 2 || dry != 1 {
-		t.Fatalf("podman: asked %d, dry %d", asked, dry)
+	if asked != 2 || dry != 1 || r.pings != 2 {
+		t.Fatalf("podman: asked %d, dry %d, pinged %d", asked, dry, r.pings)
 	}
 	// docker-compose is docker compose, asked through its own binary in
 	// its own shape (#266).

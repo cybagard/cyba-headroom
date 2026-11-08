@@ -214,7 +214,12 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		// Compose names the project (-p needs no asking; podman compose is
 		// not asked), and says whether a detached up starts anything.
 		// Bounded by composeTimeout, also when the daemon turns out to be
-		// down (R7).
+		// down (R7). One ping first: with the daemon down, the call runs
+		// with no probe, within policy.daemon_timeout (#278).
+		if _, err := h.ping(cfg); err != nil {
+			notGated(e, "daemon "+daemonCause(err, cfg.Policy.DaemonTimeout.Duration, cfg.Socket), c.Command)
+			return gated{proceed: true}
+		}
 		env, _ := e.envOf()
 		lookupEnv := lookupIn(env)
 		asked := h.now()

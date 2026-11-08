@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/policy"
@@ -167,10 +169,21 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 		notGated(e, "podman container clone: no name for the new container", c.Command)
 		return gated{proceed: true}
 	}
-	if c.Kind == "machine" && c.Op == "init" && c.Target == "" {
-		// The machine it makes, sized by its own --memory (the parser's):
-		// there is none yet to inspect (#241).
-		c.Target = "podman-machine-default"
+	if c.Kind == "pod" && c.Op == "clone" && c.Target == "" {
+		// The same for a pod clone (#243).
+		notGated(e, "podman pod clone: no name for the new pod", c.Command)
+		return gated{proceed: true}
+	}
+	if c.Kind == "machine" && c.Op == "init" {
+		// The machine it makes, sized by its own --memory (the parser's),
+		// else containers.conf's: there is none yet to inspect (#241, #243).
+		if c.Target == "" {
+			c.Target = "podman-machine-default"
+		}
+		if c.MemoryBytes == 0 {
+			env, _ := e.envOf()
+			c.MemoryBytes = podmanMachineMemory(lookupIn(env), h.getwd)
+		}
 	}
 	if c.Kind == "machine" && c.Op == "start" {
 		// The machine's own memory, and its name: the default machine's
@@ -320,6 +333,65 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 			return interrupted(sig)
 		}
 	}
+}
+
+// podmanMachineMemory is the memory podman machine init gives a machine
+// without --memory, in bytes, read from the containers.conf files podman
+// 6.1.3 reads, as measured (#243 plan): CONTAINERS_CONF, else the user's
+// containers.conf and its containers.conf.d/*.conf in lexical order; then
+// CONTAINERS_CONF_OVERRIDE. Podman ignores either when empty, and takes an
+// empty XDG_CONFIG_HOME as the working directory (getwd). The last [machine] memory > 0 wins. Any error,
+// on which podman fails too, or no value gives podman's 2048 MiB. The
+// system files are not read.
+func podmanMachineMemory(lookupEnv func(string) (string, bool), getwd func() (string, error)) uint64 {
+	const fallback = 2048 << 20
+	var files []string
+	required := map[string]bool{}
+	if path, _ := lookupEnv("CONTAINERS_CONF"); path != "" {
+		files, required[path] = append(files, path), true
+	} else {
+		dir, set := lookupEnv("XDG_CONFIG_HOME")
+		switch {
+		case set && dir == "":
+			// Podman reads an empty one as the working directory.
+			wd, err := getwd()
+			if err != nil {
+				return fallback
+			}
+			dir = wd
+		case dir == "":
+			if home, _ := lookupEnv("HOME"); home != "" {
+				dir = filepath.Join(home, ".config")
+			}
+		}
+		if dir != "" {
+			dir = filepath.Join(dir, "containers")
+			dropIns, _ := filepath.Glob(filepath.Join(dir, "containers.conf.d", "*.conf"))
+			slices.Sort(dropIns)
+			files = append(append(files, filepath.Join(dir, "containers.conf")), dropIns...)
+		}
+	}
+	if path, _ := lookupEnv("CONTAINERS_CONF_OVERRIDE"); path != "" {
+		files, required[path] = append(files, path), true
+	}
+	var mib uint64
+	for _, f := range files {
+		var conf struct{ Machine struct{ Memory uint64 } }
+		_, err := toml.DecodeFile(f, &conf)
+		if errors.Is(err, fs.ErrNotExist) && !required[f] {
+			continue
+		}
+		if err != nil {
+			return fallback
+		}
+		if n := conf.Machine.Memory; n > 0 {
+			mib = n
+		}
+	}
+	if mib == 0 || mib > 1<<30 {
+		return fallback
+	}
+	return mib << 20
 }
 
 // machineOf is what podman machine inspect (ask, at the real binary bin)

@@ -229,6 +229,7 @@ func parsePodman(engine Call, args []string) Call {
 	default:
 		return Call{}
 	}
+	table = withFlags(table, podmanAfter)
 	if c.Op != "play" && startFlag != "" {
 		start = false
 	}
@@ -259,14 +260,16 @@ func parsePodman(engine Call, args []string) Call {
 		c.KubeFiles = pos // paths: never shown
 		return c.named(words)
 	case "init":
-		// --memory is in MiB; Podman's default is 2048.
-		c.MemoryBytes = 2048 << 20
+		// --memory is in MiB. Without it, 0: the default is in
+		// containers.conf, which the shim reads (#243).
 		if n, err := strconv.ParseUint(mem, 10, 64); err == nil && n > 0 && n <= 1<<30 {
 			c.MemoryBytes = n << 20
 		}
 	case "clone":
 		// The new pod's or container's name: NAME, else --name, which
-		// NAME overrides; one Podman makes up keys nothing.
+		// NAME overrides; one Podman makes up keys nothing. Without -m,
+		// the cost is one default container.
+		c.MemoryBytes = parseBytes(mem)
 		if len(pos) > 1 {
 			name = pos[1]
 		}
@@ -896,6 +899,9 @@ var (
 		"--force --no-hostname --no-hosts --no-pod-prefix --publish-all --quiet --replace --start --tls-verify --wait -q -w")
 	// kube play takes --down, which its --help hides: a teardown.
 	kubePlayAll = withFlags(kubePlay, flags("", "--down"))
+	// The global options Podman also takes after these subcommands, which
+	// their --help omits (#243): no others, so the endpoint cannot move.
+	podmanAfter = flags("--log-level --storage-opt", "")
 
 	tartRun = flags(
 		"--dir --disk --net-bridged --net-softnet-allow --net-softnet-block --net-softnet-control-fd --net-softnet-expose "+

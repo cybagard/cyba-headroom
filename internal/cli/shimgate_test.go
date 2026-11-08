@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -699,7 +700,7 @@ func TestShimGatePodmanMachineStart(t *testing.T) {
 	// gated, rather than sized and keyed as the default machine (plan
 	// amendment 4).
 	r.execed = ""
-	code, stderr := r.run("podman", "machine", "start", "--log-level", "debug", "big")
+	code, stderr := r.run("podman", "machine", "start", "--future", "debug", "big")
 	if code != 0 || r.execed == "" || len(r.asked) != 2 || len(inspected) != 2 ||
 		!strings.Contains(stderr, "headroom: not gated (podman machine start: an option the shim does not know); running `podman machine start` anyway") {
 		t.Fatalf("guessed: exit %d, exec %q, asked %d, inspected %q, stderr %q", code, r.execed, len(r.asked), inspected, stderr)
@@ -771,9 +772,21 @@ func TestShimGatePodmanMachineInit(t *testing.T) {
 			protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "init", Command: "podman machine init vm-a", CostBytes: 4 << 30, Target: "vm-a"}},
 		{[]string{"podman", "machine", "init", "--now"},
 			protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "init", Command: "podman machine init", CostBytes: 2 << 30, Target: "podman-machine-default"}},
+		// Without --memory, containers.conf's [machine] memory (#243).
+		{[]string{"podman", "machine", "init", "--now", "vm-b"},
+			protocol.CheckRequest{Worktree: "w", Kind: "machine", Op: "init", Command: "podman machine init vm-b", CostBytes: 4 << 30, Target: "vm-b"}},
 	} {
 		r.asked = nil
+		env := r.env
+		if c.want.Target == "vm-b" {
+			override := filepath.Join(r.dir, "override.conf")
+			if err := os.WriteFile(override, []byte("[machine]\nmemory = 4096\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r.env = append(slices.Clone(env), "CONTAINERS_CONF_OVERRIDE="+override)
+		}
 		code, stderr := r.run(c.argv...)
+		r.env = env
 		if code != 0 || !slices.Equal(r.execArgv, c.argv) {
 			t.Fatalf("%q: exit %d, exec %q, stderr %q", c.argv, code, r.execArgv, stderr)
 		}
@@ -807,6 +820,84 @@ func TestShimGatePodmanMachineInit(t *testing.T) {
 		!strings.Contains(stderr, "headroom: not gated (podman container clone: no name for the new container); running `podman container clone` anyway") {
 		t.Fatalf("nameless clone: exit %d, exec %q, asked %+v, stderr %q", code, r.execed, r.asked, stderr)
 	}
+	// Nor has a pod clone with no new name (#243).
+	r.execed = ""
+	code, stderr = r.run("podman", "pod", "clone", "--start", "src")
+	if code != 0 || r.execed == "" || len(r.asked) != 0 ||
+		!strings.Contains(stderr, "headroom: not gated (podman pod clone: no name for the new pod); running `podman pod clone` anyway") {
+		t.Fatalf("nameless pod clone: exit %d, exec %q, asked %+v, stderr %q", code, r.execed, r.asked, stderr)
+	}
+}
+
+// podmanMachineMemory reads machine init's default memory as podman 6.1.3
+// does, measured (#243): the base file (CONTAINERS_CONF, else the user's
+// containers.conf and its containers.conf.d/*.conf in lexical order), then
+// CONTAINERS_CONF_OVERRIDE; the last [machine] memory > 0 wins. An error,
+// on which podman fails, or no value gives podman's 2048 MiB.
+func TestPodmanMachineMemory(t *testing.T) {
+	const (
+		user = "home/.config/containers/containers.conf"
+		dotD = "home/.config/containers/containers.conf.d/"
+		xdg  = "xdg/containers/containers.conf"
+	)
+	mem := func(n int) string { return fmt.Sprintf("[machine]\nmemory = %d\n", n) }
+	for _, c := range []struct {
+		name  string
+		files map[string]string
+		env   []string
+		want  uint64
+	}{
+		{"none", nil, nil, 2048},
+		{"user", map[string]string{user: mem(3000)}, nil, 3000},
+		{"user and .d", map[string]string{user: mem(3000), dotD + "a.conf": mem(3100)}, nil, 3100},
+		{".d in lexical order", map[string]string{dotD + "b.conf": mem(3600), dotD + "a.conf": mem(3100)}, nil, 3600},
+		{".d not .conf", map[string]string{dotD + "a.conf": mem(3100), dotD + "b.conf": mem(3600), dotD + "b.txt": mem(3700)}, nil, 3600},
+		{"only .d", map[string]string{dotD + "b.conf": mem(3500)}, nil, 3500},
+		{"XDG_CONFIG_HOME", map[string]string{user: mem(3000), xdg: mem(3400)}, []string{"XDG_CONFIG_HOME=xdg"}, 3400},
+		{"XDG_CONFIG_HOME empty", map[string]string{user: mem(3000), dotD + "a.conf": mem(3100), "xdg/.keep": ""}, []string{"XDG_CONFIG_HOME=xdg"}, 2048},
+		{"CONTAINERS_CONF", map[string]string{user: mem(3000), dotD + "a.conf": mem(3100), "c.conf": mem(3200)}, []string{"CONTAINERS_CONF=c.conf"}, 3200},
+		{"CONTAINERS_CONF without memory", map[string]string{user: mem(3000), dotD + "a.conf": mem(3100), "c.conf": "[containers]\n"}, []string{"CONTAINERS_CONF=c.conf"}, 2048},
+		{"override", map[string]string{user: mem(3000), dotD + "a.conf": mem(3100), "o.conf": mem(3300)}, []string{"CONTAINERS_CONF_OVERRIDE=o.conf"}, 3300},
+		{"override over CONTAINERS_CONF", map[string]string{"c.conf": mem(3200), "o.conf": mem(3300)}, []string{"CONTAINERS_CONF=c.conf", "CONTAINERS_CONF_OVERRIDE=o.conf"}, 3300},
+		{"override without memory", map[string]string{user: mem(3000), "o.conf": "[machine]\ncpus = 2\n"}, []string{"CONTAINERS_CONF_OVERRIDE=o.conf"}, 3000},
+		{"a string", map[string]string{user: "[machine]\nmemory = \"4096\"\n"}, nil, 2048},
+		{"bad TOML", map[string]string{user: "[machine\n"}, nil, 2048},
+		{"missing CONTAINERS_CONF", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF=gone.conf"}, 2048},
+		{"memory=0", map[string]string{user: mem(0)}, nil, 2048},
+		// Podman ignores an empty CONTAINERS_CONF or override, and reads an
+		// empty XDG_CONFIG_HOME as the working directory.
+		{"empty CONTAINERS_CONF", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF="}, 3000},
+		{"empty CONTAINERS_CONF_OVERRIDE", map[string]string{user: mem(3000)}, []string{"CONTAINERS_CONF_OVERRIDE="}, 3000},
+		{"empty XDG_CONFIG_HOME", map[string]string{user: mem(3000), "cwd/containers/containers.conf": mem(3700)}, []string{"XDG_CONFIG_HOME="}, 3700},
+		{"empty XDG_CONFIG_HOME, no cwd file", map[string]string{user: mem(3000), "cwd/.keep": ""}, []string{"XDG_CONFIG_HOME="}, 2048},
+	} {
+		dir, err := os.MkdirTemp("/tmp", "hr")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range c.files {
+			path := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		env := []string{"HOME=" + filepath.Join(dir, "home")}
+		for _, kv := range c.env {
+			k, v, _ := strings.Cut(kv, "=")
+			if v != "" {
+				v = filepath.Join(dir, v)
+			}
+			env = append(env, k+"="+v)
+		}
+		getwd := func() (string, error) { return filepath.Join(dir, "cwd"), nil }
+		if got := podmanMachineMemory(lookupIn(env), getwd); got != c.want<<20 {
+			t.Errorf("%s: %d MiB, want %d", c.name, got>>20, c.want)
+		}
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // End to end: podman machine init --now --memory 4096 is denied when the
@@ -829,6 +920,17 @@ func TestShimGatePodmanMachineInitAgainstTheDaemon(t *testing.T) {
 		machineAsk: func(string, []string) ([]byte, error) { return nil, errors.New("no machine") }}
 	if code := Run(shimEnv); code != exitDenied || execed || !strings.Contains(stderr.String(), "not starting `podman machine init vm-a`") {
 		t.Fatalf("exit %d, exec %v, stderr %q", code, execed, stderr.String())
+	}
+	// Without --memory, containers.conf's 4096 MiB: no room either (#243).
+	override := filepath.Join(r.dir, "override.conf")
+	if err := os.WriteFile(override, []byte("[machine]\nmemory = 4096\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	confEnv := shimEnv
+	confEnv.Args = []string{"podman", "machine", "init", "--now", "vm-b"}
+	confEnv.Environ = func() []string { return append(slices.Clone(env), "CONTAINERS_CONF_OVERRIDE="+override) }
+	if code := Run(confEnv); code != exitDenied || execed || !strings.Contains(stderr.String(), "not starting `podman machine init vm-b`") {
+		t.Fatalf("from containers.conf: exit %d, exec %v, stderr %q", code, execed, stderr.String())
 	}
 	host.set(base + 5<<30)
 	d.Tick(context.Background())
@@ -2882,6 +2984,10 @@ spec:
 		{[]string{"podman", "kube", "play", "deploy.yml"}, "", nil},
 		{[]string{"podman", "kube", "play", "flow.yml"}, "", nil},
 		{[]string{"podman", "kube", "play", "web.yml", "missing.yml"}, "", nil},
+		// Podman takes --log-level and --storage-opt after the subcommand
+		// (#243): the pods are still known.
+		{[]string{"podman", "pod", "start", "--log-level", "info", "web"}, "web", nil},
+		{[]string{"podman", "kube", "play", "--storage-opt", "x", "web.yml"}, "web", []string{"web", "db"}},
 	} {
 		r.asked = nil
 		code, stderr := r.run(c.argv...)

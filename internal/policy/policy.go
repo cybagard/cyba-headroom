@@ -180,6 +180,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	// decide by the same rules on an empty one, so only what does not come
 	// from readings (the config, the leases) can deny (R7, #30).
 	age, stale := snapshotAge(s, c)
+	tart := lastTart(s, c, stale)
 	if stale {
 		s = &protocol.Snapshot{}
 	}
@@ -195,7 +196,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	use, held := worktreeUse(s, r.Worktree)
 	d.Holding = held
 	// Count first, memory second (R6).
-	if reason, ok := slots(r, s, c); ok {
+	if reason, ok := slots(r, s, tart, c); ok {
 		d.Reasons = append(d.Reasons, reason)
 	}
 	// The pressure guard and the idle-holder rule need no budget.
@@ -284,23 +285,47 @@ func staleText(age time.Duration) string {
 	return fmt.Sprintf("the daemon's readings are %s old (its collector has stalled)", shortDuration(age))
 }
 
+// tartCount is the running macOS VM count the slot rule decides on: the
+// last Tart reading's, and how old that reading is if it is stale.
+type tartCount struct {
+	running int
+	stale   bool
+	age     time.Duration // of a stale reading; 0 if unknown
+}
+
+// lastTart keeps s's last Tart reading before an old snapshot is dropped:
+// the reading is stale if its source is or the whole snapshot is (#269).
+func lastTart(s *protocol.Snapshot, c Config, snapStale bool) tartCount {
+	if s.Tart == nil {
+		return tartCount{}
+	}
+	t := tartCount{running: s.Tart.MacOSRunning, stale: snapStale || s.Sources["tart"].Stale}
+	if !t.stale || c.Now == nil {
+		return t
+	}
+	at := s.Sources["tart"].At
+	if at.IsZero() {
+		at = s.CollectedAt
+	}
+	if !at.IsZero() {
+		t.age = c.Now().Round(0).Sub(at.Round(0))
+	}
+	return t
+}
+
 // slots is the macOS VM slot rule: running plus starting macOS VMs must
-// stay below the slot count for one more to start. Without a fresh Tart reading the count is unknown, and
-// the call is decided on memory alone (R7).
-func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
+// stay below the slot count for one more to start. A stale Tart reading's
+// count is a floor: a VM that stopped since only costs a retryable deny
+// (#269). With no reading ever, running is 0 and the call is decided on
+// memory (R7).
+func slots(r Request, s *protocol.Snapshot, tart tartCount, c Config) (Reason, bool) {
 	if !r.MacOS {
 		return Reason{}, false
 	}
 	if c.MaxMacOSVMs <= 0 {
 		return Reason{Code: VMSlots, Text: "this Mac allows no macOS VMs (budget.max_macos_vms = 0)"}, true
 	}
-	// Running VMs are unknown without a fresh Tart reading: count only the
-	// ones still starting, which the leases know.
-	running := 0
-	if s.Tart != nil && !s.Sources["tart"].Stale {
-		running = s.Tart.MacOSRunning
-	}
-	inUse := running + r.PendingMacOS + r.HeldMacOS
+	inUse := tart.running + r.PendingMacOS + r.HeldMacOS
 	if inUse < c.MaxMacOSVMs {
 		return Reason{}, false
 	}
@@ -312,12 +337,19 @@ func slots(r Request, s *protocol.Snapshot, c Config) (Reason, bool) {
 		text += fmt.Sprintf(", %d held for %s", r.HeldMacOS, waitingAhead(r.HeldMacOS))
 	}
 	text += ")"
+	if tart.stale {
+		text += " (by the last Tart reading"
+		if tart.age > 0 {
+			text += ", " + shortDuration(tart.age) + " old"
+		}
+		text += ")"
+	}
 	if r.VMUnknown {
 		text = "its VM's config was not found, so it counts as macOS, and " + text
 	}
 	var holders []string
 	var idle string
-	if s.Tart != nil && !s.Sources["tart"].Stale { // a stale reading's VMs may be gone
+	if s.Tart != nil && !tart.stale { // a stale reading's VMs may be gone
 		holders, idle = slotHolders(s, c)
 	}
 	if len(holders) > 0 {

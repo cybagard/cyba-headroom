@@ -752,6 +752,49 @@ func TestTheLastMacOSSlotGoesToOneRequest(t *testing.T) {
 	}
 }
 
+// Two macOS VMs bound by their leases still hold their slots once the Tart
+// reading goes stale, and once the whole snapshot is old: a third is a
+// retryable deny until a fresh reading shows a slot free (#269).
+func TestAStaleTartReadingKeepsTheSlotsFull(t *testing.T) {
+	b, clk, _ := book(t)
+	c := cfg
+	c.MaxMacOSVMs, c.MaxSnapshotAge, c.Now = 2, time.Minute, clk.now
+	mac := func(vm string) policy.Request {
+		return policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run " + vm, CostBytes: gib, MacOS: true, Target: vm}
+	}
+	s := snap()
+	for _, vm := range []string{"m1", "m2"} {
+		if d := b.Check(mac(vm), s, c); !d.Allow {
+			t.Fatalf("%s: %+v", vm, d)
+		}
+	}
+	s = snap()
+	s.Tart.MacOSRunning, s.Tart.VMs = 2, []protocol.TartVM{{Name: "m1", OS: "darwin", MemoryBytes: gib}, {Name: "m2", OS: "darwin", MemoryBytes: gib}}
+	b.Observe(s)
+	if len(b.List()) != 0 {
+		t.Fatalf("the leases did not bind: %+v", b.List())
+	}
+	clk.t = t0.Add(30 * time.Second)
+	stale := *s
+	stale.CollectedAt = clk.t
+	stale.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true, At: t0}}
+	b.Observe(&stale)
+	if d := b.Check(mac("m3"), &stale, c); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("tart stale: %+v", d)
+	}
+	clk.t = t0.Add(5 * time.Minute)
+	if d := b.Check(mac("m3"), &stale, c); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("whole snapshot old: %+v", d)
+	}
+	fresh := snap()
+	fresh.CollectedAt = clk.t
+	fresh.Tart.MacOSRunning, fresh.Tart.VMs = 1, []protocol.TartVM{{Name: "m1", OS: "darwin", MemoryBytes: gib}}
+	b.Observe(fresh)
+	if d := b.Check(mac("m3"), fresh, c); !d.Allow {
+		t.Fatalf("a slot is free: %+v", d)
+	}
+}
+
 // A Linux VM appearing does not settle a macOS lease, whose slot would be
 // freed for a VM that never took one.
 func TestAMacOSLeaseWaitsForAMacOSVM(t *testing.T) {

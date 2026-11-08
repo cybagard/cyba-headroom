@@ -62,7 +62,11 @@ func TestShimExecFailure(t *testing.T) {
 }
 
 func TestShimDebugLine(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	podman := filepath.Join(dir, "podman")
 	if err := os.WriteFile(podman, []byte("#!podman\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -77,6 +81,16 @@ func TestShimDebugLine(t *testing.T) {
 		exec:    func(string, []string, []string) error { return nil }})
 	if !strings.Contains(errb.String(), "headroom: docker → "+filepath.Join(dir, "docker")+" (podman; pass)") {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+	// Podman's own command, through that docker, is gated as podman's and
+	// shown as typed (#270).
+	errb.Reset()
+	Run(Env{Args: []string{"docker", "pod", "start", "web"}, Stdout: io.Discard, Stderr: &errb,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"PATH=" + dir, "HEADROOM_SHIM_DEBUG=1", "HEADROOM_CONFIG_DIR=" + dir} },
+		exec:    func(string, []string, []string) error { return nil }})
+	if want := "(podman; gate: docker pod start web)"; !strings.Contains(errb.String(), want) {
+		t.Fatalf("stderr = %q, want %q", errb.String(), want)
 	}
 }
 

@@ -1096,6 +1096,28 @@ func TestShimLabelsAllowedRuns(t *testing.T) {
 	}
 }
 
+// A docker that is podman is labelled as podman labels the call, past
+// podman's own run flags (#270). The two tables agree today: this keeps
+// them from drifting apart unnoticed.
+func TestShimLabelsADockerThatIsPodman(t *testing.T) {
+	r := newShimRig(t)
+	dockerIsPodman(r)
+	r.ask = allow
+	args := []string{"run", "--rm", "--pod", "p", "alpine", "true"}
+	r.run(append([]string{"podman"}, args...)...)
+	want := append([]string{"docker"}, r.execArgv[1:]...)
+	r.asked = nil
+	if code, stderr := r.run(append([]string{"docker"}, args...)...); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !slices.Contains(want, protocol.LeaseLabel+"=lease-7") || !slices.Equal(r.execArgv, want) {
+		t.Fatalf("argv = %q, want %q", r.execArgv, want)
+	}
+	if len(r.asked) != 1 || !r.asked[0].Labelled || !strings.HasPrefix(r.asked[0].Command, "docker run") {
+		t.Fatalf("asked %+v", r.asked)
+	}
+}
+
 func TestShimDoesNotLabelStart(t *testing.T) {
 	r := newShimRig(t)
 	r.ask = allow
@@ -2998,5 +3020,112 @@ spec:
 		if a.Kind != "pod" || a.CostBytes != 0 || a.Target != c.target || !slices.Equal(a.Targets, c.targets) || a.MultiTarget != (c.targets != nil) || a.Labelled {
 			t.Errorf("%q: asked %+v, want target %q, targets %q", c.argv, a, c.target, c.targets)
 		}
+	}
+}
+
+// dockerIsPodman makes the rig's docker a link to its podman, as a
+// hand-made `ln -s podman docker` does (#270).
+func dockerIsPodman(r *shimRig) {
+	r.t.Helper()
+	docker := filepath.Join(r.dir, "docker")
+	if err := os.Remove(docker); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(r.dir, "podman"), docker); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// A docker that is podman is gated as podman: podman's own commands reach
+// the daemon with their podman forms' Kind, Op and Target, and the shown
+// command is the one the agent typed (#270).
+func TestShimGateDockerThatIsPodman(t *testing.T) {
+	r := newShimRig(t)
+	dockerIsPodman(r)
+	r.env = append(r.env, "HEADROOM_WORKTREE=w")
+	r.getwd = func() (string, error) { return r.dir, nil }
+	r.ask = allow
+	inspect, err := os.ReadFile(filepath.Join("testdata", "podman-machine-inspect.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.machineAsk = func(string, []string) ([]byte, error) { return inspect, nil }
+	if err := os.WriteFile(filepath.Join(r.dir, "app.yml"), []byte("kind: Pod\nmetadata:\n  name: web\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"pod", "start", "web"},
+		{"kube", "play", "app.yml"},
+		{"machine", "start", "m"},
+		{"container", "clone", "--run", "a", "b"},
+		{"--log-level", "info", "pod", "restart", "web"},
+	} {
+		r.asked = nil
+		r.run(append([]string{"podman"}, args...)...)
+		if len(r.asked) != 1 {
+			t.Fatalf("podman %q: asked %d", args, len(r.asked))
+		}
+		want := r.asked[0]
+		r.asked = nil
+		argv := append([]string{"docker"}, args...)
+		code, stderr := r.run(argv...)
+		if code != 0 || !slices.Equal(r.execArgv, argv) || len(r.asked) != 1 {
+			t.Fatalf("%q: exit %d, exec %q, asked %d, stderr %q", argv, code, r.execArgv, len(r.asked), stderr)
+		}
+		a := r.asked[0]
+		if a.Kind == "" || a.Kind != want.Kind || a.Op != want.Op || a.Target != want.Target || a.Name != want.Name ||
+			!slices.Equal(a.Targets, want.Targets) || a.CostBytes != want.CostBytes || a.Engine != want.Engine ||
+			a.Command != "docker"+strings.TrimPrefix(want.Command, "podman") {
+			t.Errorf("%q: asked %+v, want %+v as docker", argv, a, want)
+		}
+	}
+}
+
+// A docker that is podman finds its engine as podman does: CONTAINER_HOST,
+// --url and podman's connections, never DOCKER_HOST, which podman ignores
+// (#270).
+func TestShimGateDockerThatIsPodmanFollowsPodmansEngine(t *testing.T) {
+	const far = "tcp://203.0.113.5:2376"
+	for name, c := range map[string]struct {
+		args  []string
+		env   []string
+		gated bool
+	}{
+		"a remote DOCKER_HOST":    {nil, []string{"DOCKER_HOST=" + far}, true},
+		"a remote CONTAINER_HOST": {nil, []string{"CONTAINER_HOST=" + far}, false},
+		"a remote --url":          {[]string{"--url", far}, nil, false},
+		"a remote -c":             {[]string{"-c", "remote-a"}, nil, false},
+	} {
+		r := newShimRig(t)
+		dockerIsPodman(r)
+		r.ask = allow
+		conf := filepath.Join(r.dir, "podman-connections.json")
+		if err := os.WriteFile(conf, []byte(podmanConnections("podman-machine-default")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.env = append(append(r.env, "PODMAN_CONNECTIONS_CONF="+conf), c.env...)
+		argv := append(append([]string{"docker"}, c.args...), "run", "alpine", "true")
+		if code, _ := r.run(argv...); code != 0 || r.execed == "" || (len(r.asked) == 1) != c.gated {
+			t.Errorf("%s: code %d, execed %q, asked %d, want gated %v", name, code, r.execed, len(r.asked), c.gated)
+		}
+	}
+}
+
+// The podman-docker wrapper's `exec podman` comes back through the podman
+// shim, which skips the call it marked: one check, one lease (#270).
+func TestShimGateThePodmanDockerWrapper(t *testing.T) {
+	r := newShimRig(t)
+	wrapper := "#!/bin/sh\n[ -e /etc/containers/nodocker ] || echo emulate\nexec " + filepath.Join(r.dir, "podman") + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(r.dir, "docker"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.ask = allow
+	if code, stderr := r.run("docker", "pod", "start", "web"); code != 0 || len(r.asked) != 1 || r.asked[0].Kind != "pod" || r.asked[0].Command != "docker pod start web" {
+		t.Fatalf("exit %d, asked %+v, stderr %q", code, r.asked, stderr)
+	}
+	// The wrapper's podman, in the environment the shim exec'd it with.
+	r.env = r.execEnv
+	if code, _ := r.run("podman", "pod", "start", "web"); code != 0 || r.execed != filepath.Join(r.dir, "podman") || len(r.asked) != 1 {
+		t.Fatalf("re-entry: exit %d, exec %q, asked %d", code, r.execed, len(r.asked))
 	}
 }

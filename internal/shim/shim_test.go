@@ -139,6 +139,18 @@ func TestDockerThatIsPodman(t *testing.T) {
 			t.Errorf("%s: got %+v, %v; want engine podman", dir, got, err)
 		}
 	}
+	// Homebrew's chain: docker → bin/podman → Cellar/…/podman → podman-remote.
+	remote := f.file("Cellar/podman/6.1.3/bin/podman-remote", "#!podman\n", 0o755)
+	f.link("Cellar/podman/6.1.3/bin/podman", "podman-remote")
+	f.link("brew/bin/podman", f.dir("Cellar/podman/6.1.3/bin/podman"))
+	if got := f.link("viaBrew/docker", f.dir("brew/bin/podman")); shim.Engine("docker", got) != "podman" {
+		t.Errorf("docker → podman → podman-remote (%s): not podman", remote)
+	}
+	// A link to any other name is docker.
+	other := f.file("opt/docker/bin/com.docker.cli", "#!docker\n", 0o755)
+	if got := f.link("viaOther/docker", other); shim.Engine("docker", got) != "docker" {
+		t.Errorf("docker → com.docker.cli: not docker")
+	}
 	if got, _ := f.resolve("podman", f.dir("opt/podman/bin")); shim.Engine("podman", got) != "podman" {
 		t.Errorf("podman itself: %+v", got)
 	}

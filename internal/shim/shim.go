@@ -69,15 +69,18 @@ func LeadsToHeadroom(p string) bool {
 var podmanExec = regexp.MustCompile(`(?m)^\s*exec\s+(\S*/)?podman(\s|$)`)
 
 // Engine tells what the binary at p, called name, really is: docker, podman
-// or tart. A docker that is Podman (a symlink to it, or the podman-docker
-// wrapper script that execs it) is podman. It reads the file, so callers ask
-// only when they need it. It labels a call; it is not a security boundary.
+// or tart. A docker that is Podman (a symlink to it, Homebrew's ending at
+// podman-remote, or the podman-docker wrapper script that execs it) is
+// podman. It reads the file, so callers ask only when they need it. It picks
+// how the shim reads a call; it is not a security boundary.
 func Engine(name, p string) string {
 	if name != "docker" {
 		return name
 	}
-	if target, err := filepath.EvalSymlinks(p); err == nil && filepath.Base(target) == "podman" {
-		return "podman"
+	if target, err := filepath.EvalSymlinks(p); err == nil {
+		if b := filepath.Base(target); b == "podman" || b == "podman-remote" {
+			return "podman"
+		}
 	}
 	f, err := os.Open(p)
 	if err != nil {

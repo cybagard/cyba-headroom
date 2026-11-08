@@ -39,7 +39,7 @@ type Source struct {
 	// New's. They may run concurrently with each other and with Collect.
 	socket     string
 	one        *http.Client
-	candidates func() []Candidate
+	candidates func(context.Context) []Candidate
 	vms        vmproc.Lister
 	clients    map[string]*http.Client
 
@@ -59,7 +59,7 @@ type cpuCounters struct{ container, system uint64 }
 
 // New returns a source for the Engine API at socket alone.
 func New(socket string, vms vmproc.Lister) *Source {
-	s := Discover(func() []Candidate {
+	s := Discover(func(context.Context) []Candidate {
 		return Candidates(socket, func(string) string { return "" }, slog.New(slog.DiscardHandler))
 	}, vms)
 	s.socket, s.one = socket, dial(socket)
@@ -67,8 +67,9 @@ func New(socket string, vms vmproc.Lister) *Source {
 }
 
 // Discover returns a source for the engines on the sockets candidates
-// returns, asked afresh each tick: Candidates, for the daemon.
-func Discover(candidates func() []Candidate, vms vmproc.Lister) *Source {
+// returns, asked afresh each tick under Collect's context: Candidates, for
+// the daemon.
+func Discover(candidates func(context.Context) []Candidate, vms vmproc.Lister) *Source {
 	return &Source{candidates: candidates, vms: vms, clients: map[string]*http.Client{}, prev: map[string]map[string]sample{}}
 }
 
@@ -126,7 +127,7 @@ var errSeen = errors.New("docker: engine seen already")
 // error, so it cannot hide or hold up the others (amendments 3 and 4).
 // Then the clients of sockets no longer candidates are dropped (prune).
 func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
-	cands := s.candidates()
+	cands := s.candidates(ctx)
 	defer s.prune(cands)
 	type result struct {
 		e       protocol.Engine
@@ -250,7 +251,10 @@ func pods(ctx context.Context, c *http.Client, cs []protocol.Container) {
 // podmanID is a Podman engine's ID: Podman's /info answers with a new
 // random one on every request (#228, plan amendment 2). It is
 // podman:<machine> for a machine's socket, from podman machine inspect,
-// else its socket's resolved path.
+// else its socket's resolved path. It is also the key the events followers
+// go by, and the first socket that reports it is followed for the
+// daemon's life: a socket that forges it on purpose is out of the threat
+// model (SPEC, "Not a security boundary"; #238).
 func podmanID(cand Candidate) string {
 	if cand.Machine != "" {
 		return "podman:" + cand.Machine

@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -268,7 +271,7 @@ func TestOfferFollowsPodmansEngineOnce(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	src := docker.Discover(func() []docker.Candidate {
+	src := docker.Discover(func(context.Context) []docker.Candidate {
 		return []docker.Candidate{{Socket: sock, Trusted: true, Machine: "podman-machine-default"}}
 	}, noVMs{})
 	var wg sync.WaitGroup
@@ -299,3 +302,111 @@ func TestOfferFollowsPodmansEngineOnce(t *testing.T) {
 type noVMs struct{}
 
 func (noVMs) List(context.Context) ([]vmproc.VM, error) { return nil, nil }
+
+// While an engine is down, each reconnect falls back as before: that is
+// logged at Info once per reason, and at Debug while the same reason
+// repeats, so a quit engine does not log a line every 30 s for a day. A
+// different reason logs Info again, and so does a failure after a replay
+// that succeeded (#238).
+func TestFollowEventsLogsAReasonRepeatedAtDebug(t *testing.T) {
+	const newest = 1_000_000 * sec
+	refused := errors.New("dial unix /tmp/hr/api.sock: connect: connection refused")
+	gone := errors.New("dial unix /tmp/hr/api.sock: connect: no such file or directory")
+	// Each reconnect's Clock error, nil for one that replays.
+	clockErrs := []error{refused, refused, refused, gone, nil, gone}
+	streams := []fakeStream{{events: []fakeEvent{{"start", "a", "a", newest}}}}
+	for _, err := range clockErrs {
+		if err == nil {
+			streams = append(streams, fakeStream{}) // the replay, bounded
+		}
+		streams = append(streams, fakeStream{err: errRefused})
+	}
+	f := &fakeEvents{streams: streams, vmNow: func() int64 { return newest + sec }}
+	var log strings.Builder
+	ctx, cancel := context.WithCancel(context.Background())
+	f.cancel = cancel
+	followEvents(ctx, f, func(time.Time, string, string, string, map[string]string) {}, time.Now,
+		slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		func(_ context.Context, _ time.Duration) {
+			f.clockErr = clockErrs[0]
+			clockErrs = clockErrs[1:]
+		})
+	var levels []string
+	for line := range strings.Lines(log.String()) {
+		if strings.Contains(line, `msg="docker events replayed as before"`) {
+			levels = append(levels, strings.Fields(strings.SplitN(line, "level=", 2)[1])[0])
+		}
+	}
+	if want := []string{"INFO", "DEBUG", "DEBUG", "INFO", "INFO"}; fmt.Sprint(levels) != fmt.Sprint(want) {
+		t.Errorf("replayed as before at %v, want %v\n%s", levels, want, log.String())
+	}
+}
+
+// Podman's /info dates its VM's clock, as Docker's does, so a reconnect to
+// Podman's engine replays what it missed dated by that clock
+// (testdata/info-podman.json is a Podman 6.1 machine's, its ID made
+// neutral; #238).
+func TestFollowEventsDatesAReplayFromPodman(t *testing.T) {
+	info, err := os.ReadFile("../source/docker/testdata/info-podman.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sys struct{ SystemTime string }
+	if err := json.Unmarshal(info, &sys); err != nil {
+		t.Fatal(err)
+	}
+	vm, err := time.Parse(time.RFC3339Nano, sys.SystemTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := vm.Add(2 * time.Second) // the VM's clock lags the host's by 2 s
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	event := func(action string, at time.Time) string {
+		return fmt.Sprintf(`{"Type":"container","Action":%q,"Actor":{"ID":"a","Attributes":{"name":"a"}},"time":%d,"timeNano":%d}`+"\n", action, at.Unix(), at.UnixNano())
+	}
+	sock := filepath.Join(daemonDir(t), "api.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	streams := 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/info":
+			_, _ = w.Write(info)
+		case "/events":
+			mu.Lock()
+			streams++
+			n := streams
+			mu.Unlock()
+			switch {
+			case n == 1: // the live stream, which drops
+				_, _ = io.WriteString(w, event("start", vm.Add(-10*time.Second)))
+			case r.URL.Query().Get("until") != "": // the replay
+				_, _ = io.WriteString(w, event("die", vm.Add(-500*time.Millisecond)))
+			default:
+				cancel()
+				<-r.Context().Done()
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	var got []string
+	followEvents(ctx, docker.New(sock, nil), func(at time.Time, action, id, _ string, _ map[string]string) {
+		d := "live"
+		if !at.IsZero() {
+			d = at.Sub(host).String()
+		}
+		got = append(got, action+" "+id+" @"+d)
+	}, func() time.Time { return host }, discardLog(), func(context.Context, time.Duration) {})
+	if want := []string{"start a @live", "die a @-500ms"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("delivered %v, want %v", got, want)
+	}
+}

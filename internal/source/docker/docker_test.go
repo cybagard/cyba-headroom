@@ -241,6 +241,30 @@ func TestContainerGoneBeforeStatsIsSkipped(t *testing.T) {
 	}
 }
 
+// Collect finds its candidates under its own context: one that blocks
+// ends when Collect's does, and the reading is taken without them (#238).
+func TestCollectFindsItsCandidatesUnderItsContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var got context.Context
+	src := docker.Discover(func(ctx context.Context) []docker.Candidate {
+		got = ctx
+		<-ctx.Done()
+		return nil
+	}, fakeVMs{})
+	start := time.Now()
+	if _, err := src.Collect(ctx); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Collect took %v, want it to end with its context", took)
+	}
+	want, _ := ctx.Deadline()
+	if d, ok := got.Deadline(); !ok || !d.Equal(want) {
+		t.Fatalf("candidates' deadline = %v, %v; want Collect's, %v", d, ok, want)
+	}
+}
+
 func TestAPIFailureIsAnError(t *testing.T) {
 	sock, _ := engine(t, map[string]string{"/info": "info.json"}) // /containers/json 404s
 	if _, err := docker.New(sock, fakeVMs{}).Collect(context.Background()); err == nil {

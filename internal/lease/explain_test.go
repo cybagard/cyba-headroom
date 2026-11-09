@@ -86,3 +86,32 @@ func TestTheUngatedWarningCarriesNoEnvironment(t *testing.T) {
 		t.Fatalf("log = %s", l)
 	}
 }
+
+// The warning names an agent that runs a tool that can make the resource:
+// one that bypasses only tart did not start a container.
+func TestTheUngatedWarningNamesAnAgentThatCanMakeIt(t *testing.T) {
+	tartOnly := agents.Agent{PID: 11, Name: "codex", Tools: []string{"tart"}}
+	docker := agents.Agent{PID: 12, Name: "claude", Tools: []string{"docker"}}
+	for name, c := range map[string]struct {
+		found []agents.Agent
+		want  string
+	}{
+		"a docker-bypassing agent after a tart-only one": {[]agents.Agent{tartOnly, docker}, `its agent claude (pid 12) runs docker without the shims`},
+		"only a tart-only agent":                         {[]agents.Agent{tartOnly}, ""},
+	} {
+		b, clk, log := book(t)
+		calls := 0
+		b.SetExplain(func(context.Context, protocol.Worktree) []agents.Agent { calls++; return c.found })
+		b.Observe(snap())
+		clk.t = clk.t.Add(5 * time.Second)
+		b.Observe(withContainer(withContainer(snap(), "c2", "w1"), "c3", "w1"))
+		if calls != 1 {
+			t.Errorf("%s: the hook ran %d times, want once", name, calls)
+		}
+		_, line, _ := strings.Cut(log.String(), "level=WARN ")
+		line, _, _ = strings.Cut(line, "\n")
+		if c.want == "" && line+"\n" != plainUngated || c.want != "" && !strings.Contains(line, c.want) {
+			t.Errorf("%s: log = %q, want %q", name, line, c.want)
+		}
+	}
+}

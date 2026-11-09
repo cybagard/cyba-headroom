@@ -2317,9 +2317,9 @@ func (b *Book) Waiting() []protocol.Waiter {
 	return out
 }
 
-// warnUngated logs ungated resource r, naming its worktree's agent that
-// runs the tools without the shims if there is one. explained keeps each
-// worktree's agents for the rest of the reading.
+// warnUngated logs ungated resource r, naming its worktree's first agent
+// that runs a tool that can make it without the shims, if there is one.
+// explained keeps each worktree's agents for the rest of the reading.
 func (b *Book) warnUngated(s *protocol.Snapshot, r resource, explained map[string][]agents.Agent) {
 	var wt *protocol.Worktree
 	if b.explain != nil && r.worktree != "" && s.Orca != nil {
@@ -2333,8 +2333,8 @@ func (b *Book) warnUngated(s *protocol.Snapshot, r resource, explained map[strin
 			found = b.explain(context.Background(), *wt)
 			explained[wt.ID] = found
 		}
-		if len(found) > 0 {
-			a := found[0]
+		if i := slices.IndexFunc(found, func(a agents.Agent) bool { return makes(a.Tools, r.kind) }); i >= 0 {
+			a := found[i]
 			b.log.Warn(fmt.Sprintf("ungated: a container or VM appeared without a check in %s; its agent %s (pid %d) runs %s without the shims: launch it through headroom run",
 				view.Label(wt.Project, wt.Name, wt.Path), a.Name, a.PID, strings.Join(a.Tools, ", ")),
 				"name", r.name, "kind", r.kind, "worktree", r.worktree, "agent", a.Name, "agent_pid", a.PID, "tools", a.Tools)
@@ -2343,6 +2343,19 @@ func (b *Book) warnUngated(s *protocol.Snapshot, r resource, explained map[strin
 	}
 	b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
 		"name", r.name, "kind", r.kind, "worktree", r.worktree)
+}
+
+// makers are the tools that can make a resource of each kind.
+var makers = map[string][]string{
+	"vm":        {"tart"},
+	"container": {"docker", "podman"},
+	"compose":   {"docker", "docker-compose", "podman"},
+}
+
+// makes reports whether any of tools can make a resource of kind: an
+// agent that bypasses only tart did not start a container.
+func makes(tools []string, kind string) bool {
+	return slices.ContainsFunc(tools, func(t string) bool { return slices.Contains(makers[kind], t) })
 }
 
 // SetExplain sets how the book finds a worktree's agents that run the

@@ -127,7 +127,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 		}
 		vm := protocol.TartVM{Name: v.Name, OS: cfg.OS, CPUs: cfg.CPU, MemoryBytes: cfg.Memory << 20}
 		if p, ok := procOf[v.Name]; ok {
-			vm.FootprintBytes, vm.CPUPercent = &p.FootprintBytes, p.CPUPercent
+			vm.FootprintBytes, vm.SwappedBytes, vm.CPUPercent = &p.FootprintBytes, p.SwappedBytes, p.CPUPercent
 		}
 		if l, ok := launches[v.Name]; ok {
 			vm.RunPID, vm.RunPIDs, vm.LaunchCwd, vm.SharedDirs = l.pid, l.pids, l.cwd, l.dirs

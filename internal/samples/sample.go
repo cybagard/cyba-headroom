@@ -71,6 +71,9 @@ type Engine struct {
 	VMRunning        bool   `json:"vm_running"`
 	VMLimitBytes     uint64 `json:"vm_limit_bytes"`
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
+	// VMSwappedBytes is the footprint's compressed share; absent when
+	// unknown, and in samples written before #311.
+	VMSwappedBytes *uint64 `json:"vm_swapped_bytes,omitempty"`
 	// VMUnknown means the VM process could not be read: VMRunning and the
 	// footprint are unknown, not zero.
 	VMUnknown  bool        `json:"vm_unknown,omitempty"`
@@ -82,6 +85,9 @@ type PodmanVM struct {
 	Machine        string `json:"machine"`
 	PID            int    `json:"pid"`
 	FootprintBytes uint64 `json:"footprint_bytes"`
+	// SwappedBytes is the footprint's compressed share; absent when
+	// unknown, and in samples written before #311.
+	SwappedBytes *uint64 `json:"swapped_bytes,omitempty"`
 }
 
 // OtherVM is one VM process no known owner claims.
@@ -89,6 +95,9 @@ type OtherVM struct {
 	PID            int    `json:"pid"`
 	Name           string `json:"name"`
 	FootprintBytes uint64 `json:"footprint_bytes"`
+	// SwappedBytes is the footprint's compressed share; absent when
+	// unknown, and in samples written before #311.
+	SwappedBytes *uint64 `json:"swapped_bytes,omitempty"`
 }
 
 // Container is one running container and its attribution keys.
@@ -104,12 +113,15 @@ type Container struct {
 
 // TartVM is one running Tart VM and its attribution keys.
 type TartVM struct {
-	Name           string   `json:"name"`
-	OS             string   `json:"os"`
-	MemoryBytes    uint64   `json:"memory_bytes"`
-	FootprintBytes *uint64  `json:"footprint_bytes,omitempty"`
-	LaunchCwd      string   `json:"launch_cwd,omitempty"`
-	SharedDirs     []string `json:"shared_dirs,omitempty"`
+	Name           string  `json:"name"`
+	OS             string  `json:"os"`
+	MemoryBytes    uint64  `json:"memory_bytes"`
+	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	// SwappedBytes is the footprint's compressed share; absent when
+	// unknown, and in samples written before #311.
+	SwappedBytes *uint64  `json:"swapped_bytes,omitempty"`
+	LaunchCwd    string   `json:"launch_cwd,omitempty"`
+	SharedDirs   []string `json:"shared_dirs,omitempty"`
 }
 
 // LMStudio is LM Studio's footprint and loaded models.
@@ -188,7 +200,7 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 	}
 	for _, e := range s.Engines {
 		se := Engine{Kind: e.Kind, Socket: e.Socket, Machine: e.Machine, Running: e.Running, VMRunning: e.VMRunning,
-			VMLimitBytes: e.VMLimitBytes, VMFootprintBytes: e.VMFootprintBytes, VMUnknown: e.VMError != ""}
+			VMLimitBytes: e.VMLimitBytes, VMFootprintBytes: e.VMFootprintBytes, VMSwappedBytes: clone(e.VMSwappedBytes), VMUnknown: e.VMError != ""}
 		for _, c := range e.Containers {
 			se.Containers = append(se.Containers, Container{
 				Name: c.Name, Image: c.Image, MemoryBytes: c.MemoryBytes, CPUPercent: c.CPUPercent,
@@ -199,18 +211,18 @@ func FromSnapshot(s *protocol.Snapshot) Sample {
 	}
 	if p := s.Podman; p != nil {
 		for _, vm := range p.VMs {
-			out.Podman = append(out.Podman, PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes})
+			out.Podman = append(out.Podman, PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes, SwappedBytes: clone(vm.SwappedBytes)})
 		}
 	}
 	if v := s.VMs; v != nil {
 		for _, vm := range v.Other {
-			out.OtherVMs = append(out.OtherVMs, OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes})
+			out.OtherVMs = append(out.OtherVMs, OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes, SwappedBytes: clone(vm.SwappedBytes)})
 		}
 	}
 	if t := s.Tart; t != nil {
 		for _, vm := range t.VMs {
 			out.TartVMs = append(out.TartVMs, TartVM{
-				Name: vm.Name, OS: vm.OS, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes,
+				Name: vm.Name, OS: vm.OS, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes, SwappedBytes: clone(vm.SwappedBytes),
 				LaunchCwd: vm.LaunchCwd, SharedDirs: vm.SharedDirs,
 			})
 		}

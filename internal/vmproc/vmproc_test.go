@@ -638,3 +638,86 @@ func TestNoPSRunWithoutVMs(t *testing.T) {
 		}
 	}
 }
+
+func u64(v uint64) *uint64 { return &v }
+
+func TestFootprintParsesDirtyAndSwappedPerPIDAndSummed(t *testing.T) {
+	cases := []struct {
+		file string
+		per  map[int]vmproc.Footprint
+		sum  vmproc.Footprint
+	}{
+		{
+			file: "footprint-swapped.txt",
+			per:  map[int]vmproc.Footprint{1234: {Bytes: 22627058136, DirtyBytes: 22627058136, SwappedBytes: u64(1116258304)}},
+			sum:  vmproc.Footprint{Bytes: 22627058136, DirtyBytes: 22627058136, SwappedBytes: u64(1116258304)},
+		},
+		{
+			// Each process's TOTAL leaves out what it shares; the summary
+			// counts that once.
+			file: "footprint-swapped-two.txt",
+			per: map[int]vmproc.Footprint{
+				1234: {Bytes: 22627058136, DirtyBytes: 22627025368, SwappedBytes: u64(1111916544)},
+				5678: {Bytes: 1212656, DirtyBytes: 1179888, SwappedBytes: u64(0)},
+			},
+			sum: vmproc.Footprint{Bytes: 22627058136 + 1212656, DirtyBytes: 22628238024, SwappedBytes: u64(1111916544)},
+		},
+		{
+			// Without --swapped there is no (Swapped) column: unknown, not 0.
+			file: "footprint.txt",
+			per:  map[int]vmproc.Footprint{1234: {Bytes: 1709280520}},
+			sum:  vmproc.Footprint{Bytes: 1709280520},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.file, func(t *testing.T) {
+			out, err := os.ReadFile("testdata/" + c.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			per, sum, err := vmproc.ParseFootprint(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(per, c.per) || !reflect.DeepEqual(sum, c.sum) {
+				t.Fatalf("per pid %s, sum %s\nwant %s, %s", fmtFootprints(per), fmtFootprint(sum), fmtFootprints(c.per), fmtFootprint(c.sum))
+			}
+		})
+	}
+}
+
+func TestFootprintWithoutAProcessIsAnError(t *testing.T) {
+	if _, _, err := vmproc.ParseFootprint([]byte("footprint: no processes\n")); err == nil {
+		t.Fatal("want an error for output with no phys_footprint line")
+	}
+}
+
+func fmtFootprint(f vmproc.Footprint) string {
+	sw := "nil"
+	if f.SwappedBytes != nil {
+		sw = strconv.FormatUint(*f.SwappedBytes, 10)
+	}
+	return "{" + strconv.FormatUint(f.Bytes, 10) + " dirty " + strconv.FormatUint(f.DirtyBytes, 10) + " swapped " + sw + "}"
+}
+
+func fmtFootprints(m map[int]vmproc.Footprint) string {
+	var s []string
+	for pid, f := range m {
+		s = append(s, strconv.Itoa(pid)+":"+fmtFootprint(f))
+	}
+	slices.Sort(s)
+	return strings.Join(s, " ")
+}
+
+func TestListReadsEachVMsSwappedShare(t *testing.T) {
+	sys := newFake()
+	sys.files["footprint 1234"] = "footprint-swapped.txt"
+	got, err := vmproc.New(sys).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Tart VM's output has no (Swapped) column: its share is unknown.
+	if len(got) != 2 || got[0].FootprintBytes != 22627058136 || got[0].SwappedBytes == nil || *got[0].SwappedBytes != 1116258304 || got[1].SwappedBytes != nil {
+		t.Fatalf("got %+v, want the Docker VM's swapped share and none for the Tart VM", got)
+	}
+}

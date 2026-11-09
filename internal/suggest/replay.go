@@ -30,7 +30,7 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 		out.Engines = []protocol.Engine{}
 		for _, se := range s.Engines {
 			e := protocol.Engine{Kind: se.Kind, Socket: se.Socket, Machine: se.Machine, Running: se.Running, VMRunning: se.VMRunning,
-				VMLimitBytes: se.VMLimitBytes, VMFootprintBytes: se.VMFootprintBytes}
+				VMLimitBytes: se.VMLimitBytes, VMFootprintBytes: se.VMFootprintBytes, VMSwappedBytes: se.VMSwappedBytes}
 			if se.VMUnknown {
 				e.VMError = "unknown when recorded"
 			}
@@ -53,19 +53,19 @@ func Snapshot(s samples.Sample) *protocol.Snapshot {
 	if len(s.Podman) > 0 {
 		out.Podman = &protocol.Podman{}
 		for _, vm := range s.Podman {
-			out.Podman.VMs = append(out.Podman.VMs, protocol.PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes})
+			out.Podman.VMs = append(out.Podman.VMs, protocol.PodmanVM{Machine: vm.Machine, PID: vm.PID, FootprintBytes: vm.FootprintBytes, SwappedBytes: vm.SwappedBytes})
 		}
 	}
 	if len(s.OtherVMs) > 0 {
 		out.VMs = &protocol.VMs{}
 		for _, vm := range s.OtherVMs {
-			out.VMs.Other = append(out.VMs.Other, protocol.OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes})
+			out.VMs.Other = append(out.VMs.Other, protocol.OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes, SwappedBytes: vm.SwappedBytes})
 		}
 	}
 	if known("tart") {
 		out.Tart = &protocol.Tart{Installed: true}
 		for _, vm := range s.TartVMs {
-			out.Tart.VMs = append(out.Tart.VMs, protocol.TartVM{Name: vm.Name, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes})
+			out.Tart.VMs = append(out.Tart.VMs, protocol.TartVM{Name: vm.Name, MemoryBytes: vm.MemoryBytes, FootprintBytes: vm.FootprintBytes, SwappedBytes: vm.SwappedBytes})
 		}
 	}
 	if known("lmstudio") {

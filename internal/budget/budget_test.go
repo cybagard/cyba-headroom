@@ -1,6 +1,7 @@
 package budget_test
 
 import (
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -100,7 +101,7 @@ func TestTartReservesConfiguredMemory(t *testing.T) {
 func TestDockerReservesFootprintOrContainersPlusOverhead(t *testing.T) {
 	p := budget.Params{DockerOverheadBytes: 2 * gib}
 	running := func(footprint uint64, containers ...uint64) protocol.Engine {
-		d := protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMLimitBytes: 31 * gib, VMFootprintBytes: footprint}
+		d := protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMLimitBytes: 2 * gib, VMFootprintBytes: footprint}
 		for _, m := range containers {
 			d.Containers = append(d.Containers, protocol.Container{MemoryBytes: m})
 		}
@@ -115,16 +116,22 @@ func TestDockerReservesFootprintOrContainersPlusOverhead(t *testing.T) {
 		"resource saver":        {protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib}, 0, u64(0)},
 		"retained high water":   {running(6*gib, 1*gib), 6 * gib, u64(6 * gib)},
 		"containers + overhead": {running(3*gib, 2*gib, 1*gib), 5 * gib, u64(3 * gib)},
+		// The VM's limit is what it grows into, so a fresh VM reserves it
+		// (#311).
+		"limit above footprint": {
+			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true, VMLimitBytes: 4 * gib, VMFootprintBytes: gib},
+			4 * gib, u64(gib),
+		},
 		// Containers run, so the VM must: one not found is unknown (#268).
 		"containers, no VM found": {
-			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib,
+			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 2 * gib,
 				Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
 			3 * gib, nil,
 		},
 		"VM unreadable": {
 			protocol.Engine{Kind: protocol.EngineDockerDesktop, Running: true, VMLimitBytes: 31 * gib, VMError: "boom",
 				Containers: []protocol.Container{{MemoryBytes: 1 * gib}}},
-			3 * gib, nil,
+			31 * gib, nil,
 		},
 	}
 	for name, tc := range cases {
@@ -629,5 +636,91 @@ func TestAPodmanVMNoEngineCoversKeepsItsReservation(t *testing.T) {
 		if vm == nil {
 			t.Errorf("%s: components = %+v, want the VM's 3 GiB reserved", name, b.Components)
 		}
+	}
+}
+
+// compressedMac is a Mac whose compressor holds pages at ratio:1, as
+// compressed ÷ compressor gives it.
+func compressedMac(compressor, compressed uint64) *protocol.Snapshot {
+	return &protocol.Snapshot{
+		Host:    &protocol.Host{TotalBytes: 64 * gib, UsedBytes: u64(40 * gib), CompressorBytes: u64(compressor), CompressedBytes: u64(compressed)},
+		Engines: []protocol.Engine{}, Tart: &protocol.Tart{Installed: true},
+		LMStudio: &protocol.LMStudio{Installed: true}, Ollama: &protocol.Ollama{Installed: true},
+	}
+}
+
+// A VM costs its ceiling less what compression saves of its swapped share,
+// at the host's compressed ÷ compressor ratio (#311).
+func TestVMCompressionIsCredited(t *testing.T) {
+	tartVM := func(swapped *uint64) func(*protocol.Snapshot) {
+		return func(s *protocol.Snapshot) {
+			s.Tart.VMs = []protocol.TartVM{{Name: "a", MemoryBytes: 16 * gib, FootprintBytes: u64(16 * gib), SwappedBytes: swapped}}
+		}
+	}
+	cases := map[string]struct {
+		compressor, compressed uint64
+		edit                   func(*protocol.Snapshot)
+		component              string
+		reserved, used         float64 // GiB
+	}{
+		// 16 − 10 + 10 ÷ 2.4
+		"tart, 10 GiB compressed at 2.4:1":  {5 * gib, 12 * gib, tartVM(u64(10 * gib)), "tart", 10.17, 10.17},
+		"tart, no swapped reading":          {5 * gib, 12 * gib, tartVM(nil), "tart", 16, 16},
+		"tart, ratio below 1":               {12 * gib, 5 * gib, tartVM(u64(10 * gib)), "tart", 16, 16},
+		"tart, nothing in the compressor":   {0, 0, tartVM(u64(10 * gib)), "tart", 16, 16},
+		"tart, swapped above the footprint": {gib, 2 * gib, tartVM(u64(20 * gib)), "tart", 8, 8},
+		"docker, credited from its limit": {gib, 2 * gib, func(s *protocol.Snapshot) {
+			s.Engines = []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true,
+				VMLimitBytes: 20 * gib, VMFootprintBytes: 18 * gib, VMSwappedBytes: u64(6 * gib)}}
+		}, "docker-desktop", 17, 15},
+		"podman machine": {gib, 2 * gib, func(s *protocol.Snapshot) {
+			s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "dev", FootprintBytes: 4 * gib, SwappedBytes: u64(2 * gib)}}}
+		}, "podman", 3, 3},
+		"other VM": {gib, 2 * gib, func(s *protocol.Snapshot) {
+			s.VMs = &protocol.VMs{Other: []protocol.OtherVM{{Name: "qemu", FootprintBytes: 4 * gib, SwappedBytes: u64(2 * gib)}}}
+		}, "other_vms", 3, 3},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := compressedMac(tc.compressor, tc.compressed)
+			tc.edit(s)
+			c := component(t, budget.Compute(s, budget.Params{DockerOverheadBytes: 2 * gib}), tc.component)
+			gb := func(v uint64) float64 { return float64(v) / float64(gib) }
+			if c.UsedBytes == nil || math.Abs(gb(c.ReservedBytes)-tc.reserved) > 0.01 || math.Abs(gb(*c.UsedBytes)-tc.used) > 0.01 {
+				t.Fatalf("reserved %.3f GiB used %v, want %.2f and %.2f GiB", gb(c.ReservedBytes), c.UsedBytes, tc.reserved, tc.used)
+			}
+		})
+	}
+}
+
+// A fresh Docker VM reserves its limit, not the overhead plus its
+// containers it starts at (#311).
+func TestAFreshDockerVMReservesItsLimit(t *testing.T) {
+	limit := gib * 41 / 2 // 20.5 GiB
+	s := &protocol.Snapshot{Engines: []protocol.Engine{{Kind: protocol.EngineDockerDesktop, Running: true, VMRunning: true,
+		VMLimitBytes: limit, VMFootprintBytes: 1_400_000_000, Containers: []protocol.Container{{MemoryBytes: 500_000_000}}}}}
+	if c := component(t, budget.Compute(s, budget.Params{DockerOverheadBytes: gib * 8 / 5}), "docker-desktop"); c.ReservedBytes != limit {
+		t.Fatalf("reserved %d, want the 20.5 GiB limit", c.ReservedBytes)
+	}
+}
+
+// Unaccounted memory does not move when a VM's pages are compressed: the
+// VM's credited cost and the host's used memory drop together (#311).
+func TestUnaccountedHoldsWhenAVMIsCompressed(t *testing.T) {
+	before := compressedMac(gib, 2*gib)
+	before.Tart.VMs = []protocol.TartVM{{Name: "a", MemoryBytes: 16 * gib, FootprintBytes: u64(16 * gib), SwappedBytes: u64(0)}}
+	// 10 GiB of the VM compressed at 2.5:1 into 4 GiB: used memory drops 6 GiB.
+	after := compressedMac(5*gib, 12*gib)
+	after.Host.UsedBytes = u64(34 * gib)
+	after.Tart.VMs = []protocol.TartVM{{Name: "a", MemoryBytes: 16 * gib, FootprintBytes: u64(16 * gib), SwappedBytes: u64(10 * gib)}}
+	b, a := budget.Compute(before, budget.Params{}), budget.Compute(after, budget.Params{})
+	if b.UnaccountedBytes == nil || a.UnaccountedBytes == nil {
+		t.Fatalf("unaccounted %v, %v; want both known", b.UnaccountedBytes, a.UnaccountedBytes)
+	}
+	if d := *a.UnaccountedBytes - *b.UnaccountedBytes; d > int64(gib) || d < -int64(gib) {
+		t.Fatalf("unaccounted moved %d B (%d → %d), want within 1 GiB", d, *b.UnaccountedBytes, *a.UnaccountedBytes)
+	}
+	if b.ReservedBytes-a.ReservedBytes < 5*gib {
+		t.Fatalf("reserved %d → %d, want the VM credited about 6 GiB", b.ReservedBytes, a.ReservedBytes)
 	}
 }

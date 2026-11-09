@@ -1,0 +1,41 @@
+================================================================================
+com.apple.Virtualization.VirtualMachine [1234]: 64-bit    Footprint: 22627058136 B (16384 bytes per page)
+================================================================================
+
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+22548463616 B  1071005696 B           0 B           0 B        168    App-Specific Tag 1
+ 39141376 B    39141376 B           0 B           0 B          1    Malloc Large
+ 22757848 B           0 B           0 B           0 B          1    page table
+ 12337152 B     4161536 B           0 B           0 B         11    Malloc Small
+   966656 B      573440 B           0 B           0 B         11    Malloc Metadata
+   950272 B      409600 B           0 B           0 B         77    Stack
+   568187 B      436003 B           0 B           0 B        364    __DATA_DIRTY
+   524288 B           0 B           0 B           0 B         32    VM_MEMORY_28
+   360448 B       32768 B           0 B      114688 B          1    Dispatch Continuations
+   277236 B      226712 B           0 B           0 B        426    __DATA
+   196608 B       49152 B           0 B           0 B          1    Malloc Tiny
+   196608 B       16384 B           0 B           0 B         18    Untagged
+   134272 B       86812 B           0 B           0 B       1233    unused dyld shared cache area
+    53176 B       36864 B           0 B           0 B          4    __TPRO_CONST
+    48000 B       32768 B           0 B           0 B          1    __OBJC_RW
+    32768 B       32768 B           0 B           0 B          1    Activity Tracing
+    16857 B       16425 B           0 B           0 B        234    __AUTH
+    16384 B           0 B           0 B           0 B          1    Deferred Reclaim
+    16384 B           0 B           0 B           0 B          1    OS Alloc Once
+        0 B           0 B     2637824 B           0 B        492    __TEXT
+        0 B           0 B      557056 B           0 B          7    mapped file
+        0 B           0 B      163840 B           0 B        418    __DATA_CONST
+        0 B           0 B           0 B           0 B          1    __CTF
+        0 B           0 B           0 B           0 B        420    __AUTH_CONST
+        0 B           0 B           0 B           0 B          1    __FONT_DATA
+        0 B           0 B           0 B           0 B          1    __OBJC_RO
+        0 B           0 B           0 B           0 B          1    Dyld Private Memory
+        0 B           0 B           0 B           0 B          2    __LINKEDIT
+        ---           ---           ---           ---        ---    ---
+22627058136 B  1116258304 B     3358720 B      114688 B       3931    TOTAL
+
+Auxiliary data:
+    phys_footprint: 22627058136 B
+    phys_footprint_peak: 22627107288 B
+

@@ -1,0 +1,140 @@
+================================================================================
+com.apple.Virtualization.VirtualMachine [1234]: 64-bit    Footprint: 22627058136 B (16384 bytes per page)
+================================================================================
+
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+22548463616 B  1066663936 B           0 B           0 B        168    App-Specific Tag 1
+ 39141376 B    39141376 B           0 B           0 B          1    Malloc Large
+ 22757848 B           0 B           0 B           0 B          1    page table
+ 12337152 B     4161536 B           0 B           0 B         11    Malloc Small
+   966656 B      573440 B           0 B           0 B         11    Malloc Metadata
+   950272 B      409600 B           0 B           0 B         77    Stack
+   568187 B      436003 B           0 B           0 B         96    __DATA_DIRTY
+   524288 B           0 B           0 B           0 B         32    VM_MEMORY_28
+   360448 B       32768 B           0 B      114688 B          1    Dispatch Continuations
+   277236 B      226712 B           0 B           0 B         32    __DATA
+   196608 B       49152 B           0 B           0 B          1    Malloc Tiny
+   163840 B       16384 B           0 B           0 B         17    Untagged
+   134272 B       86812 B           0 B           0 B         46    unused dyld shared cache area
+    53176 B       36864 B           0 B           0 B          4    __TPRO_CONST
+    48000 B       32768 B           0 B           0 B          1    __OBJC_RW
+    32768 B       32768 B           0 B           0 B          1    Activity Tracing
+    16857 B       16425 B           0 B           0 B          6    __AUTH
+    16384 B           0 B           0 B           0 B          1    Deferred Reclaim
+    16384 B           0 B           0 B           0 B          1    OS Alloc Once
+        0 B           0 B     2637824 B           0 B          1    __TEXT
+        0 B           0 B      557056 B           0 B          6    mapped file
+        0 B           0 B      163840 B           0 B          1    __DATA_CONST
+        0 B           0 B           0 B           0 B          1    Dyld Private Memory
+        0 B           0 B           0 B           0 B          1    __LINKEDIT
+        ---           ---           ---           ---        ---    ---
+22627025368 B  1111916544 B     3358720 B      114688 B        520    TOTAL
+
+Shared with sleep [5678]:
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+    32768 B           0 B           0 B           0 B          1    Untagged
+        0 B           0 B           0 B           0 B          1    mapped file
+        ---           ---           ---           ---        ---    ---
+    32768 B           0 B           0 B           0 B          2    TOTAL
+
+Auxiliary data:
+    phys_footprint: 22627058136 B
+    phys_footprint_peak: 22627107288 B
+
+================================================================================
+sleep [5678]: 64-bit    Footprint: 1212656 B (16384 bytes per page)
+================================================================================
+
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+   557056 B           0 B           0 B           0 B          9    Malloc Metadata
+   180464 B           0 B           0 B           0 B          1    page table
+   117168 B           0 B           0 B           0 B         18    __DATA_DIRTY
+    65436 B           0 B           0 B           0 B         14    __DATA
+    60284 B           0 B           0 B           0 B         12    unused dyld shared cache area
+    49152 B           0 B           0 B           0 B          3    Malloc Small
+    32768 B           0 B           0 B           0 B          2    Stack
+    32768 B           0 B           0 B           0 B          1    Malloc Tiny
+    31616 B           0 B           0 B           0 B          1    __OBJC_RW
+    20408 B           0 B           0 B           0 B          4    __TPRO_CONST
+    16384 B           0 B           0 B           0 B          1    OS Alloc Once
+    16384 B           0 B           0 B           0 B          1    Deferred Reclaim
+        0 B           0 B       16384 B           0 B          1    __DATA_CONST
+        0 B           0 B       16384 B           0 B          1    __LINKEDIT
+        0 B           0 B       16384 B           0 B          1    __TEXT
+        0 B           0 B           0 B           0 B          1    Dyld Private Memory
+        0 B           0 B           0 B           0 B          4    Untagged
+        ---           ---           ---           ---        ---    ---
+  1179888 B           0 B       49152 B           0 B         77    TOTAL
+
+Shared with com.apple.Virtualization.VirtualMachine [1234]:
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+    32768 B           0 B           0 B           0 B          1    Untagged
+        0 B           0 B           0 B           0 B          1    mapped file
+        ---           ---           ---           ---        ---    ---
+    32768 B           0 B           0 B           0 B          2    TOTAL
+
+Auxiliary data:
+    phys_footprint: 1212656 B
+    phys_footprint_peak: 1245424 B
+
+================================================================================
+Shared Cache C284A291-B68B-3D0D-A1A0-3F866F87EFDC
+================================================================================
+
+Shared with sleep [5678], com.apple.Virtualization.VirtualMachine [1234]:
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+        0 B           0 B           0 B           0 B        242    __AUTH
+        0 B           0 B           0 B           0 B        287    __DATA_DIRTY
+        0 B           0 B           0 B           0 B        457    __DATA
+        0 B           0 B           0 B           0 B        471    __AUTH_CONST
+        0 B           0 B           0 B           0 B        586    __TEXT
+        0 B           0 B           0 B           0 B        468    __DATA_CONST
+        0 B           0 B           0 B           0 B       1297    unused dyld shared cache area
+        0 B           0 B           0 B           0 B          1    __FONT_DATA
+        0 B           0 B           0 B           0 B          1    __CTF
+        0 B           0 B           0 B           0 B          2    __LINKEDIT
+        0 B           0 B           0 B           0 B          2    __OBJC_RO
+        ---           ---           ---           ---        ---    ---
+        0 B           0 B           0 B           0 B       3814    TOTAL
+
+================================================================================
+Summary Footprint: 22628238024 B
+================================================================================
+
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+22548463616 B  1066663936 B           0 B           0 B        168    App-Specific Tag 1
+ 39141376 B    39141376 B           0 B           0 B          1    Malloc Large
+ 22938312 B           0 B           0 B           0 B          2    page table
+ 12386304 B     4161536 B           0 B           0 B         14    Malloc Small
+  1523712 B      573440 B           0 B           0 B         20    Malloc Metadata
+   983040 B      409600 B           0 B           0 B         79    Stack
+   685355 B      436003 B           0 B           0 B        401    __DATA_DIRTY
+   524288 B           0 B           0 B           0 B         32    VM_MEMORY_28
+   360448 B       32768 B           0 B      114688 B          1    Dispatch Continuations
+   342672 B      226712 B           0 B           0 B        503    __DATA
+   229376 B       49152 B           0 B           0 B          2    Malloc Tiny
+   196608 B       16384 B           0 B           0 B         23    Untagged
+   194556 B       86812 B           0 B           0 B       1355    unused dyld shared cache area
+    79616 B       32768 B           0 B           0 B          2    __OBJC_RW
+    73584 B       36864 B           0 B           0 B          8    __TPRO_CONST
+    32768 B           0 B           0 B           0 B          2    Deferred Reclaim
+    32768 B           0 B           0 B           0 B          2    OS Alloc Once
+    32768 B       32768 B           0 B           0 B          1    Activity Tracing
+    16857 B       16425 B           0 B           0 B        248    __AUTH
+        0 B           0 B     2654208 B           0 B        588    __TEXT
+        0 B           0 B      557056 B           0 B          8    mapped file
+        0 B           0 B      180224 B           0 B        470    __DATA_CONST
+        0 B           0 B       16384 B           0 B          4    __LINKEDIT
+        0 B           0 B           0 B           0 B          1    __CTF
+        0 B           0 B           0 B           0 B        471    __AUTH_CONST
+        0 B           0 B           0 B           0 B          1    __FONT_DATA
+        0 B           0 B           0 B           0 B          2    __OBJC_RO
+        0 B           0 B           0 B           0 B          2    Dyld Private Memory
+        ---           ---           ---           ---        ---    ---
+22628238024 B  1111916544 B     3407872 B      114688 B       4415    TOTAL

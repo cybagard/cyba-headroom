@@ -655,8 +655,25 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 		{"-- -f c.yml --verbose=true up -d", "gg"},
 		{"-- -p x --verbose=false up -d", "gg"},
 		{"-- -p x --verbose run --rm a true", "gg"},
+		// #347: standalone's first pass walks over a bare "-" or an empty
+		// word past "--", and lifts a docker option after it.
+		{"-- - -D up -d", "gf"},
+		{"-- '' -D up -d", "gf"},
+		{"-- -p - -D up -d", "gf"},
+		{"-- - --debug up -d", "gf"},
+		{"-- '' up -d", "gg"},
+		{"-- - -H tcp://127.0.0.1:1 up -d", "gg"},
+		{"- -D up -d", "ff"},
+		{"'' -D up -d", "ff"},
+		{"- up -d", "ff"},
+		{"'' up -d", "ff"},
+		{"-p x - -D up -d", "ff"},
+		{"-D - up -d", "ff"},
+		{"-H tcp://127.0.0.1:1 - up -d", "ff"},
+		{"-p - up -d", "FF"},
+		{"-p '' up -d", "gg"},
 	} {
-		args := strings.Fields(tc.argv)
+		args := fieldsWithEmpty(tc.argv)
 		for i, form := range []struct {
 			name string
 			args []string
@@ -688,6 +705,17 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 			}
 		}
 	}
+}
+
+// fieldsWithEmpty is strings.Fields, with two single quotes as the empty word.
+func fieldsWithEmpty(s string) []string {
+	f := strings.Fields(s)
+	for i, w := range f {
+		if w == "''" {
+			f[i] = ""
+		}
+	}
+	return f
 }
 
 func TestParseBytes(t *testing.T) {

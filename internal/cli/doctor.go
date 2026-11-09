@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/agents"
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/client"
@@ -18,6 +19,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/shim"
 	"github.com/cybagard/cyba-headroom/internal/view"
+	"github.com/cybagard/cyba-headroom/internal/vmproc"
 )
 
 // A finding is one line of `headroom doctor`.
@@ -96,6 +98,7 @@ func doctor(e Env) []finding {
 		func() (int, error) { return h.ping(cfg) }, h.agentPID))
 
 	out = append(out, identityFinding(e.Getenv, h, snap))
+	out = append(out, agentsFinding(snap, cfg.ShimDir, h.unshimmed))
 	return append(out, <-login)
 }
 
@@ -329,6 +332,38 @@ func identityFinding(getenv func(string) string, h Env, snap *protocol.Snapshot)
 		}
 	}
 	return f
+}
+
+// agentsTimeout bounds doctor's walk of the worktrees' processes.
+const agentsTimeout = 2 * time.Second
+
+// unshimmed lists the agents under sessions that run a tool without the
+// shims in shimDir (#297).
+func unshimmed(ctx context.Context, sessions []int, shimDir string) []agents.Agent {
+	return agents.Unshimmed(ctx, vmproc.Host{}, sessions, shimDir, shimList())
+}
+
+// agentsFinding lists the agents in Orca's worktrees whose PATH puts a
+// real tool ahead of the shims in shimDir: their calls run ungated (#297).
+func agentsFinding(snap *protocol.Snapshot, shimDir string, find func(context.Context, []int, string) []agents.Agent) finding {
+	if snap == nil || snap.Orca == nil || !snap.Orca.Running || len(snap.Orca.Worktrees) == 0 {
+		return finding{mark: warn, name: "agents", detail: "can't see agents: the daemon has no Orca worktrees to look in"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentsTimeout)
+	defer cancel()
+	var more []string
+	for _, w := range snap.Orca.Worktrees {
+		if len(w.SessionPIDs) == 0 {
+			continue
+		}
+		for _, a := range find(ctx, w.SessionPIDs, shimDir) {
+			more = append(more, fmt.Sprintf("%s: %s (pid %d) runs %s without the shims", view.Label(w.Project, w.Name, w.Path), a.Name, a.PID, strings.Join(a.Tools, ", ")))
+		}
+	}
+	if len(more) == 0 {
+		return finding{mark: pass, name: "agents", detail: "every agent in Orca's worktrees runs the tools through the shims"}
+	}
+	return finding{mark: warn, name: "agents", detail: fmt.Sprintf("agents run tools without the shims, ungated: launch each through `headroom run -- <agent>`, or put %s first on PATH for login shells (in ~/.zprofile)", shimDir), more: more}
 }
 
 // worktreeName labels worktree id as the view does.

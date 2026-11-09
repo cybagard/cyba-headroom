@@ -45,6 +45,7 @@ package lease
 
 import (
 	"cmp"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -57,10 +58,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/agents"
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/units"
+	"github.com/cybagard/cyba-headroom/internal/view"
 )
 
 // Book holds the open leases and the snapshot they were last settled on.
@@ -74,6 +77,9 @@ type Book struct {
 	nextID int
 	// alive reports whether a process runs (a tart lease's tart run).
 	alive func(pid int) bool
+	// explain finds a worktree's agents that run the tools without the
+	// shims, to name the cause of an ungated warning (#297); nil: none.
+	explain func(context.Context, protocol.Worktree) []agents.Agent
 	// run tells this book's lease IDs from an earlier daemon run's, so a
 	// release for one of those cannot end one of these.
 	run string
@@ -1249,6 +1255,9 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			gatedProject[r.project+"\x00"+r.dir] = true
 		}
 	}
+	// Each worktree's unshimmed agents, asked once per reading, and only
+	// for an ungated warning.
+	explained := map[string][]agents.Agent{}
 	for _, r := range unbound {
 		v := b.verdicts[r.key]
 		switch {
@@ -1261,8 +1270,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
-			b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
-				"name", r.name, "kind", r.kind, "worktree", r.worktree)
+			b.warnUngated(s, r, explained)
 		}
 	}
 	for _, v := range b.verdicts {
@@ -2307,6 +2315,56 @@ func (b *Book) Waiting() []protocol.Waiter {
 		out = append(out, v)
 	}
 	return out
+}
+
+// warnUngated logs ungated resource r, naming its worktree's first agent
+// that runs a tool that can make it without the shims, if there is one.
+// explained keeps each worktree's agents for the rest of the reading.
+func (b *Book) warnUngated(s *protocol.Snapshot, r resource, explained map[string][]agents.Agent) {
+	var wt *protocol.Worktree
+	if b.explain != nil && r.worktree != "" && s.Orca != nil {
+		if i := slices.IndexFunc(s.Orca.Worktrees, func(w protocol.Worktree) bool { return w.ID == r.worktree }); i >= 0 {
+			wt = &s.Orca.Worktrees[i]
+		}
+	}
+	if wt != nil {
+		found, ok := explained[wt.ID]
+		if !ok {
+			found = b.explain(context.Background(), *wt)
+			explained[wt.ID] = found
+		}
+		if i := slices.IndexFunc(found, func(a agents.Agent) bool { return makes(a.Tools, r.kind) }); i >= 0 {
+			a := found[i]
+			b.log.Warn(fmt.Sprintf("ungated: a container or VM appeared without a check in %s; its agent %s (pid %d) runs %s without the shims: launch it through headroom run",
+				view.Label(wt.Project, wt.Name, wt.Path), a.Name, a.PID, strings.Join(a.Tools, ", ")),
+				"name", r.name, "kind", r.kind, "worktree", r.worktree, "agent", a.Name, "agent_pid", a.PID, "tools", a.Tools)
+			return
+		}
+	}
+	b.log.Warn("ungated: a container or VM appeared without a check (socket or SDK use, a login shell, an agent not launched through headroom run, or the daemon down)",
+		"name", r.name, "kind", r.kind, "worktree", r.worktree)
+}
+
+// makers are the tools that can make a resource of each kind.
+var makers = map[string][]string{
+	"vm":        {"tart"},
+	"container": {"docker", "podman"},
+	"compose":   {"docker", "docker-compose", "podman"},
+}
+
+// makes reports whether any of tools can make a resource of kind: an
+// agent that bypasses only tart did not start a container.
+func makes(tools []string, kind string) bool {
+	return slices.ContainsFunc(tools, func(t string) bool { return slices.Contains(makers[kind], t) })
+}
+
+// SetExplain sets how the book finds a worktree's agents that run the
+// tools without the shims, for the ungated warning. It runs under the
+// book's lock, so it must be quick: its context has no deadline.
+func (b *Book) SetExplain(explain func(context.Context, protocol.Worktree) []agents.Agent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.explain = explain
 }
 
 // SetDefaultTartBytes sets the cost of a Tart VM whose configured memory

@@ -16,3 +16,6 @@ func SetNow(f *Finder, now func() time.Time) *Finder {
 	f.now = now
 	return f
 }
+
+// PathFromProcArgs is pathFromProcArgs, for tests.
+var PathFromProcArgs = pathFromProcArgs

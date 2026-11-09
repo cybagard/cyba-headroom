@@ -23,6 +23,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cybagard/cyba-headroom/internal/agents"
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/budget"
@@ -81,6 +82,7 @@ type Env struct {
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	ping       func(config.Config) (int, error)                                       // pingDaemon
 	agentPID   func(label string) (int, error)                                        // launchdAgent(label).PID
+	unshimmed  func(context.Context, []int, string) []agents.Agent                    // unshimmed
 	composeAsk func(bin string, args []string) ([]byte, error)                        // askCompose
 	composeDry func(bin string, args []string) ([]byte, error)                        // askComposeDry
 	machineAsk func(bin string, args []string) ([]byte, error)                        // askMachine
@@ -572,6 +574,10 @@ func usage(w io.Writer) {
 `)
 }
 
+// explainBudget bounds the walk of a worktree's processes that names an
+// ungated warning's cause: it runs under the lease book's lock.
+const explainBudget = 200 * time.Millisecond
+
 // wireGate connects the budget (#19), attribution (#20), policy (#24) and
 // leases (#25) to d. Every tick derives the budget and attribution, settles
 // or expires leases against that snapshot, and lists the open ones in it.
@@ -584,6 +590,11 @@ func wireGate(d *daemon.Daemon, cfg config.Config, log *slog.Logger, docker Insp
 	d.SetDropTicket(book.DropTicket)
 	book.SetDaemonTimeout(cfg.Policy.DaemonTimeout.Duration)
 	book.SetDefaultTartBytes(cfg.BudgetParams().DefaultTartBytes)
+	book.SetExplain(func(ctx context.Context, w protocol.Worktree) []agents.Agent {
+		ctx, cancel := context.WithTimeout(ctx, explainBudget)
+		defer cancel()
+		return unshimmed(ctx, w.SessionPIDs, cfg.ShimDir)
+	})
 	return book
 }
 

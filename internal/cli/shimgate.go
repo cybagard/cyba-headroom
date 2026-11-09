@@ -109,6 +109,9 @@ func (e Env) withDefaults() Env {
 	if e.agentPID == nil {
 		e.agentPID = func(label string) (int, error) { return launchdAgent(label).PID(context.Background()) }
 	}
+	if e.unshimmed == nil {
+		e.unshimmed = unshimmed
+	}
 	if e.now == nil {
 		e.now = time.Now
 	}

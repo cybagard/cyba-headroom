@@ -135,7 +135,7 @@ func dockerCLI(name string) bool { return name == "docker" || name == "docker-co
 // process (an exec kept it) or its parent: podman runs its compose provider
 // as its child (#354).
 func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gated {
-	if checked := getenv(shimCheckedVar); c.Kind == "" || checked == shim.Self() || checked != "" && checked == e.parentSelf() {
+	if checked := getenv(shimCheckedVar); c.Kind == "" || checked == shim.Self() || checked != "" && checked == e.withDefaults().parentSelf() {
 		return gated{proceed: true}
 	}
 	// The engine, once and first: a remote one proceeds before the config

@@ -59,7 +59,7 @@ type shimRig struct {
 	// ping stands in for the daemon's ping when set; else it answers.
 	ping  func() error
 	pings int
-	// parentSelf stands in for shim.ParentSelf: the parent's marker.
+	// parentSelf stands in for shim.ParentSelf when set.
 	parentSelf string
 }
 
@@ -120,6 +120,10 @@ func TestMain(m *testing.M) {
 func (r *shimRig) run(argv ...string) (code int, stderr string) {
 	var errb strings.Builder
 	var mu sync.Mutex
+	var parentSelf func() string
+	if r.parentSelf != "" {
+		parentSelf = func() string { return r.parentSelf }
+	}
 	code = Run(Env{Args: argv, Stdout: io.Discard, Stderr: &errb,
 		Getenv:  func(string) string { return "" },
 		Environ: func() []string { return r.env },
@@ -138,7 +142,7 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			return r.ask(req)
 		},
 		ancestors:  func() []int { return []int{4321, 1} },
-		parentSelf: func() string { return r.parentSelf },
+		parentSelf: parentSelf,
 		getwd:      r.getwd,
 		now:        func() time.Time { return r.now },
 		wait: func(d time.Duration) os.Signal {
@@ -294,7 +298,7 @@ func TestShimGateDoesNotAsk(t *testing.T) {
 
 func TestShimGateChecksAChildOfACheckedCall(t *testing.T) {
 	r := newShimRig(t)
-	r.env = append(r.env, "HEADROOM_SHIM_CHECKED=1") // another process's marker
+	r.env = append(r.env, "HEADROOM_SHIM_CHECKED=999999999") // another process's marker, not the parent's
 	r.ask = allow
 	if r.run("docker", "run", "alpine"); len(r.asked) != 1 {
 		t.Fatalf("asked %d times", len(r.asked))

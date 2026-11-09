@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -305,27 +306,101 @@ func podmanEvent(action, id string, labels map[string]string, attrs ...string) s
 
 // podman compose stop && up, and compose kill && up, before a reading:
 // Podman sends no stop, and its kill no signal, but its events still bind
-// the up's lease, as Docker's do (TestAStopThenUpWithinATickBinds).
+// the up's lease, as Docker's do (TestAStopThenUpWithinATickBinds), whoever
+// the container is attributed to: the up's worktree, none, or another. Its
+// die comes before the stop made up at the start, and the stop explains it
+// (#335).
 func TestAPodmanStopThenUpWithinATickBinds(t *testing.T) {
 	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db", "name": "db"}
 	for name, stop := range map[string][]string{
 		"stop": {podmanEvent("die", "db", lbl, "exitCode", "137")},
 		"kill": {podmanEvent("kill", "db", lbl), podmanEvent("die", "db", lbl, "exitCode", "137")},
 	} {
-		t.Run(name, func(t *testing.T) {
-			b, c, log := book(t)
-			s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, "w1")
-			b.Observe(s)
-			b.Observe(s)
-			podmanEvents(t, b, append(stop, podmanEvent("start", "db", lbl)), func(action string) {
-				if action == "die" {
-					b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "podman compose up", Target: "app", OnEngine: true}, s, cfg)
+		for _, owner := range []string{"w1", "", "w2"} {
+			t.Run(name+"/owner "+owner, func(t *testing.T) {
+				b, c, log := book(t)
+				s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, owner)
+				b.Observe(s)
+				b.Observe(s)
+				podmanEvents(t, b, append(stop, podmanEvent("start", "db", lbl)), func(action string) {
+					if action == "die" {
+						b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "podman compose up", Target: "app", OnEngine: true}, s, cfg)
+					}
+				})
+				c.t = c.t.Add(3 * time.Minute)
+				b.Observe(s)
+				if strings.Contains(log.String(), "never appeared") {
+					t.Fatalf("log: %s", log)
 				}
 			})
+		}
+	}
+}
+
+// docker compose stop && up before a reading, with a stop signal other
+// than 9 or 15 (SIGINT, an image's STOPSIGNAL), or a kill Docker names no
+// signal of: the kill does not say it stops, so its die comes first, then
+// the stop, which explains it: the up's lease binds, whoever the container
+// is attributed to (#335).
+func TestADockerStopBySignalThenUpWithinATickBinds(t *testing.T) {
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}
+	for _, sig := range []string{"2", ""} {
+		for _, owner := range []string{"w1", "", "w2"} {
+			t.Run("signal "+sig+"/owner "+owner, func(t *testing.T) {
+				b, c, log := book(t)
+				s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, owner)
+				b.Observe(s)
+				b.Observe(s)
+				kill := maps.Clone(lbl)
+				if sig != "" {
+					kill["signal"] = sig
+				}
+				b.ContainerEvent("kill", "db", "db", kill)
+				b.ContainerEvent("die", "db", "db", lbl)
+				b.ContainerEvent("stop", "db", "db", lbl)
+				b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
+				b.ContainerEvent("start", "db", "db", lbl)
+				c.t = c.t.Add(3 * time.Minute)
+				b.Observe(s)
+				if strings.Contains(log.String(), "never appeared") {
+					t.Fatalf("log: %s", log)
+				}
+			})
+		}
+	}
+}
+
+// A crash, with no stop, then an up before a reading: the restart binds the
+// up's lease only if the container is the up's worktree's (bindsAfterCrash).
+// Another's, or one attributed to none, binds nothing, and the lease ends
+// "never appeared"; a stop between would have bound it (#335).
+func TestACrashThenUpWithinATickBindsOnlyTheUpsWorktrees(t *testing.T) {
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}
+	for _, tc := range []struct {
+		owner         string
+		stopped, want bool // a stop between the die and the up; whether the start binds
+	}{
+		{"w1", false, true}, {"", false, false}, {"w2", false, false},
+		{"", true, true}, {"w2", true, true},
+	} {
+		t.Run(fmt.Sprintf("owner %s stopped %v", tc.owner, tc.stopped), func(t *testing.T) {
+			b, c, log := book(t)
+			s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, tc.owner)
+			b.Observe(s)
+			b.Observe(s)
+			step := func() { c.t = c.t.Add(10 * time.Millisecond) }
+			b.ContainerEvent("die", "db", "db", lbl)
+			if tc.stopped {
+				b.ContainerEvent("stop", "db", "db", lbl)
+			}
+			step()
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
+			step()
+			b.ContainerEvent("start", "db", "db", lbl)
 			c.t = c.t.Add(3 * time.Minute)
 			b.Observe(s)
-			if strings.Contains(log.String(), "never appeared") {
-				t.Fatalf("log: %s", log)
+			if bound := !strings.Contains(log.String(), "never appeared"); bound != tc.want {
+				t.Fatalf("bound = %v, want %v: log %s", bound, tc.want, log)
 			}
 		})
 	}

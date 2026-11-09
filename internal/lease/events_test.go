@@ -1,6 +1,9 @@
 package lease_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +28,49 @@ func TestAContainerOnlyEventsSawEndsItsLease(t *testing.T) {
 	}
 	c.t = c.t.Add(3 * 60e9)
 	b.Observe(snap())
+	if strings.Contains(log.String(), "never appeared") {
+		t.Fatalf("log: %s", log)
+	}
+}
+
+// podman run --rm alpine true, as Podman's /events streams it (recorded,
+// testdata/events-podman.jsonl): the same start and die end its lease at
+// once, with no "never appeared" warning (#67).
+func TestAPodmanRunOnlyEventsSawEndsItsLease(t *testing.T) {
+	f, err := os.ReadFile("../source/docker/testdata/events-podman.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, c, log := book(t)
+	s := podmanSnap()
+	b.Observe(s)
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Op: "run", Command: "podman run --rm alpine true",
+		CostBytes: 2 * gib, Target: "alpine", Labelled: true}, s, cfg)
+	if !d.Allow {
+		t.Fatalf("check = %+v", d)
+	}
+	dec := json.NewDecoder(bytes.NewReader(f))
+	for {
+		var ev struct {
+			Action string
+			Actor  struct {
+				ID         string
+				Attributes map[string]string
+			}
+		}
+		if err := dec.Decode(&ev); err != nil {
+			break
+		}
+		if a := ev.Actor.Attributes; a[protocol.LeaseLabel] == "lease-1-2" { // the run --rm's container
+			a[protocol.LeaseLabel] = d.LeaseID
+			b.ContainerEventAt(time.Time{}, ev.Action, ev.Actor.ID, a["name"], a)
+		}
+	}
+	if l := b.List(); len(l) != 0 {
+		t.Fatalf("leases = %+v, want none", l)
+	}
+	c.t = c.t.Add(3 * time.Minute)
+	b.Observe(podmanSnap())
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("log: %s", log)
 	}

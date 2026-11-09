@@ -155,6 +155,12 @@ func TestParse(t *testing.T) {
 		{"docker compose -- -Dp up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
 		{"docker compose -- -Df up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
 		{"docker compose -- -Dp x up -d", Call{}},
+		// #356: compose's --version is ignored when a command follows.
+		{"docker compose --version up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker --version compose up -d", Call{}},
+		{"docker compose --version", Call{}},
+		{"docker compose --profile -- x -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose --profile -- -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "y", ComposeDetached: true}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -403,7 +409,8 @@ func TestDockerComposeLeadingRun(t *testing.T) {
 // plan, addenda 1 and 2, review rounds 1 to 3), in both forms: s is the
 // standalone docker-compose, p the plugin. Unreachable engines; "runs" is
 // a call that dialled one. g: runs, and is gated; f: fails, and is not;
-// p: runs, but starts nothing (a dry run, down, config), and is not gated;
+// p: runs, but starts nothing (a dry run, down, config), and is not gated
+// (f covers --help too, which prints the usage);
 // F: fails, but is gated (the safe direction): "--" as -p's or -f's value,
 // docker's options before "--" in the plugin, which does not take them,
 // and two -H, which docker refuses.
@@ -695,6 +702,79 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 		{"-p '' -f c.yml up -d", "gg"},
 		{"-p '' --compatibility up -d", "gg"},
 		{"-D -p '' up -d", "gg"},
+		// #356 A: --version and -v are a boolean Compose ignores when a
+		// command follows; the standalone first pass switches to its
+		// version command on a bare one in its leading run.
+		{"--version up -d", "fg"},
+		{"-v up -d", "fg"},
+		{"--version=true up -d", "gg"},
+		{"-v=true up -d", "gg"},
+		{"-v=false up -d", "gg"},
+		{"-p x --version up -d", "gg"},
+		{"-f c.yml --version up -d", "gg"},
+		{"--ansi never --version up -d", "gg"},
+		{"-p x -v up -d", "gg"},
+		{"--compatibility --version up -d", "fg"},
+		{"--version -p x up -d", "fg"},
+		{"--version --compatibility up -d", "fg"},
+		{"-p '' --version up -d", "fg"},
+		{"--profile '' --version up -d", "fg"},
+		{"--version -- -p x up -d", "fg"},
+		{"--profile -- '' --version up -d", "fg"},
+		{"-- --version -p x up -d", "gg"},
+		{"--version=bogus up -d", "ff"},
+		{"-D --version up -d", "fF"},
+		{"--version -D up -d", "fF"},
+		{"-H tcp://127.0.0.1:1 --version up -d", "fF"},
+		{"--version -- up -d", "ff"},
+		{"--help up -d", "ff"},
+		{"-h up -d", "ff"},
+		{"-p x --help up -d", "ff"},
+		// #356 B: a "--" after a value option's separate form is its
+		// value, and Compose then finds its command as after a "--".
+		{"--profile -- '' up -d", "gg"},
+		{"--profile -- x up -d", "gg"},
+		{"--ansi -- '' up -d", "gg"},
+		{"--ansi -- x up -d", "gg"},
+		{"-p x --profile -- '' up -d", "gg"},
+		{"--profile -- '' -p x up -d", "gg"},
+		{"--profile -- '' -H tcp://127.0.0.1:1 up -d", "gg"},
+		{"--profile -- '' -D up -d", "gf"},
+		{"--ansi -- '' -D up -d", "gf"},
+		{"-p -- '' up -d", "FF"},
+		{"-p -- x up -d", "FF"},
+		{"--project-name -- '' up -d", "FF"},
+		{"--project-name -- x up -d", "FF"},
+		{"-f -- '' up -d", "FF"},
+		{"-f -- x up -d", "FF"},
+		{"--env-file -- '' up -d", "FF"},
+		{"--env-file -- x up -d", "FF"},
+		{"--project-directory -- '' up -d", "FF"},
+		{"--project-directory -- x up -d", "FF"},
+		{"--progress -- '' up -d", "FF"},
+		{"--progress -- x up -d", "FF"},
+		{"--parallel -- '' up -d", "FF"},
+		{"--parallel -- x up -d", "FF"},
+		{"--profile -- up -d", "FF"},
+		{"--profile -- -D up -d", "FF"},
+		{"-f -- up -d", "FF"},
+		// #356 review round 1: past "OPT -- W", W no flag, Compose ignores
+		// every word up to the command; a bare --version or -v in the
+		// standalone run passes after any "--", Docker's options skipped.
+		{"--profile -- x --version=bogus up -d", "gg"},
+		{"--profile -- '' -v= up -d", "gg"},
+		{"--profile -- x --help up -d", "gg"},
+		{"--profile -- '' -h up -d", "gg"},
+		{"--profile -- x -Dv up -d", "gF"},
+		{"--profile -- x --version -H tcp://127.0.0.1:1 up -d", "gF"},
+		{"--profile -- x -p y up -d", "gg"},
+		{"--profile -- '' -p y up -d", "gg"},
+		{"--profile -- -p y up -d", "gg"},
+		{"-- -- --version up -d", "gg"},
+		{"-- -- --version -p x up -d", "gg"},
+		{"-- -- -v up -d", "gg"},
+		{"-- -D -- --version up -d", "gg"},
+		{"--profile -- -- --version up -d", "gg"},
 	} {
 		args := fieldsWithEmpty(tc.argv)
 		for i, form := range []struct {
@@ -716,8 +796,8 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 				t.Errorf("%s %s: host %q from after --", form.name, tc.argv, c.Host)
 			}
 			// The probes leave out the "--" and the words after it up to
-			// the command, unless it is an option's value.
-			if want != 'g' || sep > 0 && sep < len(args) && (args[sep-1] == "-p" || args[sep-1] == "-f") {
+			// the command, and join it to an option it is the value of.
+			if want != 'g' {
 				continue
 			}
 			if out, ok := ComposeConfig(form.name, form.args, false); !ok || slices.Contains(out, "--") {
@@ -981,6 +1061,9 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "--dry-run", "--", "-p", "x", "up", "-d"}, nil},
 		{[]string{"compose", "--", "up", "-d"}, nil},
 		{[]string{"compose", "-f", "c.yml", "--", "-h", "--", "-p", "y", "up", "-d"}, []string{"compose", "--dry-run", "-f", "c.yml", "up", "-d"}},
+		// A "--" that is an option's value is joined to it, and the word
+		// Compose ignores after it is left out (#356).
+		{[]string{"compose", "--profile", "--", "x", "up", "-d"}, []string{"compose", "--dry-run", "--profile=--", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -1008,6 +1091,7 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"--", "--dry-run", "up", "-d"}, []string{"--dry-run", "up", "-d"}},
 		{[]string{"--", "-H", "h", "up", "-d"}, nil},
 		{[]string{"-p", "x", "--", "--", "--version", "-p", "y", "up", "-d"}, []string{"--dry-run", "-p", "x", "up", "-d"}},
+		{[]string{"--profile", "--", "x", "up", "-d"}, []string{"--dry-run", "--profile=--", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker-compose", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -1095,6 +1179,13 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 		{"docker-compose", []string{"-H", "h", "--", "-p", "y", "up", "-d"}, []string{"-H", "h", "config", "--format", "json"}},
 		{"docker", []string{"compose", "-f", "c.yml", "--", "--help", "--", "-p", "y", "up", "-d"}, []string{"compose", "-f", "c.yml", "config", "--format", "json"}},
 		{"docker-compose", []string{"-p", "x", "--", "--", "--version", "-p", "y", "up", "-d"}, []string{"-p", "x", "config", "--format", "json"}},
+		// A "--" that is an option's value is joined to it, and the word
+		// Compose ignores after it is left out (#356).
+		{"docker", []string{"compose", "--profile", "--", "x", "up", "-d"}, []string{"compose", "--profile=--", "config", "--format", "json"}},
+		{"docker-compose", []string{"--profile", "--", "x", "up", "-d"}, []string{"--profile=--", "config", "--format", "json"}},
+		{"docker", []string{"compose", "--profile", "--", "x", "-p", "y", "up", "-d"}, []string{"compose", "--profile=--", "config", "--format", "json"}},
+		{"docker-compose", []string{"--profile", "--", "x", "-p", "y", "up", "-d"}, []string{"--profile=--", "config", "--format", "json"}},
+		{"docker", []string{"compose", "--profile", "--", "-p", "y", "up", "-d"}, []string{"compose", "--profile=--", "-p", "y", "config", "--format", "json"}},
 		// podman compose: podman's own options stay before compose (#349).
 		{"podman", []string{"compose", "up", "-d"}, []string{"compose", "config", "--format", "json"}},
 		{"podman", []string{"--url", "U", "compose", "-f", "a.yml", "up", "-d"}, []string{"--url", "U", "compose", "-f", "a.yml", "config", "--format", "json"}},

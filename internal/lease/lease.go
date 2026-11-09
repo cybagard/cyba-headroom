@@ -887,27 +887,58 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 	return d, nil
 }
 
-// podsRun reports whether s shows a running container of each of pods
-// (podIs); false for none.
+// podsRun reports whether s's pod lists show each of pods with every one
+// of its containers running, the infra included (podIs): a start or
+// restart of it brings nothing back. False for none, and for a pod that is
+// degraded, exited, created or paused, or missing from the lists, or whose
+// list failed (#294).
 func podsRun(s *protocol.Snapshot, pods []string) bool {
-	res := resources(s, 0) // pods only: VM sizes do not matter
+	var all []protocol.Pod
+	for _, e := range s.Engines {
+		all = append(all, e.Pods...)
+	}
+	names := podNames(s)
 	return len(pods) > 0 && !slices.ContainsFunc(pods, func(p string) bool {
-		return !slices.ContainsFunc(res, func(r resource) bool { return podIs(p, r) })
+		found := false
+		for _, x := range all {
+			if podIs(p, x.Name, x.ID, names) {
+				if x.Running < x.Containers {
+					return true
+				}
+				found = true
+			}
+		}
+		return !found
 	})
 }
 
-// podIs reports whether pod ref p, as a pod start names it, is container
-// r's pod, as Podman resolves one: its name, else its full ID, else a
-// prefix of its ID of at least 12 hex characters that is no pod's name in
-// the reading (#230, plan amendment 4).
-func podIs(p string, r resource) bool {
+// podNames is every pod's name in s: its pod lists', running or not, and
+// its containers'.
+func podNames(s *protocol.Snapshot) map[string]bool {
+	names := map[string]bool{}
+	for _, e := range s.Engines {
+		for _, p := range e.Pods {
+			names[p.Name] = p.Name != ""
+		}
+	}
+	for _, c := range s.Containers() {
+		names[c.Pod] = names[c.Pod] || c.Pod != ""
+	}
+	return names
+}
+
+// podIs reports whether pod ref p, as a pod start names it, is the pod
+// called name with ID id, as Podman resolves one: its name, else its full
+// ID, else a prefix of its ID of at least 12 hex characters that is no
+// pod's name in the reading (names; #230, plan amendment 4).
+func podIs(p, name, id string, names map[string]bool) bool {
 	switch {
-	case r.pod == "" || p == "":
+	case name == "" || p == "":
 		return false
-	case p == r.pod || p == r.podID:
+	case p == name || p == id:
 		return true
 	}
-	return len(p) >= 12 && strings.Trim(p, "0123456789abcdef") == "" && strings.HasPrefix(r.podID, p) && !r.podNames[p]
+	return len(p) >= 12 && strings.Trim(p, "0123456789abcdef") == "" && strings.HasPrefix(id, p) && !names[p]
 }
 
 // resource is a container or VM in a snapshot.
@@ -970,13 +1001,10 @@ func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 		}
 	}
 	var out []resource
-	podNames := map[string]bool{}
-	for _, c := range s.Containers() {
-		podNames[c.Pod] = c.Pod != ""
-	}
+	names := podNames(s)
 	for _, c := range s.Containers() {
 		r := containerResource(c.ID, c.Name, c.Labels)
-		r.worktree, r.bytes, r.pod, r.podID, r.podNames = owner[r.key], min(c.MemoryBytes, units.MaxBytes), c.Pod, c.PodID, podNames
+		r.worktree, r.bytes, r.pod, r.podID, r.podNames = owner[r.key], min(c.MemoryBytes, units.MaxBytes), c.Pod, c.PodID, names
 		out = append(out, r)
 	}
 	if s.Podman != nil {
@@ -2099,7 +2127,7 @@ func (e *entry) hasKey() bool {
 
 // inPods reports whether container r is in one of e's pods (podIs).
 func (e *entry) inPods(r resource) bool {
-	return slices.ContainsFunc(e.pods, func(p string) bool { return podIs(p, r) })
+	return slices.ContainsFunc(e.pods, func(p string) bool { return podIs(p, r.pod, r.podID, r.podNames) })
 }
 
 // lapsedFor reports whether a lapsed lease is r's (its key matches), and

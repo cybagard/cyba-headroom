@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -544,41 +545,73 @@ func TestAShimGatedPodmanRunBindsItsLease(t *testing.T) {
 	}
 }
 
-// Podman labels no pod's containers: on a Podman engine, the libpod list
-// names the pod each container is in, and its ID, for a pod start's or
-// kube play's lease to bind by (#230; testdata/libpod-containers.json has
-// the fields of a probe's capture, with neutral names and IDs). A libpod
-// list that fails leaves the pods unknown and the engine read.
+// Podman labels no pod's containers: on a Podman engine, the libpod pod
+// list names the pod each container is in, and its ID, for a pod start's or
+// kube play's lease to bind by (#230), and counts each pod's containers and
+// those that run, for a pod start's no-lease shortcut (#294;
+// testdata/libpod-pods.json has the fields of a probe's capture, with
+// neutral names and IDs). It is the one libpod request of a reading. A
+// libpod list that fails leaves the pods unknown and the engine read.
 func TestPodmanEngineNamesEachContainersPod(t *testing.T) {
 	const infraID = "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f"
+	const cacheID = "2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a"
+	const degradedInfraID = "0000000000000000000000000000000000000000000000000000000000000b11"
 	routes := func(libpod bool) map[string]string {
 		r := map[string]string{
-			"/info":            "info-podman.json",
-			"/version":         "version-podman.json",
-			"/containers/json": `[{"Id":"` + podmanID + `","Names":["/web-app"]},{"Id":"` + infraID + `","Names":["/00000000000a-infra"]}]`,
-			"/containers/" + podmanID + "/stats?stream=false&one-shot=true": cpuStats(1, 1),
-			"/containers/" + infraID + "/stats?stream=false&one-shot=true":  cpuStats(1, 1),
+			"/info":    "info-podman.json",
+			"/version": "version-podman.json",
+			"/containers/json": `[{"Id":"` + podmanID + `","Names":["/web-app"]},{"Id":"` + infraID + `","Names":["/00000000000a-infra"]},` +
+				`{"Id":"` + cacheID + `","Names":["/cache"]},{"Id":"` + degradedInfraID + `","Names":["/0000000000b1-infra"]}]`,
+		}
+		for _, id := range []string{podmanID, infraID, cacheID, degradedInfraID} {
+			r["/containers/"+id+"/stats?stream=false&one-shot=true"] = cpuStats(1, 1)
 		}
 		if libpod {
-			r["/v4.0.0/libpod/containers/json"] = "libpod-containers.json"
+			r["/v4.0.0/libpod/pods/json"] = "libpod-pods.json"
 		}
 		return r
 	}
+	const webID = "00000000000000000000000000000000000000000000000000000000000000aa"
 	for _, libpod := range []bool{true, false} {
-		sock, _ := engine(t, routes(libpod))
+		sock, _, served := loggedEngine(t, routes(libpod))
 		p := docker.NewPodman(machine(sock), (&fakeClock{t0}).now, quiet)
 		got := found(t, fakeVMs{podmanVM}, p.Candidates(context.Background())...)
-		if len(got) != 1 || !got[0].Running || len(got[0].Containers) != 2 {
+		if len(got) != 1 || !got[0].Running || len(got[0].Containers) != 4 {
 			t.Fatalf("libpod %v: engines = %+v", libpod, got)
 		}
+		want := map[string][2]string{podmanID: {"web", webID}, infraID: {"web", webID}, cacheID: {},
+			degradedInfraID: {"degraded", "00000000000000000000000000000000000000000000000000000000000000b1"}}
 		for _, c := range got[0].Containers {
-			want, wantID := "", ""
-			if libpod {
-				want, wantID = "web", "00000000000000000000000000000000000000000000000000000000000000aa"
+			w := want[c.ID]
+			if !libpod {
+				w = [2]string{}
 			}
-			if c.Pod != want || c.PodID != wantID {
-				t.Errorf("libpod %v: %s is in pod %q (%q), want %q", libpod, c.Name, c.Pod, c.PodID, want)
+			if c.Pod != w[0] || c.PodID != w[1] {
+				t.Errorf("libpod %v: %s is in pod %q (%q), want %q (%q)", libpod, c.Name, c.Pod, c.PodID, w[0], w[1])
 			}
+		}
+		var wantPods []protocol.Pod
+		if libpod {
+			wantPods = []protocol.Pod{
+				{Name: "web", ID: webID, Containers: 2, Running: 2},
+				{Name: "degraded", ID: "00000000000000000000000000000000000000000000000000000000000000b1", Containers: 2, Running: 1},
+				{Name: "degraded-two", ID: "00000000000000000000000000000000000000000000000000000000000000b2", Containers: 3, Running: 2},
+				{Name: "exited", ID: "00000000000000000000000000000000000000000000000000000000000000b3", Containers: 1, Running: 0},
+				{Name: "created", ID: "00000000000000000000000000000000000000000000000000000000000000b4", Containers: 2, Running: 0},
+				{Name: "paused", ID: "00000000000000000000000000000000000000000000000000000000000000b5", Containers: 2, Running: 0},
+			}
+		}
+		if !slices.Equal(got[0].Pods, wantPods) {
+			t.Errorf("libpod %v: pods = %+v, want %+v", libpod, got[0].Pods, wantPods)
+		}
+		var calls []string
+		for _, r := range served() {
+			if strings.Contains(r, "libpod") {
+				calls = append(calls, r)
+			}
+		}
+		if len(calls) != 1 || calls[0] != "/v4.0.0/libpod/pods/json" {
+			t.Errorf("libpod %v: libpod requests = %v, want the pod list alone", libpod, calls)
 		}
 	}
 }

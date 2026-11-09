@@ -1,6 +1,7 @@
 package lease_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +29,34 @@ func withMachine(s *protocol.Snapshot, machine string, footprint uint64) *protoc
 	return s
 }
 
-// withPodContainer adds a container of a pod to the Podman engine.
+// withPodContainer adds a running container of a pod to the Podman
+// engine, and counts it in the engine's record of that pod.
 func withPodContainer(s *protocol.Snapshot, id, pod, podID string, mem uint64) *protocol.Snapshot {
 	e := &s.Engines[len(s.Engines)-1]
 	e.Containers = append(e.Containers, protocol.Container{ID: id, Name: id, MemoryBytes: mem, Pod: pod, PodID: podID})
+	return withPodRecord(s, pod, podID, 1, 1)
+}
+
+// withStoppedPodContainer counts a container of a pod that does not run
+// (exited, created or paused): the pod list has it, the container list
+// does not.
+func withStoppedPodContainer(s *protocol.Snapshot, pod, podID string) *protocol.Snapshot {
+	return withPodRecord(s, pod, podID, 1, 0)
+}
+
+// withPodRecord adds containers and running ones to the Podman engine's
+// record of pod, which it makes if need be.
+func withPodRecord(s *protocol.Snapshot, pod, podID string, containers, running int) *protocol.Snapshot {
+	if pod == "" {
+		return s
+	}
+	e := &s.Engines[len(s.Engines)-1]
+	i := slices.IndexFunc(e.Pods, func(p protocol.Pod) bool { return p.Name == pod })
+	if i < 0 {
+		e.Pods, i = append(e.Pods, protocol.Pod{Name: pod, ID: podID}), len(e.Pods)
+	}
+	e.Pods[i].Containers += containers
+	e.Pods[i].Running += running
 	return s
 }
 
@@ -220,7 +245,7 @@ func TestAPodStartOfRunningPodsTakesNoLease(t *testing.T) {
 	b.Observe(s)
 	for _, r := range []policy.Request{podStart("w1", "web"), podStart("w1", "db"), podStart("w1", "web", "db")} {
 		r.CostBytes = 64 * gib
-		if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID != "" {
+		if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID != "" || d.Message != "headroom: allowed `podman pod start` (it already runs)" {
 			t.Fatalf("%v: check = %+v", r.Pods, d)
 		}
 	}
@@ -317,6 +342,125 @@ func TestAPodRestartOfRunningPodsTakesNoLease(t *testing.T) {
 	all := policy.Request{Worktree: "w1", Kind: "pod", Op: "restart", Command: "podman pod restart"}
 	if d := b.Check(all, s, cfg); !d.Allow || d.LeaseID == "" {
 		t.Fatalf("restart --all: check = %+v", d)
+	}
+}
+
+// A pod is running, for a start's or restart's no-lease shortcut, only
+// when every one of its containers runs. A degraded pod (its infra up, an
+// app exited) takes the ordinary pod lease: its running containers are
+// adopted, the app binds the lease when it comes back, and nothing is
+// ungated (#294).
+func TestAPodStartOfADegradedPodTakesALease(t *testing.T) {
+	const id = "00000000000000000000000000000000000000000000000000000000000000d1"
+	for _, op := range []string{"start", "restart"} {
+		for _, running := range [][]string{{"dg-infra"}, {"dg-infra", "dg-web"}} {
+			b, _, _ := book(t)
+			s := podmanSnap()
+			for _, c := range running {
+				s = withPodContainer(s, c, "dg", id, gib/8)
+			}
+			s = withStoppedPodContainer(s, "dg", id)
+			b.Observe(s)
+			r := podStart("w1", "dg")
+			r.Op = op
+			d := b.Check(r, s, cfg)
+			if !d.Allow || d.LeaseID == "" {
+				t.Fatalf("%s with %v running: check = %+v", op, running, d)
+			}
+			b.Observe(s)
+			if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib {
+				t.Fatalf("%s with %v running: leases = %+v", op, running, ls)
+			}
+			b.Observe(withPodContainer(s, "dg-app", "dg", id, gib/4))
+			if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib*3/4 {
+				t.Fatalf("%s with %v running: the app did not bind the lease: %+v", op, running, ls)
+			}
+			if k := ungatedKeys(b); len(k) != 0 {
+				t.Fatalf("%s with %v running: ungated = %v", op, running, k)
+			}
+		}
+	}
+}
+
+// A start or restart of a pod with no container running (exited, created
+// or paused), or of one the reading does not know (missing from the pod
+// list, or the list failed), takes a lease that holds its cost (#294).
+func TestAPodStartOfAPodNotKnownToRunTakesALease(t *testing.T) {
+	const id = "00000000000000000000000000000000000000000000000000000000000000e1"
+	for _, c := range []struct {
+		name string
+		snap func() *protocol.Snapshot
+	}{
+		{"stopped", func() *protocol.Snapshot {
+			return withStoppedPodContainer(withStoppedPodContainer(podmanSnap(), "web", id), "web", id)
+		}},
+		{"not in the pod list", func() *protocol.Snapshot {
+			return withPodContainer(podmanSnap(), "other-app", "other", "0f0f0f", gib/4)
+		}},
+		{"pod list failed", func() *protocol.Snapshot {
+			s := withPodContainer(podmanSnap(), "web-app", "web", id, gib/4)
+			s.Engines[len(s.Engines)-1].Pods = nil
+			return s
+		}},
+	} {
+		for _, op := range []string{"start", "restart"} {
+			b, _, _ := book(t)
+			s := c.snap()
+			b.Observe(s)
+			r := podStart("w1", "web")
+			r.Op = op
+			if d := b.Check(r, s, cfg); !d.Allow || d.LeaseID == "" || d.CostBytes != gib {
+				t.Fatalf("%s, %s: check = %+v", c.name, op, d)
+			}
+			if c.name == "pod list failed" {
+				continue // its running container is adopted
+			}
+			b.Observe(s)
+			if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib {
+				t.Fatalf("%s, %s: leases = %+v", c.name, op, ls)
+			}
+		}
+	}
+}
+
+// A pod start names a pod as Podman resolves it against every pod, not
+// only those with a container running: a 12-character ID prefix of a pod
+// that runs is the stopped pod that has it as its name, and takes a lease
+// (#294).
+func TestAPodStartByIDResolvesAgainstThePodList(t *testing.T) {
+	const id = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+	const stopped = "00000000000000000000000000000000000000000000000000000000000000f1"
+	running := withPodContainer(podmanSnap(), "web-app", "web", id, gib/4)
+	for _, ref := range []string{id, id[:12]} {
+		b, _, _ := book(t)
+		b.Observe(running)
+		if d := b.Check(podStart("w1", ref), running, cfg); !d.Allow || d.LeaseID != "" {
+			t.Fatalf("pod start %s of the running pod: check = %+v", ref, d)
+		}
+	}
+	// A pod with nothing running, by its full ID or a prefix: a lease, which
+	// its container binds when it comes up.
+	for _, ref := range []string{stopped, stopped[:12]} {
+		b, _, _ := book(t)
+		s := withStoppedPodContainer(withPodContainer(podmanSnap(), "web-app", "web", id, gib/4), "db", stopped)
+		b.Observe(s)
+		if d := b.Check(podStart("w1", ref), s, cfg); !d.Allow || d.LeaseID == "" {
+			t.Fatalf("pod start %s of the stopped pod: check = %+v", ref, d)
+		}
+		e := &s.Engines[len(s.Engines)-1]
+		e.Containers = append(e.Containers, protocol.Container{ID: "db-app", Name: "db-app", MemoryBytes: gib / 4, Pod: "db", PodID: stopped})
+		e.Pods[1].Running = 1
+		b.Observe(s)
+		if ls := b.List(); len(ls) != 1 || ls[0].Bytes != gib*3/4 {
+			t.Fatalf("pod start %s: its pod's container did not bind: %+v", ref, ls)
+		}
+	}
+	// The stopped pod named as the running pod's ID prefix is that pod.
+	b, _, _ := book(t)
+	s := withStoppedPodContainer(withPodContainer(podmanSnap(), "web-app", "web", id, gib/4), id[:12], stopped)
+	b.Observe(s)
+	if d := b.Check(podStart("w1", id[:12]), s, cfg); !d.Allow || d.LeaseID == "" {
+		t.Fatalf("pod start %s of the stopped pod of that name: check = %+v", id[:12], d)
 	}
 }
 

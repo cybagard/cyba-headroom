@@ -1,0 +1,162 @@
+[
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f",
+        "Names": "00000000000a-infra",
+        "RestartCount": 0,
+        "Status": "running"
+      },
+      {
+        "Id": "0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c",
+        "Names": "web-app",
+        "RestartCount": 0,
+        "Status": "running"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000aa",
+    "InfraId": "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f",
+    "Name": "web",
+    "Namespace": "",
+    "Networks": [
+      "podman"
+    ],
+    "Status": "Running",
+    "Labels": {}
+  },
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b11",
+        "Names": "0000000000b1-infra",
+        "RestartCount": 0,
+        "Status": "running"
+      },
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b12",
+        "Names": "degraded-app",
+        "RestartCount": 0,
+        "Status": "exited"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000b1",
+    "InfraId": "0000000000000000000000000000000000000000000000000000000000000b11",
+    "Name": "degraded",
+    "Namespace": "",
+    "Networks": [
+      "podman"
+    ],
+    "Status": "Degraded",
+    "Labels": {}
+  },
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b21",
+        "Names": "0000000000b2-infra",
+        "RestartCount": 0,
+        "Status": "running"
+      },
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b22",
+        "Names": "degraded-two-web",
+        "RestartCount": 0,
+        "Status": "running"
+      },
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b23",
+        "Names": "degraded-two-job",
+        "RestartCount": 0,
+        "Status": "exited"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000b2",
+    "InfraId": "0000000000000000000000000000000000000000000000000000000000000b21",
+    "Name": "degraded-two",
+    "Namespace": "",
+    "Networks": [
+      "podman"
+    ],
+    "Status": "Degraded",
+    "Labels": {}
+  },
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b31",
+        "Names": "exited-app",
+        "RestartCount": 0,
+        "Status": "exited"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000b3",
+    "InfraId": "",
+    "Name": "exited",
+    "Namespace": "",
+    "Networks": [],
+    "Status": "Exited",
+    "Labels": {}
+  },
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b41",
+        "Names": "0000000000b4-infra",
+        "RestartCount": 0,
+        "Status": "created"
+      },
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b42",
+        "Names": "created-app",
+        "RestartCount": 0,
+        "Status": "created"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000b4",
+    "InfraId": "0000000000000000000000000000000000000000000000000000000000000b41",
+    "Name": "created",
+    "Namespace": "",
+    "Networks": [
+      "podman"
+    ],
+    "Status": "Created",
+    "Labels": {}
+  },
+  {
+    "Cgroup": "machine.slice",
+    "Containers": [
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b51",
+        "Names": "0000000000b5-infra",
+        "RestartCount": 0,
+        "Status": "paused"
+      },
+      {
+        "Id": "0000000000000000000000000000000000000000000000000000000000000b52",
+        "Names": "paused-app",
+        "RestartCount": 0,
+        "Status": "paused"
+      }
+    ],
+    "Created": "2026-11-09T10:00:00.000000000Z",
+    "Id": "00000000000000000000000000000000000000000000000000000000000000b5",
+    "InfraId": "0000000000000000000000000000000000000000000000000000000000000b51",
+    "Name": "paused",
+    "Namespace": "",
+    "Networks": [
+      "podman"
+    ],
+    "Status": "Paused",
+    "Labels": {}
+  }
+]

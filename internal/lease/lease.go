@@ -133,7 +133,8 @@ type Book struct {
 	// their call's, so not ungated, though they no longer reserve. A
 	// worktree's compose lease, or one with a dir, vouches for every
 	// service of its stack until a timeout after it lapsed; any other is
-	// spent on its first match, until Observe drops it (lapsedFor).
+	// spent on its first match, until Observe drops it (lapsedFor). A
+	// macOS one stays while it holds a slot (entry.holdsSlot).
 	lapsed []*entry
 	// waiting are the waiting calls (BUDGET_WAIT=1) queued for room, first
 	// come first (#72): each holds what it would cost, and its macOS slot,
@@ -695,9 +696,17 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			r.PendingMacOS++ // once bound, its VM counts as running
 		}
 	}
+	var tartStale bool
+	var tartAt time.Time
+	if s != nil {
+		tartStale, tartAt = policy.TartStale(s, c)
+	}
 	for _, e := range b.lapsed {
 		if startTakes(r, starts, e) {
 			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // released when it lapsed: counted afresh
+		}
+		if tartStale && e.holdsSlot(tartAt) {
+			r.PendingMacOS++ // its VM may run since the last fresh reading
 		}
 	}
 	n := len(starts) + unresolved
@@ -884,9 +893,10 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		}
 	}
 	if manual {
-		// Manual calls are not gated and hold nothing back: the lease
-		// only marks the call as checked, so its container is not ungated.
-		e.cost, e.macOS = 0, false
+		// Manual calls are not gated and hold no bytes back: the lease
+		// marks the call as checked, so its container is not ungated, and
+		// a macOS VM's holds its slot until the VM runs (#321).
+		e.cost = 0
 	}
 	b.open = append(b.open, e)
 	d.LeaseID = e.ID
@@ -1062,6 +1072,13 @@ func (e *entry) takes(r resource) bool {
 		return false // a macOS lease's slot is freed by a macOS VM only ("": unknown, counted as one)
 	}
 	return len(e.bound) == 0
+}
+
+// holdsSlot reports whether e, lapsed, is a macOS VM's that lapsed after
+// at, the last fresh Tart reading, which could not show it: while Tart is
+// stale it still holds its slot, as if starting, and stays lapsed (#321).
+func (e *entry) holdsSlot(at time.Time) bool {
+	return e.macOS && len(e.bound) == 0 && e.Expires.After(at)
 }
 
 // readable reports whether s holds a fresh reading of the source behind
@@ -1316,7 +1333,10 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			delete(b.verdicts, k) // an undecided one's waits for the reading that decides it
 		}
 	}
-	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool { return !now.Before(e.Expires.Add(b.timeout)) })
+	tartStale, tartAt := policy.TartStale(s, policy.Config{}) // a reading: only its sources go stale
+	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool {
+		return !now.Before(e.Expires.Add(b.timeout)) && (!tartStale || !e.holdsSlot(tartAt))
+	})
 	// What was there, in the last reading or bound by an open lease, and is
 	// missing from this one: gone only after goneAfter readings (Book.gone).
 	missed, since := map[string]int{}, map[string]time.Time{}

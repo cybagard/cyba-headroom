@@ -5,6 +5,7 @@
 package policy
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strconv"
@@ -303,14 +304,22 @@ func lastTart(s *protocol.Snapshot, c Config, snapStale bool) tartCount {
 	if !t.stale || c.Now == nil {
 		return t
 	}
-	at := s.Sources["tart"].At
-	if at.IsZero() {
-		at = s.CollectedAt
-	}
-	if !at.IsZero() {
+	if at := tartAt(s); !at.IsZero() {
 		t.age = c.Now().Round(0).Sub(at.Round(0))
 	}
 	return t
+}
+
+// TartStale reports whether s's Tart reading is stale, as the slot rule
+// decides (lastTart), and when it was last read fresh (#321).
+func TartStale(s *protocol.Snapshot, c Config) (stale bool, at time.Time) {
+	_, snapStale := snapshotAge(s, c)
+	return snapStale || s.Sources["tart"].Stale, tartAt(s)
+}
+
+// tartAt is when s's Tart reading was last fresh: zero if unknown.
+func tartAt(s *protocol.Snapshot) time.Time {
+	return cmp.Or(s.Sources["tart"].At, s.CollectedAt)
 }
 
 // slots is the macOS VM slot rule: running plus starting macOS VMs must

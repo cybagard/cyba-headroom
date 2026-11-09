@@ -177,6 +177,11 @@ const lostReply = 1 << 8
 // starts nothing (#330).
 const rawStart = 1 << 9
 
+// dieFirst, set in an op's kind, has each stop it makes send its die
+// before its stop, as Podman's do (its stop made up at the start, #335),
+// and Docker's after a kill of a signal other than 9 or 15.
+const dieFirst = 1 << 10
+
 type model struct {
 	t        *testing.T
 	cur      op
@@ -205,6 +210,7 @@ type model struct {
 	polled   map[string]time.Time // each ticket's last ask, kept once the model drops it (heldForNothing)
 	lost     bool                 // the next check's reply is lost (lostReply, #271)
 	failPull bool                 // this op's up fails its pull (rawStart, #330)
+	dieFirst bool                 // this op's stops send their die first (dieFirst, #335)
 	failed   map[string]string    // a failed up's lease → its project
 	expires  map[string]time.Time // a failed up's lease → when it expires, as last listed
 }
@@ -602,10 +608,13 @@ func (m *model) composeUp(st stack, guess int, failed bool) bool {
 }
 
 func (m *model) stop(x *mcont, crash bool) {
-	if !crash {
+	if !crash && !m.dieFirst {
 		m.event("stop", x)
 	}
 	m.event("die", x)
+	if !crash && m.dieFirst {
+		m.event("stop", x)
+	}
 	x.vcrashed = crash && x.verdict // lease.go ContainerEvent die
 	if crash {
 		x.crashed = m.c.t
@@ -1418,6 +1427,7 @@ func (m *model) run(ops []op) {
 		raw := o.kind&rawStart != 0
 		o.kind &^= rawStart
 		m.failPull = raw
+		m.dieFirst, o.kind = o.kind&dieFirst != 0, o.kind&^dieFirst
 		m.cur = o
 		m.c.t = m.c.t.Add(10 * time.Millisecond) // calls and events take time
 		st := m.stackAt(o.a)
@@ -1733,11 +1743,18 @@ func walk(seed int) []op {
 			ops[i].kind |= rawStart
 		}
 	}
+	// And another the stops that send their die first (#335).
+	first := rand.New(rand.NewPCG(uint64(seed), 4))
+	for i := range ops {
+		if first.IntN(2) == 0 {
+			ops[i].kind |= dieFirst
+		}
+	}
 	return ops
 }
 
-// The walks' ops, less which raw starts are a stack's, are those of the
-// walks before #222: the hash of seeds 0 to 299's, as main 8520e47's
+// The walks' ops, less which raw starts are a stack's and which stops send
+// their die first, are those of the walks before #222: the hash of seeds 0 to 299's, as main 8520e47's
 // generator made them. A raw start that is a stack's replaces op 8's raw
 // run, and inserts no op, so a seed walks as before but at those.
 func TestTheModelsWalksAreUnchanged(t *testing.T) {
@@ -1745,7 +1762,7 @@ func TestTheModelsWalksAreUnchanged(t *testing.T) {
 	for seed := range 300 {
 		ops := walk(seed)
 		for i := range ops {
-			ops[i].kind &^= rawStart
+			ops[i].kind &^= rawStart | dieFirst
 		}
 		fmt.Fprint(h, ops)
 	}

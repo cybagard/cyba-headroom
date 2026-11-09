@@ -2,8 +2,16 @@ package lease_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +20,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/lease"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/source/docker"
 )
 
 // docker run --rm alpine true: its container starts and exits between two
@@ -250,6 +259,171 @@ func TestAKillThenUpWithinATickBinds(t *testing.T) {
 	b.Observe(s)
 	if strings.Contains(log.String(), "never appeared") {
 		t.Fatalf("log: %s", log)
+	}
+}
+
+// podmanEvents streams events, Podman's compat ones, through a Podman
+// engine's Events to b, as a follower feeds a live stream: each dated when
+// it comes (#335). between runs after each event b took.
+func podmanEvents(t *testing.T, b *lease.Book, events []string, between func(action string)) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "podman.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RequestURI() != docker.PodmanEventsPath {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, strings.Join(events, "\n")+"\n")
+	}))
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+	_ = docker.NewKind(sock, protocol.EnginePodman).Events(context.Background(), 0, 0, func(action, id string, _ int64, attrs map[string]string) {
+		b.ContainerEventAt(time.Time{}, action, id, attrs["name"], attrs)
+		between(action)
+	})
+}
+
+// podmanEvent is a container event as Podman's compat /events sends it,
+// with labels and these attributes.
+func podmanEvent(action, id string, labels map[string]string, attrs ...string) string {
+	a := maps.Clone(labels)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		a[attrs[i]] = attrs[i+1]
+	}
+	b, _ := json.Marshal(map[string]any{"Type": "container", "Action": action, "Actor": map[string]any{"ID": id, "Attributes": a}})
+	return string(b)
+}
+
+// podman compose stop && up, and compose kill && up, before a reading:
+// Podman sends no stop, and its kill no signal, but its events still bind
+// the up's lease, as Docker's do (TestAStopThenUpWithinATickBinds), whoever
+// the container is attributed to: the up's worktree, none, or another. Its
+// die comes before the stop made up at the start, and the stop explains it
+// (#335).
+func TestAPodmanStopThenUpWithinATickBinds(t *testing.T) {
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db", "name": "db"}
+	for name, stop := range map[string][]string{
+		"stop": {podmanEvent("die", "db", lbl, "exitCode", "137")},
+		"kill": {podmanEvent("kill", "db", lbl), podmanEvent("die", "db", lbl, "exitCode", "137")},
+	} {
+		for _, owner := range []string{"w1", "", "w2"} {
+			t.Run(name+"/owner "+owner, func(t *testing.T) {
+				b, c, log := book(t)
+				s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, owner)
+				b.Observe(s)
+				b.Observe(s)
+				podmanEvents(t, b, append(stop, podmanEvent("start", "db", lbl)), func(action string) {
+					if action == "die" {
+						b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "podman compose up", Target: "app", OnEngine: true}, s, cfg)
+					}
+				})
+				c.t = c.t.Add(3 * time.Minute)
+				b.Observe(s)
+				if strings.Contains(log.String(), "never appeared") {
+					t.Fatalf("log: %s", log)
+				}
+			})
+		}
+	}
+}
+
+// docker compose stop && up before a reading, with a stop signal other
+// than 9 or 15 (SIGINT, an image's STOPSIGNAL), or a kill Docker names no
+// signal of: the kill does not say it stops, so its die comes first, then
+// the stop, which explains it: the up's lease binds, whoever the container
+// is attributed to (#335).
+func TestADockerStopBySignalThenUpWithinATickBinds(t *testing.T) {
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}
+	for _, sig := range []string{"2", ""} {
+		for _, owner := range []string{"w1", "", "w2"} {
+			t.Run("signal "+sig+"/owner "+owner, func(t *testing.T) {
+				b, c, log := book(t)
+				s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, owner)
+				b.Observe(s)
+				b.Observe(s)
+				kill := maps.Clone(lbl)
+				if sig != "" {
+					kill["signal"] = sig
+				}
+				b.ContainerEvent("kill", "db", "db", kill)
+				b.ContainerEvent("die", "db", "db", lbl)
+				b.ContainerEvent("stop", "db", "db", lbl)
+				b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
+				b.ContainerEvent("start", "db", "db", lbl)
+				c.t = c.t.Add(3 * time.Minute)
+				b.Observe(s)
+				if strings.Contains(log.String(), "never appeared") {
+					t.Fatalf("log: %s", log)
+				}
+			})
+		}
+	}
+}
+
+// A crash, with no stop, then an up before a reading: the restart binds the
+// up's lease only if the container is the up's worktree's (bindsAfterCrash).
+// Another's, or one attributed to none, binds nothing, and the lease ends
+// "never appeared"; a stop between would have bound it (#335).
+func TestACrashThenUpWithinATickBindsOnlyTheUpsWorktrees(t *testing.T) {
+	lbl := map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": "db"}
+	for _, tc := range []struct {
+		owner         string
+		stopped, want bool // a stop between the die and the up; whether the start binds
+	}{
+		{"w1", false, true}, {"", false, false}, {"w2", false, false},
+		{"", true, true}, {"w2", true, true},
+	} {
+		t.Run(fmt.Sprintf("owner %s stopped %v", tc.owner, tc.stopped), func(t *testing.T) {
+			b, c, log := book(t)
+			s := addContainer(snap(), protocol.Container{ID: "db", Name: "db", Labels: lbl}, tc.owner)
+			b.Observe(s)
+			b.Observe(s)
+			step := func() { c.t = c.t.Add(10 * time.Millisecond) }
+			b.ContainerEvent("die", "db", "db", lbl)
+			if tc.stopped {
+				b.ContainerEvent("stop", "db", "db", lbl)
+			}
+			step()
+			b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", OnEngine: true}, s, cfg)
+			step()
+			b.ContainerEvent("start", "db", "db", lbl)
+			c.t = c.t.Add(3 * time.Minute)
+			b.Observe(s)
+			if bound := !strings.Contains(log.String(), "never appeared"); bound != tc.want {
+				t.Fatalf("bound = %v, want %v: log %s", bound, tc.want, log)
+			}
+		})
+	}
+}
+
+// A Podman restart policy's restart (die, restart, start) binds no named
+// lease, as Docker's (die, start) does not:
+// TestAnEventOfAKnownContainerBindsNoNamedLease.
+func TestAPodmanRestartPolicyRestartBindsNoNamedLease(t *testing.T) {
+	b, _, _ := book(t)
+	s := addContainer(snap(), protocol.Container{ID: "R", Name: "db", MemoryBytes: gib / 4}, "w1")
+	b.Observe(s)
+	b.Observe(s)
+	b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "podman run --name db x", Name: "db"}, s, cfg)
+	lbl := map[string]string{"name": "db"}
+	podmanEvents(t, b, []string{
+		podmanEvent("die", "R", lbl, "exitCode", "1"),
+		podmanEvent("restart", "R", lbl),
+		podmanEvent("start", "R", lbl),
+		podmanEvent("die", "R", lbl, "exitCode", "1"), // would end the lease had it bound
+	}, func(string) {})
+	if l := b.List(); len(l) != 1 {
+		t.Fatalf("leases = %+v, want the run's, unbound", l)
 	}
 }
 

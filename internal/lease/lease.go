@@ -1567,6 +1567,11 @@ func (b *Book) ContainerEventAt(at time.Time, action, id, name string, labels ma
 	case "stop":
 		last := b.seen[r.key]
 		b.seen[r.key] = seen{at: now, gone: true, stopped: true, bound: last.bound, died: last.died}
+		if v := b.verdicts[r.key]; v != nil {
+			// A stop explains a die that came before it: Podman's (#335),
+			// or Docker's after a kill of another signal than 9 or 15.
+			v.crashed = false
+		}
 	case "kill":
 		if sig := labels["signal"]; sig == "9" || sig == "15" {
 			// SIGKILL or SIGTERM: it stops (its die says it is gone). Any

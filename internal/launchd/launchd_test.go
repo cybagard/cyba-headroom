@@ -48,7 +48,7 @@ func TestPlist(t *testing.T) {
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Standard</string>
 	<key>LowPriorityIO</key>
 	<true/>
 	<key>Nice</key>

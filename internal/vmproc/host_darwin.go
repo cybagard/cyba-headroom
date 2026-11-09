@@ -110,6 +110,17 @@ func procArgs(pid int) (exec string, args []string, err error) {
 	return string(path), args, nil
 }
 
+// PathOf returns a process's PATH, from the environment that follows its
+// arguments in kern.procargs2, and no other variable. It fails for other
+// users' processes, and one without PATH.
+func (Host) PathOf(pid int) (string, error) {
+	b, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return "", err
+	}
+	return pathFromProcArgs(b)
+}
+
 // Tree returns the process root and all its descendants, root first, with
 // executables and arguments, from one process-table scan. Descendants whose
 // arguments cannot be read (other users') are left out.

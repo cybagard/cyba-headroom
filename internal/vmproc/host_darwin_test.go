@@ -155,3 +155,10 @@ func TestHostRunDoesNotWaitForAChildHoldingStdout(t *testing.T) {
 		t.Fatalf("Run returned after %v, want within %v", d, limit)
 	}
 }
+
+func TestHostPathOf(t *testing.T) {
+	got, err := vmproc.Host{}.PathOf(os.Getpid())
+	if want := os.Getenv("PATH"); err != nil || got != want {
+		t.Fatalf("PathOf(self) = %q, %v; want %q", got, err, want)
+	}
+}

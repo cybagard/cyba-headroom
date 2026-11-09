@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/agents"
 	"github.com/cybagard/cyba-headroom/internal/config"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -31,6 +33,11 @@ type doctorRig struct {
 	agentPIDs map[string]int
 	agentErrs map[string]error
 	asked     []string // what doctor asked: "ping", and each label
+	// found are the unshimmed agents under each session PID; sessions and
+	// shimDir, what doctor asked about.
+	found    map[int][]agents.Agent
+	sessions []int
+	shimDir  string
 }
 
 func newDoctorRig(t *testing.T) *doctorRig {
@@ -90,6 +97,14 @@ func (r *doctorRig) run() (int, string) {
 		agentPID: func(label string) (int, error) {
 			r.asked = append(r.asked, label)
 			return r.agentPIDs[label], r.agentErrs[label]
+		},
+		unshimmed: func(_ context.Context, sessions []int, shimDir string) []agents.Agent {
+			r.sessions, r.shimDir = append(r.sessions, sessions...), shimDir
+			var out []agents.Agent
+			for _, s := range sessions {
+				out = append(out, r.found[s]...)
+			}
+			return out
 		},
 		loginShell: func(shell string) (string, error) {
 			want := r.env["SHELL"]
@@ -786,4 +801,47 @@ func TestDoctorSocketInASharedDir(t *testing.T) {
 		t.Errorf("exit %d, want 1:\n%s", code, out)
 	}
 	wantMark(t, out, "socket", "✗", shared+" is writable by other users (mode 1777)")
+}
+
+// An agent running in a worktree's terminal with the real tools first on
+// its PATH is listed, with how to fix it (#297).
+func TestDoctorAgents(t *testing.T) {
+	r := newDoctorRig(t)
+	r.found = map[int][]agents.Agent{500: {{PID: 4321, Name: "claude", Tools: []string{"docker", "tart"}}}}
+	code, out := r.run()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 (agents only warn):\n%s", code, out)
+	}
+	wantMark(t, out, "agents", "!", "headroom run -- <agent>", "~/.zprofile", r.shims)
+	if !strings.Contains(out, "Fix login: claude (pid 4321) runs docker, tart without the shims") {
+		t.Errorf("the agent is not listed:\n%s", out)
+	}
+	if len(r.sessions) != 1 || r.sessions[0] != 500 || r.shimDir != r.shims {
+		t.Errorf("asked about sessions %v under %q, want [500] under %q", r.sessions, r.shimDir, r.shims)
+	}
+}
+
+func TestDoctorAgentsAllShimmed(t *testing.T) {
+	r := newDoctorRig(t)
+	_, out := r.run()
+	wantMark(t, out, "agents", "✓")
+}
+
+func TestDoctorAgentsWithoutOrca(t *testing.T) {
+	for name, edit := range map[string]func(*doctorRig){
+		"daemon down":       func(r *doctorRig) { r.snap, r.statusErr = nil, errors.New("connection refused") },
+		"no Orca reading":   func(r *doctorRig) { r.snap.Orca = nil },
+		"Orca not running":  func(r *doctorRig) { r.snap.Orca = &protocol.Orca{Installed: true} },
+		"no Orca worktrees": func(r *doctorRig) { r.snap.Orca.Worktrees = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			edit(r)
+			_, out := r.run()
+			wantMark(t, out, "agents", "!", "can't see agents")
+			if r.sessions != nil {
+				t.Errorf("asked about sessions %v", r.sessions)
+			}
+		})
+	}
 }

@@ -2868,3 +2868,20 @@ func TestTheLeaseModelOnAPendingStartAtAFlicker(t *testing.T) {
 		t.Log(strings.Join(m.trace, "\n"))
 	}
 }
+
+// TestTheLeaseModelOn320 plays #320's ops, shrunk: w2's guessed up of app
+// ends by use; its next up is idle and takes nothing over, so its lease
+// costs 0; c3 crashes and its restart policy binds it to that lease; a
+// compose stop stops c3 and c4; docker start c3 must not be covered by a
+// lease that reserves nothing for it.
+func TestTheLeaseModelOn320(t *testing.T) {
+	ops := []op{
+		{11, 527, 675}, {11, 644, 704}, {15, 328, 366}, {2, 631, 67},
+		{15, 250, 539}, {1, 823, 186}, {7, 620, 681}, {6, 292, 590},
+		{18, 470, 644}, {17, 170, 427}, {3, 947, 107}, {21, 38, 316},
+		{15, 995, 396},
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#320:\n%s", f.msg)
+	}
+}

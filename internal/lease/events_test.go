@@ -253,6 +253,56 @@ func TestAKillThenUpWithinATickBinds(t *testing.T) {
 	}
 }
 
+// An idle up that took nothing over reserves nothing, so it covers no
+// start (#320). A guessed up of app holds c3 and c4 until they use its
+// cost; the idle up adopts neither and takes nothing over; c3 crashes, and
+// its restart policy starts it again, which binds the idle up's lease;
+// compose stop; docker start c3 is checked and leased one container's
+// cost, which the next reading, c3 warming, still holds.
+func TestAnIdleUpCoversNoStart(t *testing.T) {
+	b, c, _ := book(t)
+	lbl := func(svc string) map[string]string {
+		return map[string]string{protocol.ComposeProjectLabel: "app", "com.docker.compose.service": svc}
+	}
+	ctr := func(id, svc string, mem uint64) protocol.Container {
+		return protocol.Container{ID: id, Name: id, MemoryBytes: mem, Labels: lbl(svc)}
+	}
+	b.Observe(snap())
+	b.Check(guessed("w1", "app"), snap(), cfg)
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(addContainer(addContainer(snap(), ctr("c3", "db", gib/4), "w1"), ctr("c4", "web", gib/4), "w1")) // the guess hits
+	// A reading that attributes neither: they use the guess's cost, so it
+	// ends, and the idle up finds no stack of w1's to adopt.
+	s := addContainer(addContainer(snap(), ctr("c3", "db", gib/2), ""), ctr("c4", "web", gib/2), "")
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(s)
+	if d := b.Check(policy.Request{Worktree: "w1", Kind: "compose", Op: "up", Command: "docker compose up", Target: "app", Idle: true, OnEngine: true}, s, cfg); !d.Allow {
+		t.Fatalf("up: %+v", d)
+	}
+	b.ContainerEvent("die", "c3", "c3", lbl("db")) // c3 crashes
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(addContainer(snap(), ctr("c4", "web", gib/2), "w1"))
+	// c3's restart policy starts it: it binds the idle up's lease. Then
+	// compose stop.
+	b.ContainerEvent("start", "c3", "c3", lbl("db"))
+	for _, x := range []struct{ id, svc string }{{"c3", "db"}, {"c4", "web"}} {
+		b.ContainerEvent("stop", x.id, x.id, lbl(x.svc))
+		b.ContainerEvent("die", x.id, x.id, lbl(x.svc))
+	}
+	d := b.Check(policy.Request{Worktree: "w1", Kind: "container", Command: "docker start c3", Target: "c3", ContainerID: "c3"}, s, cfg)
+	if !d.Allow || d.LeaseID == "" {
+		t.Fatalf("start: %+v, want a lease of its own", d)
+	}
+	if got := reserved(b); got != cfg.DefaultContainerBytes {
+		t.Fatalf("reserved %d MiB, want one container's %d", got>>20, cfg.DefaultContainerBytes>>20)
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(addContainer(snap(), ctr("c3", "db", 0), "w1")) // c3 warms
+	if got := reserved(b); got != cfg.DefaultContainerBytes {
+		t.Errorf("reserved %d MiB at the next reading, c3 warming: want one container's %d (leases %+v)", got>>20, cfg.DefaultContainerBytes>>20, b.List())
+	}
+}
+
 // docker kill -s HUP web reloads it: it still runs, so a start lease
 // holding web and api does not end when api exits.
 func TestAKillThatStopsNothingIsNoStop(t *testing.T) {

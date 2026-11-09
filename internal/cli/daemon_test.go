@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -524,5 +526,25 @@ func TestOtherStartFailuresLogEveryTime(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(logPath); strings.Count(string(b), "level=ERROR msg=\"daemon failed to start\"") != 2 {
 		t.Errorf("want two errors:\n%s", b)
+	}
+}
+
+// The marker is not written through a symlink planted there (#276).
+func TestReportLockedDoesNotWriteThroughASymlink(t *testing.T) {
+	dir := daemonDir(t)
+	socket := filepath.Join(dir, "d.sock")
+	if err := os.WriteFile(socket+".lock", []byte("4242\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, socket+".lock.reported"); err != nil {
+		t.Fatal(err)
+	}
+	reportLocked(socket, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "keep me\n" {
+		t.Errorf("victim now %q, %v", b, err)
 	}
 }

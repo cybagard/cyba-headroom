@@ -765,3 +765,25 @@ func TestDoctorIdentityNamesTheProject(t *testing.T) {
 		t.Errorf("the working directory's worktree is not named by project:\n%s", out)
 	}
 }
+
+// A socket in a dir other users can write fails, with Listen's reason
+// (#276).
+func TestDoctorSocketInASharedDir(t *testing.T) {
+	r := newDoctorRig(t)
+	shared, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shared) })
+	if err := os.Chmod(shared, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.cfg, "config.toml"), []byte("socket = \""+shared+"/hr.sock\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := r.run()
+	if code != 1 {
+		t.Errorf("exit %d, want 1:\n%s", code, out)
+	}
+	wantMark(t, out, "socket", "✗", shared+" is writable by other users (mode 1777)")
+}

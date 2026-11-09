@@ -14,6 +14,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/binpath"
 	"github.com/cybagard/cyba-headroom/internal/client"
 	"github.com/cybagard/cyba-headroom/internal/config"
+	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 	"github.com/cybagard/cyba-headroom/internal/shim"
 	"github.com/cybagard/cyba-headroom/internal/view"
@@ -84,6 +85,11 @@ func doctor(e Env) []finding {
 
 	out = append(out, shimsFinding(e.Getenv("HOME"), cfg.ShimDir, self))
 	out = append(out, pathFinding(e.Getenv, cfg.ShimDir, h.fallbacks, self))
+
+	// Listen refuses this dir, so the daemon cannot start (#276).
+	if err := daemon.CheckDir(filepath.Dir(cfg.Socket)); err != nil && !os.IsNotExist(err) {
+		out = append(out, finding{mark: fail, name: "socket", detail: oneLine(err)})
+	}
 
 	snap, serr := h.status(cfg)
 	out = append(out, daemonFinding(e.Getenv("HOME"), cfg.Socket, serr,

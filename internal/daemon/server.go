@@ -34,8 +34,11 @@ func Listen(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
+	if err := CheckDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
 	lockPath := path + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := OpenOwnFile(lockPath, os.O_CREATE|os.O_RDWR)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
@@ -56,6 +59,66 @@ func Listen(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return &lockedListener{Listener: ln, lock: lock}, nil
+}
+
+// stat is os.Stat, replaced in tests to fake another user's dir.
+var stat = os.Stat
+
+// CheckDir refuses a socket dir that another user owns or can write: they
+// could plant links at the lock or squat the socket (#276). Only dir itself
+// is checked, following a symlink to it.
+func CheckDir(dir string) error {
+	fi, err := stat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: no owner to check", dir)
+	}
+	const fix = "put the socket in a directory only you can write, such as ~/.config/headroom"
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by other users (mode %s): %s", dir, octalMode(fi.Mode()), fix)
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s is owned by another user (mode %s): %s", dir, octalMode(fi.Mode()), fix)
+	}
+	return nil
+}
+
+// octalMode shows m as chmod takes it, sticky bit included: 1777 for /tmp.
+func octalMode(m fs.FileMode) string {
+	o := uint32(m.Perm())
+	if m&fs.ModeSticky != 0 {
+		o |= 0o1000
+	}
+	if m&fs.ModeSetgid != 0 {
+		o |= 0o2000
+	}
+	if m&fs.ModeSetuid != 0 {
+		o |= 0o4000
+	}
+	return fmt.Sprintf("%04o", o)
+}
+
+// OpenOwnFile opens path, with flag, without following a symlink there, and
+// only if it is a regular file this user owns with no other link: a link
+// planted there is not written through (#276). A file it creates is 0600.
+func OpenOwnFile(path string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(path, flag|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || !fi.Mode().IsRegular() || int(st.Uid) != os.Geteuid() || st.Nlink != 1 {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is not a regular file only you own with one link: remove it", path)
+	}
+	return f, nil
 }
 
 // LockHolder is the PID the daemon holding the lock beside the socket at

@@ -622,6 +622,18 @@ type Engine struct {
 	// VMRunning and VMFootprintBytes are then unknown, not zero.
 	VMError    string      `json:"vm_error,omitempty"`
 	Containers []Container `json:"containers"`
+	// Pods is a Podman engine's pods, running or not, from its libpod pod
+	// list (#294); absent when that list fails, and for other engines.
+	Pods []Pod `json:"pods,omitempty"`
+}
+
+// Pod is one Podman pod: how many containers it has, the infra included,
+// and how many of them run.
+type Pod struct {
+	Name       string `json:"name"`
+	ID         string `json:"id"`
+	Containers int    `json:"containers"`
+	Running    int    `json:"running"`
 }
 
 // RunningEngines is how many of engines answer.

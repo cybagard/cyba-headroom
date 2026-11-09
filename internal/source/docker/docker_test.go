@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,15 @@ func shortDir(t *testing.T) string {
 // and a function to change a route between collections.
 func engine(t *testing.T, routes map[string]string) (string, func(path, body string)) {
 	t.Helper()
+	sock, set, _ := loggedEngine(t, routes)
+	return sock, set
+}
+
+// loggedEngine is engine, and a function that returns the requests it
+// served so far, in order.
+func loggedEngine(t *testing.T, routes map[string]string) (string, func(path, body string), func() []string) {
+	t.Helper()
+	var served []string
 	sock := filepath.Join(shortDir(t), "docker.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -61,6 +71,7 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		body, ok := routes[r.URL.RequestURI()]
+		served = append(served, r.URL.RequestURI())
 		mu.Unlock()
 		if !ok {
 			msg := `{"message":"no route"}`
@@ -89,10 +100,14 @@ func engine(t *testing.T, routes map[string]string) (string, func(path, body str
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return sock, func(path, body string) {
-		mu.Lock()
-		defer mu.Unlock()
-		routes[path] = body
-	}
+			mu.Lock()
+			defer mu.Unlock()
+			routes[path] = body
+		}, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(served)
+		}
 }
 
 // collect returns the one engine src finds.

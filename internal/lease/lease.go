@@ -134,7 +134,7 @@ type Book struct {
 	// worktree's compose lease, or one with a dir, vouches for every
 	// service of its stack until a timeout after it lapsed; any other is
 	// spent on its first match, until Observe drops it (lapsedFor). A
-	// macOS one stays while it holds a slot (entry.holdsSlot).
+	// macOS one stays while it holds a slot (Book.holdsSlot).
 	lapsed []*entry
 	// waiting are the waiting calls (BUDGET_WAIT=1) queued for room, first
 	// come first (#72): each holds what it would cost, and its macOS slot,
@@ -705,7 +705,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 		if startTakes(r, starts, e) {
 			surplus += min(max(est, e.cost)-est, math.MaxUint64-surplus) // released when it lapsed: counted afresh
 		}
-		if tartStale && e.holdsSlot(tartAt) {
+		if tartStale && b.holdsSlot(e, tartAt) {
 			r.PendingMacOS++ // its VM may run since the last fresh reading
 		}
 	}
@@ -1075,10 +1075,11 @@ func (e *entry) takes(r resource) bool {
 }
 
 // holdsSlot reports whether e, lapsed, is a macOS VM's that lapsed after
-// at, the last fresh Tart reading, which could not show it: while Tart is
-// stale it still holds its slot, as if starting, and stays lapsed (#321).
-func (e *entry) holdsSlot(at time.Time) bool {
-	return e.macOS && len(e.bound) == 0 && e.Expires.After(at)
+// at, the last fresh Tart reading (zero: none), which could not show it,
+// and whose tart run, if known, still runs: while Tart is stale it still
+// holds its slot, as if starting, and stays lapsed (#321).
+func (b *Book) holdsSlot(e *entry, at time.Time) bool {
+	return e.macOS && len(e.bound) == 0 && e.Expires.After(at) && (e.Kind != "tart" || e.pid <= 0 || b.alive(e.pid))
 }
 
 // readable reports whether s holds a fresh reading of the source behind
@@ -1335,7 +1336,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	}
 	tartStale, tartAt := policy.TartStale(s, policy.Config{}) // a reading: only its sources go stale
 	b.lapsed = slices.DeleteFunc(b.lapsed, func(e *entry) bool {
-		return !now.Before(e.Expires.Add(b.timeout)) && (!tartStale || !e.holdsSlot(tartAt))
+		return !now.Before(e.Expires.Add(b.timeout)) && (!tartStale || !b.holdsSlot(e, tartAt))
 	})
 	// What was there, in the last reading or bound by an open lease, and is
 	// missing from this one: gone only after goneAfter readings (Book.gone).

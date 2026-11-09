@@ -911,6 +911,64 @@ func TestAMacOSLeaseLapsedBeforeTheLastFreshReadingHoldsNoSlot(t *testing.T) {
 	}
 }
 
+// With no fresh Tart reading since the daemon started, every lapsed macOS
+// lease lapsed after the last one: each holds its slot while Tart stays
+// stale (#321).
+func TestALapsedMacOSLeaseHoldsItsSlotBeforeAnyTartReading(t *testing.T) {
+	b, clk, _ := book(t)
+	c := cfg
+	c.MaxMacOSVMs, c.MaxSnapshotAge, c.Now = 2, time.Minute, clk.now
+	mac := func(vm string) policy.Request {
+		return policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run " + vm, CostBytes: gib, MacOS: true, Target: vm}
+	}
+	s := snap()
+	s.Tart, s.Sources = nil, map[string]protocol.SourceStatus{"tart": {Stale: true}}
+	b.Observe(s)
+	for _, vm := range []string{"m1", "m2"} {
+		if d := b.Check(mac(vm), s, c); !d.Allow {
+			t.Fatalf("%s: %+v", vm, d)
+		}
+	}
+	for _, after := range []time.Duration{3 * time.Minute, 6 * time.Minute} {
+		clk.t = t0.Add(after)
+		s.CollectedAt = clk.t
+		b.Observe(s)
+		if d := b.Check(mac("m3"), s, c); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots {
+			t.Fatalf("m3 %s on: %+v", after, d)
+		}
+	}
+}
+
+// A lapsed tart lease whose tart run exited holds no slot while Tart is
+// stale: its VM never came (#321).
+func TestALapsedTartLeaseWhoseRunExitedHoldsNoSlot(t *testing.T) {
+	b, clk, _ := book(t)
+	alive := map[int]bool{30: true}
+	lease.SetAlive(b, func(pid int) bool { return alive[pid] })
+	c := cfg
+	c.MaxMacOSVMs, c.MaxSnapshotAge, c.Now = 2, time.Minute, clk.now
+	s := snap()
+	s.Tart.MacOSRunning, s.Tart.VMs = 1, []protocol.TartVM{{Name: "m1", OS: "darwin", MemoryBytes: gib}}
+	b.Observe(s)
+	stale := *s
+	stale.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true, At: t0}}
+	m2 := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m2", CostBytes: gib, MacOS: true, Target: "m2", PID: 30}
+	if d := b.Check(m2, &stale, c); !d.Allow {
+		t.Fatalf("m2: %+v", d)
+	}
+	clk.t = t0.Add(3 * time.Minute)
+	stale.CollectedAt = clk.t
+	b.Observe(&stale) // m2 lapses, its tart run still running
+	clk.t = t0.Add(4 * time.Minute)
+	stale.CollectedAt = clk.t
+	alive[30] = false
+	b.Observe(&stale)
+	m3 := policy.Request{Worktree: "w2", Kind: "tart", Command: "tart run m3", CostBytes: gib, MacOS: true, Target: "m3"}
+	if d := b.Check(m3, &stale, c); !d.Allow {
+		t.Fatalf("the exited run still holds its slot: %+v", d)
+	}
+}
+
 // A manual tart run of a macOS VM is allowed and reserves nothing, but holds
 // a slot until its VM runs: an agent's macOS run racing it in the same tick
 // is a retryable deny, not a VM past the slots. Once its VM appears, it

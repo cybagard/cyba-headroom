@@ -1075,9 +1075,10 @@ func (e *entry) takes(r resource) bool {
 }
 
 // holdsSlot reports whether e, lapsed, is a macOS VM's that lapsed after
-// at, the last fresh Tart reading (zero: none), which could not show it,
-// and whose tart run, if known, still runs: while Tart is stale it still
-// holds its slot, as if starting, and stays lapsed (#321).
+// at, when the last fresh Tart reading began (zero: none), so it may be
+// missing from it, and whose tart run, if known, still runs: while Tart
+// is stale it still holds its slot, as if starting, and stays lapsed
+// (#321).
 func (b *Book) holdsSlot(e *entry, at time.Time) bool {
 	return e.macOS && len(e.bound) == 0 && e.Expires.After(at) && (e.Kind != "tart" || e.pid <= 0 || b.alive(e.pid))
 }

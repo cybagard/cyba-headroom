@@ -311,11 +311,12 @@ func lastTart(s *protocol.Snapshot, c Config, snapStale bool) tartCount {
 }
 
 // TartStale reports whether s's Tart reading is stale, as the slot rule
-// decides (lastTart), and when it was last read fresh: zero if never
-// (#321).
+// decides (lastTart), and when its last fresh reading began, which a VM
+// started since may be missing from: zero if never read fresh (#321).
 func TartStale(s *protocol.Snapshot, c Config) (stale bool, at time.Time) {
 	_, snapStale := snapshotAge(s, c)
-	return snapStale || s.Sources["tart"].Stale, s.Sources["tart"].At
+	st := s.Sources["tart"]
+	return snapStale || st.Stale, cmp.Or(st.Began, st.At)
 }
 
 // tartAt is when s's Tart reading was last fresh: zero if unknown.

@@ -911,6 +911,39 @@ func TestAMacOSLeaseLapsedBeforeTheLastFreshReadingHoldsNoSlot(t *testing.T) {
 	}
 }
 
+// A macOS lease that lapsed while the last fresh Tart reading ran, which
+// may have missed its VM, still holds its slot once Tart goes stale: the
+// reading saw only what ran when it began (#321).
+func TestAMacOSLeaseLapsedDuringTheLastFreshReadingHoldsItsSlot(t *testing.T) {
+	b, clk, _ := book(t)
+	lease.SetAlive(b, func(int) bool { return true })
+	c := cfg
+	c.MaxMacOSVMs, c.MaxSnapshotAge, c.Now = 2, time.Minute, clk.now
+	s := snap()
+	s.Tart.MacOSRunning, s.Tart.VMs = 1, []protocol.TartVM{{Name: "m1", OS: "darwin", MemoryBytes: gib}}
+	b.Observe(s)
+	m2 := policy.Request{Worktree: "w1", Kind: "tart", Command: "tart run m2", CostBytes: gib, MacOS: true, Target: "m2", PID: 30}
+	if d := b.Check(m2, s, c); !d.Allow {
+		t.Fatalf("m2: %+v", d)
+	}
+	// The reading began at 1:58, m2 lapsed at 2:00, the reading ended at 2:03.
+	began, at := t0.Add(118*time.Second), t0.Add(2*time.Minute+3*time.Second)
+	clk.t = at
+	fresh := *s
+	fresh.CollectedAt = clk.t
+	fresh.Sources = map[string]protocol.SourceStatus{"tart": {At: at, Began: began, Took: 5 * time.Second}}
+	b.Observe(&fresh)
+	clk.t = t0.Add(2*time.Minute + 10*time.Second)
+	stale := fresh
+	stale.CollectedAt = clk.t
+	stale.Sources = map[string]protocol.SourceStatus{"tart": {Stale: true, At: at, Began: began}}
+	b.Observe(&stale)
+	m3 := policy.Request{Worktree: "w2", Kind: "tart", Command: "tart run m3", CostBytes: gib, MacOS: true, Target: "m3"}
+	if d := b.Check(m3, &stale, c); d.Allow || !d.Retry || d.Reasons[0].Code != policy.VMSlots {
+		t.Fatalf("m3: %+v", d)
+	}
+}
+
 // With no fresh Tart reading since the daemon started, every lapsed macOS
 // lease lapsed after the last one: each holds its slot while Tart stays
 // stale (#321).

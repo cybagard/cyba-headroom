@@ -113,6 +113,8 @@ func parseEngine(name string, all []string) (c Call, at int) {
 			c.ConfigDir = v
 		case "-v":
 			version = IsTrue(v) // docker -v and podman -v print the version
+		case "--version":
+			version = version || asks(v)
 		}
 	})
 	if res == askedHelp || version || len(args) == 0 {
@@ -416,7 +418,7 @@ func ComposeConfig(name string, args []string, all bool) (out []string, ok bool)
 // them. A probe puts the moved ones before the command, in their order, so
 // it asks about the project the Call is keyed on (#278).
 func composeParts(args []string, at int) (before, moved, command []string, ok bool) {
-	rest, res, _ := scanPast(args[at:], composeGlobal, isComposeCommand, nil)
+	rest, res, _ := scanPast(args[at:], composeLead, isComposeCommand, nil)
 	if res == askedHelp || len(rest) == 0 {
 		return nil, nil, nil, false
 	}
@@ -493,18 +495,46 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 
 // composeDashDash returns a compose call's args (those after the compose
 // word) without a "--" among its global options and the words after it up
-// to the command, which Compose ignores (#324). It finds the command as
-// cobra's Traverse does: a "--name" (and "--") takes the next word unless
-// it is one of composeBools, and so does a "-X" that is not; any other
-// word is the value pending, if any, else a flag if it starts with "-",
-// else the command. ok is false with no command: the call fails.
+// to the command, which Compose ignores (#324). ok is false with no
+// command: the call fails. A "--" after a value option's separate form is
+// its value (#356): it is joined to the option, and the word after it, if
+// no flag, is left out, as Compose ignores it; Compose finds the command
+// past it as past a "--". With no command there, the call fails, and args
+// stay as they are: the call is gated, the safe direction.
 func composeDashDash(args []string) (out []string, ok bool) {
-	rest, res, _ := scanPast(args, composeGlobal, isComposeCommand, nil)
-	if res != endOfFlags {
+	rest, res, _ := scanPast(args, composeLead, isComposeCommand, nil)
+	if res == askedHelp {
 		return args, true
 	}
-	d := len(args) - len(rest) - 1 // the "--"
-	value := false                 // the word is a flag's value
+	read := args[:len(args)-len(rest)]
+	d := slices.Index(read, "--")
+	if d < 0 {
+		return args, true
+	}
+	i := composeCommand(args, d)
+	if res == endOfFlags && d == len(read)-1 {
+		if i < 0 {
+			return nil, false
+		}
+		return slices.Concat(args[:d], args[i:]), true
+	}
+	if i < 0 {
+		return args, true
+	}
+	after := args[d+1:]
+	if w := after[0]; len(w) < 2 || w[0] != '-' {
+		after = after[1:] // a positional, which Compose ignores
+	}
+	return composeDashDash(slices.Concat(args[:d-1], []string{args[d-1] + "=--"}, after))
+}
+
+// composeCommand is where Compose finds its command in args past the "--"
+// at d, -1 if nowhere. It finds it as cobra's Traverse does: a "--name"
+// (and "--") takes the next word unless it is one of composeBools, and so
+// does a "-X" that is not; any other word is the value pending, if any,
+// else a flag if it starts with "-", else the command.
+func composeCommand(args []string, d int) int {
+	value := false // the word is a flag's value
 	for i := d; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -515,10 +545,10 @@ func composeDashDash(args []string) (out []string, ok bool) {
 		case value:
 			value = false
 		case len(a) < 2 || a[0] != '-':
-			return slices.Concat(args[:d], args[i:]), true
+			return i
 		}
 	}
-	return nil, false
+	return -1
 }
 
 // withoutDashDash is a docker compose call's args, whose compose options
@@ -563,8 +593,8 @@ func fromDocker(args []string, lead int) []string {
 func parseCompose(engine Call, words, args []string) Call {
 	var project, projectDir string
 	var files, envFiles []string
-	dryRun, noUp, detached := false, false, false
-	args, res, _ := scanPast(args, composeGlobal, isComposeCommand, func(f, v string) {
+	dryRun, noUp, detached, badVersion := false, false, false, false
+	args, res, _ := scanPast(args, composeLead, isComposeCommand, func(f, v string) {
 		switch f {
 		case "-p", "--project-name":
 			project = v
@@ -576,10 +606,13 @@ func parseCompose(engine Call, words, args []string) Call {
 			files = append(files, v)
 		case "--dry-run":
 			dryRun = IsTrue(v)
+		case "--version", "-v":
+			_, err := strconv.ParseBool(v)
+			badVersion = badVersion || err != nil // the call fails
 		}
 	})
-	if res == askedHelp || len(args) == 0 {
-		return Call{}
+	if res == askedHelp || badVersion || len(args) == 0 {
+		return Call{} // with no command, --version prints the version
 	}
 	op := args[0]
 	flags := composeFlags(op)
@@ -637,22 +670,27 @@ func parseCompose(engine Call, words, args []string) Call {
 // Before "--" as after it, the run goes on over a bare "-" or an empty
 // word, an option's empty value among them, which stay compose's (#347,
 // #352). Docker's options move before "compose", compose's keep their
-// order. ok is false for -v and --version, and for a docker option in
-// compose's part: the real call fails on it. A compose option it does not
-// know only gates a call that fails.
+// order. ok is false for a bare -v or --version in the run, which switches
+// to the version command, unless it is the pending value of a "--" right
+// before it (#356), and for a docker option in compose's part: the real
+// call fails on it. A compose option it does not know only gates a call
+// that fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 	var docker, compose []string
-	dashed := false // past a "--"
+	dashed := false    // past a "--"
+	dashValue := false // the word is the pending value of a "--"
 	i := 0
 	for i < len(args) && (len(args[i]) > 1 && args[i][0] == '-' || args[i] == "-" || args[i] == "") {
 		a := args[i]
+		pending := dashValue
+		dashValue = a == "--" && !pending
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]
 		n := 0 // the words a docker option takes
 		switch {
 		case a == "--":
 			dashed = true
-		case !dashed && (a == "-v" || a == "--version"):
+		case !pending && (a == "-v" || a == "--version"):
 			return nil, 0, false
 		case dashed && a == "--verbose":
 			n = 1 // it reads it as docker's --debug
@@ -665,6 +703,7 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 			compose, i = append(compose, a), i+1
 			continue
 		}
+		dashValue = pending // docker's options after "--" are no value of it
 		if !dashed {
 			docker = append(docker, args[i:i+n]...)
 		}
@@ -675,8 +714,8 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 		return nil, 0, false
 	}
 	rejected := false
-	scanPast(rest, withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
-		_, own := composeGlobal[f]
+	scanPast(rest, withFlags(engineGlobal, composeLead), isComposeCommand, func(f, _ string) {
+		_, own := composeLead[f]
 		rejected = rejected || !own
 	})
 	if rejected {
@@ -723,6 +762,13 @@ func composeOwn(op string) flagSet {
 	return nil
 }
 
+// asks reports whether --help or --version with value v asks for it: a bad
+// value fails the call, which starts nothing either.
+func asks(v string) bool {
+	b, err := strconv.ParseBool(v)
+	return err != nil || b
+}
+
 // IsTrue reads a boolean value as the CLIs do (Go's ParseBool).
 func IsTrue(v string) bool {
 	b, err := strconv.ParseBool(v)
@@ -738,8 +784,11 @@ func parseTart(args []string) Call {
 	c := Call{Kind: "tart", Op: "run"}
 	// swift-argument-parser takes options before, between and after the
 	// positionals.
-	pos, res, guessed := scanAll(args[1:], tartRun, nil)
-	if res == askedHelp {
+	version := false
+	pos, res, guessed := scanAll(args[1:], tartRun, func(f, v string) {
+		version = version || f == "--version" && asks(v)
+	})
+	if res == askedHelp || version {
 		return Call{}
 	}
 	if !guessed && len(pos) > 0 {
@@ -782,7 +831,7 @@ const (
 	scanned     scanResult = iota // at the first positional argument, or the end
 	endOfFlags                    // after "--": all of rest is positional
 	unknownFlag                   // at a flag not in the table; rest starts with it
-	askedHelp                     // --help, --version, or -h where it is no flag of its own
+	askedHelp                     // --help, or --version or -h where it is no flag of its own
 )
 
 // scan reads the flags in args up to the first positional argument, calling
@@ -799,14 +848,14 @@ func scan(args []string, flags flagSet, seen func(flag, value string)) ([]string
 			return args[i+1:], endOfFlags
 		case strings.HasPrefix(a, "--"):
 			f, v, hasValue := strings.Cut(a, "=")
-			if f == "--help" || f == "--version" {
+			takes, known := flags[f]
+			if f == "--help" || f == "--version" && !known {
 				// --help=false asks for nothing; a bad value fails the call.
-				if b, err := strconv.ParseBool(v); !hasValue || err != nil || b {
+				if !hasValue || asks(v) {
 					return nil, askedHelp
 				}
 				continue
 			}
-			takes, known := flags[f]
 			switch {
 			case !known && hasValue:
 				continue // --flag=value: unknown, but whole
@@ -1005,6 +1054,9 @@ var (
 	composeGlobal = flags(
 		"--ansi --env-file --file --parallel --profile --progress --project-directory --project-name -f -p",
 		"--all-resources --compatibility --dry-run")
+	// Compose's global flags with its hidden --version and -v: before the
+	// command, a boolean it ignores when a command follows (#356).
+	composeLead = withFlags(composeGlobal, flags("", "--version -v"))
 	// The flags Compose knows take no value when it looks for its command
 	// after "--". Measured (#324).
 	composeBools = words("--all-resources --compatibility --dry-run --help --no-ansi --version --verbose -h -v")

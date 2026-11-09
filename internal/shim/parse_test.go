@@ -151,6 +151,10 @@ func TestParse(t *testing.T) {
 		{"docker compose -- -- up -d", Call{}},
 		{"docker compose -- -p -- up -d", Call{}},
 		{"docker compose -- -p x -- -p y -- up -d", Call{}},
+		// Round 2: after "--", a cluster is one word, its value never the next.
+		{"docker compose -- -Dp up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -Df up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -Dp x up -d", Call{}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -377,6 +381,10 @@ func TestDockerComposeLeadingRun(t *testing.T) {
 		{"-- -p -- up -d", want{}},
 		{"-- -p x -- -p y -- up -d", want{}},
 		{"-- -H S -- -p x up -d", up("", "")},
+		// Round 2: after "--", a cluster is one word, its value never the next.
+		{"-- -Dp up -d", up("", "")},
+		{"-- -Df up -d", up("", "")},
+		{"-- -Dp x up -d", want{}},
 	} {
 		args := strings.Fields(strings.ReplaceAll(tc.argv, "S", sock))
 		c := Parse("docker-compose", args)

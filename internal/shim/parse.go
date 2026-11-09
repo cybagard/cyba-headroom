@@ -514,15 +514,16 @@ func composeDashDash(args []string) (out []string, ok bool) {
 }
 
 // optionLen is how many words the option at a[0] takes, its value's
-// included, as scanPast reads them; a "--" and help take none. An unknown
-// one takes a value unless the next word is an option or a command.
+// included, as Compose reads them after "--": a "--", help and a cluster
+// (-Dp) take none. An unknown one takes a value unless the next word is an
+// option or a command.
 func optionLen(a []string, flags flagSet) int {
 	w, takes := a[0], false
 	unknown := func() bool {
 		return len(a) > 1 && !strings.HasPrefix(a[1], "-") && !isComposeCommand(a[1])
 	}
 	switch {
-	case w == "--":
+	case w == "--", w[1] != '-' && len(w) > 2:
 	case strings.HasPrefix(w, "--"):
 		f, _, joined := strings.Cut(w, "=")
 		t, known := flags[f]

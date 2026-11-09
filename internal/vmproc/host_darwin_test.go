@@ -177,6 +177,17 @@ func TestHostDescendantsOfAnUnreadableRoot(t *testing.T) {
 	}
 	orphan, _ := strconv.Atoi(strings.TrimSpace(string(out)))
 	defer func() { _ = syscall.Kill(orphan, syscall.SIGKILL) }()
+	// Its sh has exited, but on a loaded machine the orphan may not have
+	// exec'd sleep yet, or been reparented: wait until ps shows both.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		ps, _ := exec.Command("/bin/ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(orphan)).Output()
+		if strings.Join(strings.Fields(string(ps)), " ") == "1 /bin/sleep" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the orphan %d is not launchd's sleep after 2 s: ps says %q", orphan, ps)
+		}
+	}
 	procs, err := vmproc.Host{}.Descendants(1)
 	if err != nil {
 		t.Fatal(err)

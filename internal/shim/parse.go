@@ -633,17 +633,18 @@ func parseCompose(engine Call, words, args []string) Call {
 // takes any other option for compose's, and stops at the first word. So a
 // compose option with a separate value (-f x) ends the run at its value
 // (plan amendment 1). Past a "--", the run goes on but drops docker's
-// options, --verbose among them, which Compose then does not see (#324),
-// and over a bare "-" or an empty word, which stay compose's (#347). Docker's options move
-// before "compose", compose's keep their order. ok is false for -v and
-// --version, and for a docker option in compose's part: the real call
-// fails on it. A compose option it does not know only gates a call that
-// fails.
+// options, --verbose among them, which Compose then does not see (#324).
+// Before "--" as after it, the run goes on over a bare "-" or an empty
+// word, an option's empty value among them, which stay compose's (#347,
+// #352). Docker's options move before "compose", compose's keep their
+// order. ok is false for -v and --version, and for a docker option in
+// compose's part: the real call fails on it. A compose option it does not
+// know only gates a call that fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 	var docker, compose []string
 	dashed := false // past a "--"
 	i := 0
-	for i < len(args) && (len(args[i]) > 1 && args[i][0] == '-' || dashed && (args[i] == "-" || args[i] == "")) {
+	for i < len(args) && (len(args[i]) > 1 && args[i][0] == '-' || args[i] == "-" || args[i] == "") {
 		a := args[i]
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]

@@ -124,7 +124,14 @@ func (Host) PathOf(pid int) (string, error) {
 // Tree returns the process root and all its descendants, root first, with
 // executables and arguments, from one process-table scan. Descendants whose
 // arguments cannot be read (other users') are left out.
-func (Host) Tree(root int) ([]Process, error) {
+func (Host) Tree(root int) ([]Process, error) { return tree(root, false) }
+
+// Descendants is Tree, but a root whose arguments cannot be read (an Orca
+// terminal's login, root's) is listed with ArgsErr set, and its
+// descendants are still walked (#297).
+func (Host) Descendants(root int) ([]Process, error) { return tree(root, true) }
+
+func tree(root int, unreadableRoot bool) ([]Process, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return nil, err
@@ -145,13 +152,16 @@ func (Host) Tree(root int) ([]Process, error) {
 		q := queue[0]
 		queue = queue[1:]
 		exec, args, err := procArgs(q.pid)
-		if err != nil {
-			if q.pid == root {
-				return nil, err
-			}
+		switch {
+		case err != nil && q.pid == root && unreadableRoot:
+			out = append(out, Process{PID: q.pid, ArgsErr: err})
+		case err != nil && q.pid == root:
+			return nil, err
+		case err != nil:
 			continue
+		default:
+			out = append(out, Process{PID: q.pid, PPID: q.ppid, Exec: exec, Args: args})
 		}
-		out = append(out, Process{PID: q.pid, PPID: q.ppid, Exec: exec, Args: args})
 		for _, c := range children[q.pid] {
 			if c != q.pid { // pid 0's parent is itself
 				queue = append(queue, struct{ pid, ppid int }{c, q.pid})

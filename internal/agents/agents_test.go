@@ -21,12 +21,12 @@ type fakeProcs struct {
 	env   map[int]map[string]string
 	// gone are processes that exit before their environment is read.
 	gone map[int]bool
-	// cancel, if set, runs on the first Tree.
+	// cancel, if set, runs on the first Descendants.
 	cancel func()
 	calls  int
 }
 
-func (f *fakeProcs) Tree(root int) ([]vmproc.Process, error) {
+func (f *fakeProcs) Descendants(root int) ([]vmproc.Process, error) {
 	f.calls++
 	if f.cancel != nil {
 		f.cancel()
@@ -120,6 +120,10 @@ func TestUnshimmed(t *testing.T) {
 		{"an agent that exited", &fakeProcs{trees: map[int][]vmproc.Process{session: tree(claude)}, env: env(realFirst), gone: map[int]bool{102: true}}, nil},
 		{"an agent with no PATH", &fakeProcs{trees: map[int][]vmproc.Process{session: tree(claude)}, env: map[int]map[string]string{102: {"HOME": "/Users/dev"}}}, nil},
 		{"a session that exited", &fakeProcs{trees: map[int][]vmproc.Process{}, env: env(realFirst)}, nil},
+		{"an unreadable session root", &fakeProcs{
+			trees: map[int][]vmproc.Process{session: append([]vmproc.Process{{PID: session, ArgsErr: errors.New("operation not permitted")}}, tree(claude)[1:]...)},
+			env:   env(realFirst)},
+			[]agents.Agent{{PID: 102, Name: "claude", Tools: []string{"docker", "tart"}}}},
 		{"tools absent from PATH", &fakeProcs{trees: map[int][]vmproc.Process{session: tree(claude)}, env: env("/usr/bin")}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {

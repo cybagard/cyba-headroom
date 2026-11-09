@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -160,5 +161,31 @@ func TestHostPathOf(t *testing.T) {
 	got, err := vmproc.Host{}.PathOf(os.Getpid())
 	if want := os.Getenv("PATH"); err != nil || got != want {
 		t.Fatalf("PathOf(self) = %q, %v; want %q", got, err, want)
+	}
+}
+
+// An Orca terminal's root is login, root's (#297): Descendants walks past
+// it, where Tree fails.
+func TestHostDescendantsOfAnUnreadableRoot(t *testing.T) {
+	if _, err := (vmproc.Host{}).Tree(1); err == nil {
+		t.Fatal("Tree(launchd) read root's arguments")
+	}
+	// An orphan of this user's, launchd's child.
+	out, err := exec.Command("/bin/sh", "-c", "/bin/sleep 7 >/dev/null 2>&1 & echo $!").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	defer func() { _ = syscall.Kill(orphan, syscall.SIGKILL) }()
+	procs, err := vmproc.Host{}.Descendants(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) == 0 || procs[0].PID != 1 || procs[0].ArgsErr == nil || procs[0].Exec != "" {
+		t.Fatalf("root = %+v, want pid 1 with ArgsErr", procs[0])
+	}
+	i := slices.IndexFunc(procs, func(p vmproc.Process) bool { return p.PID == orphan })
+	if i < 0 || procs[i].Exec != "/bin/sleep" || procs[i].PPID != 1 {
+		t.Fatalf("the orphan %d is not among launchd's descendants", orphan)
 	}
 }

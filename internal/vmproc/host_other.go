@@ -36,3 +36,6 @@ func (Host) Footprints(context.Context, ...int) (uint64, error) { return 0, errU
 
 // PathOf implements agents.Procs.
 func (Host) PathOf(int) (string, error) { return "", errUnsupported }
+
+// Descendants implements agents.Procs.
+func (Host) Descendants(int) ([]Process, error) { return nil, errUnsupported }

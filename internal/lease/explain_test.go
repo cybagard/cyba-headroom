@@ -57,7 +57,7 @@ func TestTheUngatedWarningIsUnchangedWithoutAnUnshimmedAgent(t *testing.T) {
 // envProcs is one agent, pid 7, under session 1, with env.
 type envProcs struct{ env map[string]string }
 
-func (envProcs) Tree(int) ([]vmproc.Process, error) {
+func (envProcs) Descendants(int) ([]vmproc.Process, error) {
 	return []vmproc.Process{{PID: 1, Args: []string{"login"}}, {PID: 7, PPID: 1, Args: []string{"claude"}}}, nil
 }
 

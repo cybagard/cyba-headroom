@@ -16,8 +16,9 @@ import (
 
 // Procs is the process access the detector needs; vmproc.Host on macOS.
 type Procs interface {
-	// Tree is a process and its descendants, with their arguments.
-	Tree(root int) ([]vmproc.Process, error)
+	// Descendants is a process and its descendants, with their
+	// arguments; the root even when they cannot be read.
+	Descendants(root int) ([]vmproc.Process, error)
 	// PathOf is a process's PATH, and no other variable.
 	PathOf(pid int) (string, error)
 }
@@ -71,7 +72,7 @@ func Unshimmed(ctx context.Context, procs Procs, sessions []int, shimDir string,
 		if ctx.Err() != nil {
 			return out
 		}
-		tree, err := procs.Tree(s)
+		tree, err := procs.Descendants(s)
 		if err != nil {
 			continue
 		}

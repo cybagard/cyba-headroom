@@ -497,9 +497,9 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 // word) without a "--" among its global options and the words after it up
 // to the command, which Compose ignores (#324). ok is false with no
 // command: the call fails. A "--" after a value option's separate form is
-// its value (#356): it is joined to the option, and the word after it, if
-// no flag, is left out, as Compose ignores it; Compose finds the command
-// past it as past a "--". With no command there, the call fails, and args
+// its value (#356): it is joined to the option, and if the word after it
+// is no flag, the words from there up to the command are left out, as
+// Compose ignores them; Compose finds the command past it as past a "--". With no command there, the call fails, and args
 // stay as they are: the call is gated, the safe direction.
 func composeDashDash(args []string) (out []string, ok bool) {
 	rest, res, _ := scanPast(args, composeLead, isComposeCommand, nil)
@@ -523,7 +523,7 @@ func composeDashDash(args []string) (out []string, ok bool) {
 	}
 	after := args[d+1:]
 	if w := after[0]; len(w) < 2 || w[0] != '-' {
-		after = after[1:] // a positional, which Compose ignores
+		after = args[i:] // past a positional, Compose ignores every word up to the command
 	}
 	return composeDashDash(slices.Concat(args[:d-1], []string{args[d-1] + "=--"}, after))
 }
@@ -671,26 +671,26 @@ func parseCompose(engine Call, words, args []string) Call {
 // word, an option's empty value among them, which stay compose's (#347,
 // #352). Docker's options move before "compose", compose's keep their
 // order. ok is false for a bare -v or --version in the run, which switches
-// to the version command, unless it is the pending value of a "--" right
-// before it (#356), and for a docker option in compose's part: the real
+// to the version command, unless a "--" is right before it, Docker's
+// options skipped (#356), and for a docker option in compose's part: the real
 // call fails on it. A compose option it does not know only gates a call
 // that fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 	var docker, compose []string
 	dashed := false    // past a "--"
-	dashValue := false // the word is the pending value of a "--"
+	afterDash := false // the word before, Docker's options skipped, is a "--"
 	i := 0
 	for i < len(args) && (len(args[i]) > 1 && args[i][0] == '-' || args[i] == "-" || args[i] == "") {
 		a := args[i]
-		pending := dashValue
-		dashValue = a == "--" && !pending
+		prevDash := afterDash
+		afterDash = a == "--"
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]
 		n := 0 // the words a docker option takes
 		switch {
 		case a == "--":
 			dashed = true
-		case !pending && (a == "-v" || a == "--version"):
+		case !prevDash && (a == "-v" || a == "--version"):
 			return nil, 0, false
 		case dashed && a == "--verbose":
 			n = 1 // it reads it as docker's --debug
@@ -703,7 +703,7 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 			compose, i = append(compose, a), i+1
 			continue
 		}
-		dashValue = pending // docker's options after "--" are no value of it
+		afterDash = prevDash // docker's options are skipped
 		if !dashed {
 			docker = append(docker, args[i:i+n]...)
 		}

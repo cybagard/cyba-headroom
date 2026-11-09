@@ -159,6 +159,8 @@ func TestParse(t *testing.T) {
 		{"docker compose --version up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
 		{"docker --version compose up -d", Call{}},
 		{"docker compose --version", Call{}},
+		{"docker compose --profile -- x -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose --profile -- -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "y", ComposeDetached: true}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -756,6 +758,23 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 		{"--profile -- up -d", "FF"},
 		{"--profile -- -D up -d", "FF"},
 		{"-f -- up -d", "FF"},
+		// #356 review round 1: past "OPT -- W", W no flag, Compose ignores
+		// every word up to the command; a bare --version or -v in the
+		// standalone run passes after any "--", Docker's options skipped.
+		{"--profile -- x --version=bogus up -d", "gg"},
+		{"--profile -- '' -v= up -d", "gg"},
+		{"--profile -- x --help up -d", "gg"},
+		{"--profile -- '' -h up -d", "gg"},
+		{"--profile -- x -Dv up -d", "gF"},
+		{"--profile -- x --version -H tcp://127.0.0.1:1 up -d", "gF"},
+		{"--profile -- x -p y up -d", "gg"},
+		{"--profile -- '' -p y up -d", "gg"},
+		{"--profile -- -p y up -d", "gg"},
+		{"-- -- --version up -d", "gg"},
+		{"-- -- --version -p x up -d", "gg"},
+		{"-- -- -v up -d", "gg"},
+		{"-- -D -- --version up -d", "gg"},
+		{"--profile -- -- --version up -d", "gg"},
 	} {
 		args := fieldsWithEmpty(tc.argv)
 		for i, form := range []struct {
@@ -1164,6 +1183,9 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 		// Compose ignores after it is left out (#356).
 		{"docker", []string{"compose", "--profile", "--", "x", "up", "-d"}, []string{"compose", "--profile=--", "config", "--format", "json"}},
 		{"docker-compose", []string{"--profile", "--", "x", "up", "-d"}, []string{"--profile=--", "config", "--format", "json"}},
+		{"docker", []string{"compose", "--profile", "--", "x", "-p", "y", "up", "-d"}, []string{"compose", "--profile=--", "config", "--format", "json"}},
+		{"docker-compose", []string{"--profile", "--", "x", "-p", "y", "up", "-d"}, []string{"--profile=--", "config", "--format", "json"}},
+		{"docker", []string{"compose", "--profile", "--", "-p", "y", "up", "-d"}, []string{"compose", "--profile=--", "-p", "y", "config", "--format", "json"}},
 		// podman compose: podman's own options stay before compose (#349).
 		{"podman", []string{"compose", "up", "-d"}, []string{"compose", "config", "--format", "json"}},
 		{"podman", []string{"--url", "U", "compose", "-f", "a.yml", "up", "-d"}, []string{"--url", "U", "compose", "-f", "a.yml", "config", "--format", "json"}},

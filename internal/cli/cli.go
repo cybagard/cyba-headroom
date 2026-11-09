@@ -378,7 +378,12 @@ func reportLocked(socket string, log *slog.Logger) bool {
 		return false
 	}
 	log.Warn(fmt.Sprintf("another daemon is running (pid %d); see `headroom doctor`", pid), "socket", socket)
-	_ = os.WriteFile(marker, []byte(strconv.Itoa(pid)+"\n"), 0o600)
+	if f, err := daemon.OpenOwnFile(marker, os.O_CREATE|os.O_WRONLY); err == nil {
+		if f.Truncate(0) == nil {
+			_, _ = f.WriteString(strconv.Itoa(pid) + "\n")
+		}
+		_ = f.Close()
+	}
 	return true
 }
 

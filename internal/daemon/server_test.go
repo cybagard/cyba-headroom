@@ -2,7 +2,9 @@ package daemon_test
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -473,5 +475,87 @@ func TestADeliveredReplyUndoesNothing(t *testing.T) {
 		Check: &protocol.CheckRequest{Worktree: "w1", Command: "docker run x"}})
 	if err != nil || rep.Decision == nil || rep.Decision.LeaseID != "lease-a-1" {
 		t.Fatalf("reply %+v, %v", rep, err)
+	}
+}
+
+// A socket dir other users can write, or own, is refused before anything is
+// created in it: they could plant links at the lock or squat the socket
+// (#276).
+func TestListenRefusesASharedDir(t *testing.T) {
+	for mode, shown := range map[os.FileMode]string{0o777: "0777", 0o770: "0770", os.ModeSticky | 0o777: "1777"} {
+		path := sockPath(t)
+		dir := filepath.Dir(path)
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		_, err := daemon.Listen(path)
+		want := dir + " is writable by other users (mode " + shown + ")"
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("mode %v: err = %v, want %q", mode, err, want)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+			t.Errorf("mode %v: created %v", mode, ents)
+		}
+	}
+}
+
+func TestListenRefusesADirAnotherUserOwns(t *testing.T) {
+	path := sockPath(t)
+	dir := filepath.Dir(path)
+	daemon.SetStat(t, func(p string) (fs.FileInfo, error) {
+		fi, err := os.Stat(p)
+		if err != nil || p != dir {
+			return fi, err
+		}
+		return otherOwner{fi}, nil
+	})
+	_, err := daemon.Listen(path)
+	want := dir + " is owned by another user (mode 0700)"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("created %v", ents)
+	}
+}
+
+// otherOwner is a FileInfo whose owner is not this process's euid.
+type otherOwner struct{ fs.FileInfo }
+
+func (o otherOwner) Sys() any {
+	st := *o.FileInfo.Sys().(*syscall.Stat_t)
+	st.Uid = uint32(os.Geteuid() + 1)
+	return &st
+}
+
+// A link planted at the lock is not written through: the daemon refuses,
+// and the file it points at keeps its contents and mtime (#276).
+func TestListenRefusesALinkedLock(t *testing.T) {
+	for name, link := range map[string]func(target, link string) error{"symlink": os.Symlink, "hard link": os.Link} {
+		path := sockPath(t)
+		target := filepath.Join(filepath.Dir(path), "victim")
+		if err := os.WriteFile(target, []byte("keep me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		past := time.Now().Add(-time.Hour).Truncate(time.Second)
+		if err := os.Chtimes(target, past, past); err != nil {
+			t.Fatal(err)
+		}
+		if err := link(target, path+".lock"); err != nil {
+			t.Fatal(err)
+		}
+		if ln, err := daemon.Listen(path); err == nil {
+			_ = ln.Close()
+			t.Errorf("%s: Listen succeeded", name)
+		} else if errors.Is(err, daemon.ErrLocked) {
+			t.Errorf("%s: err = %v, not a lock refusal", name, err)
+		}
+		fi, err := os.Stat(target)
+		if b, _ := os.ReadFile(target); err != nil || string(b) != "keep me\n" || !fi.ModTime().Equal(past) {
+			t.Errorf("%s: target now %q (%v), mtime changed: %v", name, b, err, fi != nil && !fi.ModTime().Equal(past))
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("%s: socket created: %v", name, err)
+		}
 	}
 }

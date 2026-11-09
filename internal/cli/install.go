@@ -452,9 +452,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 
 // removeLock removes the daemon's lock file at path unless a daemon holds
 // it, as Homebrew's does in the both state, then dir if that was its last
-// entry (#194).
+// entry (#194). A symlink there is left alone (#276).
 func removeLock(path, dir string) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return
 	}

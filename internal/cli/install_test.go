@@ -1445,3 +1445,24 @@ func TestInstallBinKeepsAFileAtTheDefaultPathThatIsNotHeadroom(t *testing.T) {
 		t.Errorf("no note %q:\n%s", want, f.errb.String())
 	}
 }
+
+// A symlink at the lock is not opened: it stays, and so does the file it
+// points at (#276).
+func TestUninstallLeavesASymlinkedLock(t *testing.T) {
+	f := newInstallFixture(t)
+	victim := filepath.Join(f.cfg, "victim")
+	if err := os.WriteFile(victim, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock := f.in.socket + ".lock"
+	if err := os.Symlink(victim, lock); err != nil {
+		t.Fatal(err)
+	}
+	removeLock(lock, f.cfg)
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "keep me\n" {
+		t.Errorf("victim now %q, %v", b, err)
+	}
+	if _, err := os.Lstat(lock); err != nil {
+		t.Errorf("symlinked lock removed: %v", err)
+	}
+}

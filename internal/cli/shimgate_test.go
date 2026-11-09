@@ -1823,6 +1823,35 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	if len(r.asked) != 4 || r.asked[3].Kind != "compose" || r.asked[3].Target != "x" || !r.asked[3].Idle || !reflect.DeepEqual(probes, want) {
 		t.Fatalf("docker-compose: asked %+v, probes %q", r.asked, probes)
 	}
+	// Compose ignores a "--" among its global options and the options
+	// after it, so its probes leave them out (#324).
+	for _, argv := range [][]string{
+		{"docker", "compose", "-f", "c.yml", "--", "-p", "y", "up", "-d"},
+		{"docker-compose", "-f", "c.yml", "--", "-p", "y", "up", "-d"},
+	} {
+		probes = nil
+		r.run(argv...)
+		bin := r.dir
+		if argv[0] == "docker" {
+			bin = filepath.Join(bin, "docker")
+		} else {
+			bin = filepath.Join(bin, "docker-compose")
+		}
+		want := [][]string{
+			{bin, "-f", "c.yml", "config", "--format", "json"},
+			{bin, "-f", "c.yml", "--profile", "*", "config", "--format", "json"},
+			{bin, "--dry-run", "-f", "c.yml", "up", "-d"},
+		}
+		if argv[0] == "docker" {
+			for i := range want {
+				want[i] = slices.Insert(want[i], 1, "compose")
+			}
+		}
+		last := r.asked[len(r.asked)-1]
+		if last.Kind != "compose" || last.Target != "x" || !reflect.DeepEqual(probes, want) {
+			t.Fatalf("%q: asked %+v, probes %q", argv, last, probes)
+		}
+	}
 }
 
 // docker-compose picks its engine as docker does (#266): a remote one is

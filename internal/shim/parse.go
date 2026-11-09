@@ -147,7 +147,11 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		if len(words) > 1 {
 			return Call{}, -1
 		}
-		return parseCompose(c, append(words, "compose"), args[1:]), opAt + 1
+		rest, ok := composeDashDash(args[1:])
+		if !ok {
+			return Call{}, -1
+		}
+		return parseCompose(c, append(words, "compose"), rest), opAt + 1
 	default:
 		return Call{}, -1
 	}
@@ -364,6 +368,7 @@ func DryRun(name string, args []string) (out []string, ok bool) {
 	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
 		return nil, false
 	}
+	all = withoutDashDash(all, at)
 	if slices.ContainsFunc(all, func(a string) bool { return a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") }) {
 		// It sets --dry-run itself, and the last value wins: with
 		// --dry-run=false after ours, the dry run would be the real call.
@@ -392,6 +397,7 @@ func ComposeConfig(name string, args []string, all bool) (out []string, ok bool)
 	if c.Kind != "compose" || at < 0 {
 		return nil, false
 	}
+	dockerArgs = withoutDashDash(dockerArgs, at)
 	before, moved, _, ok := composeParts(dockerArgs, at)
 	if !ok {
 		return nil, false
@@ -482,6 +488,34 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 		i += n
 	}
 	return before, moved, command, true
+}
+
+// composeDashDash returns a compose call's args (those after the compose
+// word) without a "--" among its global options and the options after it,
+// which Compose checks but ignores, engine options included (#324). ok is
+// false when no option follows the "--": the call fails. An unknown option
+// is guessed past, so at worst a call that fails is gated.
+func composeDashDash(args []string) (out []string, ok bool) {
+	rest, res, _ := scanPast(args, composeGlobal, isComposeCommand, nil)
+	if res != endOfFlags {
+		return args, true
+	}
+	head := args[:len(args)-len(rest)-1]
+	if len(rest) == 0 || len(rest[0]) < 2 || rest[0][0] != '-' || rest[0] == "--" {
+		return nil, false
+	}
+	rest, res, _ = scanPast(rest, withFlags(composeGlobal, composeDocker), isComposeCommand, nil)
+	if res != scanned || len(rest) == 0 {
+		return nil, false // another "--", --help, or no command
+	}
+	return slices.Concat(head, rest), true
+}
+
+// withoutDashDash is a docker compose call's args, whose compose options
+// start at at, as composeDashDash leaves them: the call parseEngine read.
+func withoutDashDash(all []string, at int) []string {
+	rest, _ := composeDashDash(all[at:])
+	return slices.Concat(all[:at], rest)
 }
 
 // asDocker returns a docker or docker-compose call's args as docker's, and
@@ -578,8 +612,8 @@ func parseCompose(engine Call, words, args []string) Call {
 // the leading run of options, as its first pass does: it reads docker's,
 // takes any other option for compose's, and stops at the first word or
 // "--". So a compose option with a separate value (-f x) ends the run at
-// its value (plan amendment 1). Docker's options move before "compose",
-// compose's keep their order. ok is false for -v and --version, and for a
+// its value (plan amendment 1). The options after a "--" are ignored (#324).
+// Docker's options move before "compose", compose's keep their order. ok is false for -v and --version, and for a
 // docker option in compose's part: the real call fails on it. A compose
 // option it does not know only gates a call that fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
@@ -600,7 +634,29 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 			compose, i = append(compose, a), i+1
 		}
 	}
-	rest := slices.Concat(compose, args[i:])
+	if i < len(args) && args[i] == "--" {
+		// The first pass reads docker's options straight after "--" too:
+		// they are not the option Compose needs there (#324).
+		j := i + 1
+		for j < len(args) {
+			f, _, joined := strings.Cut(args[j], "=")
+			takes, known := composeDocker[f]
+			if !known || !takes && joined {
+				break
+			}
+			j++
+			if takes && !joined {
+				j++
+			}
+		}
+		if j >= len(args) || len(args[j]) < 2 || args[j][0] != '-' {
+			return nil, 0, false
+		}
+	}
+	rest, ok := composeDashDash(slices.Concat(compose, args[i:]))
+	if !ok {
+		return nil, 0, false
+	}
 	rejected := false
 	scanPast(rest, withFlags(engineGlobal, composeGlobal), isComposeCommand, func(f, _ string) {
 		_, own := composeGlobal[f]

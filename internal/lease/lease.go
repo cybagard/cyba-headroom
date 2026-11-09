@@ -1728,13 +1728,14 @@ func kindOf(key string) string {
 
 // covered returns each worktree's open lease that holds container id, or
 // waits for it: two docker start db at once, the first's lease covers it.
-// Not one that adopted it (entry.adopted): it reserves nothing for that one.
+// Not one that adopted it (entry.adopted), nor one that reserves nothing
+// (an idle up that took nothing over, #320): neither reserves for it.
 // It renews none of them: Check does, once the start is allowed (renew).
 func (b *Book) covered(id string) []*entry {
 	k := "container:" + id
 	var out []*entry
 	for _, e := range b.open {
-		if e.Worktree != "" && (e.bound[k] && !e.adopted[k] || slices.Contains(e.containerIDs, id)) {
+		if e.Worktree != "" && e.cost > 0 && (e.bound[k] && !e.adopted[k] || slices.Contains(e.containerIDs, id)) {
 			out = append(out, e)
 		}
 	}

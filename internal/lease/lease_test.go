@@ -2903,6 +2903,64 @@ func TestATakeoverKeepsWhatTheServicesItDoesNotStartNeed(t *testing.T) {
 	}
 }
 
+// #112's case in two worktrees at once, the engine reporting a size no Mac
+// has for db while each takeover is checked: each takeover holds that size
+// clamped, so once the readings are sane again the two leases cannot wrap
+// what is leased to a small sum, an allow (#275).
+func TestAbsurdTakeoverUseCannotWrapTheLeases(t *testing.T) {
+	b, c, _ := book(t)
+	wts := map[string]string{"app": "w1", "api": "w2"}
+	// stacks is app's and api's services, each at use.
+	stacks := func(use map[string]uint64) *protocol.Snapshot {
+		s := snap()
+		for _, p := range []string{"app", "api"} {
+			for _, sv := range slices.Sorted(maps.Keys(use)) {
+				addContainer(s, protocol.Container{ID: p + "-" + sv, Name: p + "-" + sv + "-1", MemoryBytes: use[sv],
+					Labels: projectLabels(p, sv)}, wts[p])
+			}
+		}
+		s.CollectedAt = c.t
+		return read(s, c.t)
+	}
+	up := func(p string) policy.Request {
+		return policy.Request{Worktree: wts[p], Kind: "compose", Op: "up", Command: "docker compose up", CostBytes: gib, Target: p, OnEngine: true}
+	}
+	event := func(action, sv string) {
+		for _, p := range []string{"app", "api"} {
+			b.ContainerEvent(action, p+"-"+sv, p+"-"+sv+"-1", projectLabels(p, sv))
+		}
+	}
+	b.Observe(stacks(map[string]uint64{"web": gib}))
+	c.t = c.t.Add(time.Second)
+	for _, p := range []string{"app", "api"} {
+		b.Check(up(p), stacks(map[string]uint64{"web": gib}), cfg)
+	}
+	event("start", "db")
+	c.t = c.t.Add(4 * time.Second)
+	b.Observe(stacks(map[string]uint64{"db": gib / 4, "web": gib}))
+	c.t = c.t.Add(time.Second)
+	event("die", "web")
+	c.t = c.t.Add(2 * time.Second) // newer than the leases' reading: checked on this one
+	bogus := stacks(map[string]uint64{"db": 1 << 63})
+	for _, p := range []string{"app", "api"} {
+		if d := b.Check(up(p), bogus, cfg); !d.Allow {
+			t.Fatalf("%s up again: %+v", p, d)
+		}
+	}
+	event("start", "web")
+	c.t = c.t.Add(3 * time.Second)
+	sane := stacks(map[string]uint64{"db": gib / 2, "web": gib / 2})
+	b.Observe(sane)
+	if d := b.Check(req("w1", gib), sane, cfg); d.Allow {
+		t.Fatalf("allowed past leases holding absurd sizes: %+v, leases %+v", d, b.List())
+	}
+}
+
+// projectLabels are Compose's labels on project p's service sv.
+func projectLabels(p, sv string) map[string]string {
+	return map[string]string{protocol.ComposeProjectLabel: p, protocol.ComposeServiceLabel: sv, protocol.ComposeWorkingDirLabel: "/src/" + p}
+}
+
 // web runs; compose up starts db, holding web; db crashes; compose up
 // again starts db. db is reserved once: the takeover's estimate, less
 // what db uses now, not also what it used before it crashed.

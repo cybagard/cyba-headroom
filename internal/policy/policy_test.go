@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
 )
@@ -287,6 +288,31 @@ func TestAbsurdCostsCannotWrapTheArithmetic(t *testing.T) {
 	r.LeasedBytes = ^uint64(0)
 	if d := policy.Decide(r, snap(), cfg); d.Allow {
 		t.Fatalf("allowed with absurd leases: %+v", d)
+	}
+}
+
+// Containers an engine reports with absurd sizes, summing past 2^64, still
+// count toward the worktree's cap: they do not wrap to a small use (#275).
+func TestAbsurdContainerSizesCannotWrapTheCap(t *testing.T) {
+	s := snap()
+	s.Orca.Worktrees[0].Path = "/Users/dev/w/busy"
+	s.Engines = []protocol.Engine{{Running: true, Containers: []protocol.Container{
+		{ID: "c1", Name: "web", MemoryBytes: 1 << 63, Mounts: []string{"/Users/dev/w/busy"}},
+		{ID: "c2", Name: "db", MemoryBytes: 1 << 63, Mounts: []string{"/Users/dev/w/busy"}},
+	}}}
+	a := attribution.Attribute(s)
+	s.Attribution = &a
+	c := cfg
+	c.PerWorktreeCapBytes = 4 * gib
+	if d := policy.Decide(req("busy", gib), s, c); d.Allow || !slices.Contains(code(d), policy.WorktreeCap) {
+		t.Fatalf("absurd sizes wrapped under the cap: %+v", d)
+	}
+	// Policy's own sum of the worktree's totals saturates too.
+	s = snap()
+	s.Attribution.Worktrees[0].ContainerMemoryBytes = 1 << 63
+	s.Attribution.Worktrees[0].TartMemoryBytes = 1 << 63
+	if d := policy.Decide(req("busy", gib), s, c); d.Allow || !slices.Contains(code(d), policy.WorktreeCap) {
+		t.Fatalf("absurd totals wrapped under the cap: %+v", d)
 	}
 }
 

@@ -140,7 +140,7 @@ type Request struct {
 
 // maxBytes bounds request sizes so the headroom arithmetic cannot wrap: far
 // above any Mac's memory.
-const maxBytes = uint64(1) << 42
+const maxBytes = units.MaxBytes
 
 // The decision types are the wire format's, so the daemon returns them as is.
 type (
@@ -209,7 +209,7 @@ func Decide(r Request, s *protocol.Snapshot, c Config) Decision {
 	}
 	// The cap counts what is known to be the worktree's: its attributed
 	// use (0 if unknown) and its leases.
-	if would := use + r.WorktreeLeasedBytes + d.CostBytes; c.PerWorktreeCapBytes > 0 && would > c.PerWorktreeCapBytes {
+	if would := units.AddSat(units.AddSat(use, r.WorktreeLeasedBytes), d.CostBytes); c.PerWorktreeCapBytes > 0 && would > c.PerWorktreeCapBytes {
 		text := fmt.Sprintf("this worktree would use %s GB, over its cap of %s GB", units.GB(would), units.GB(c.PerWorktreeCapBytes))
 		if r.WorktreeLeasedBytes > 0 {
 			text += fmt.Sprintf(" (%s GB of it for its calls still starting)", units.GB(r.WorktreeLeasedBytes))
@@ -511,7 +511,7 @@ func worktreeUse(s *protocol.Snapshot, id string) (uint64, []Held) {
 		for _, vm := range w.TartVMs {
 			held = append(held, Held{Name: vm.Name, Bytes: vm.MemoryBytes})
 		}
-		return w.ContainerMemoryBytes + w.TartMemoryBytes, held
+		return units.AddSat(w.ContainerMemoryBytes, w.TartMemoryBytes), held
 	}
 	return 0, nil
 }

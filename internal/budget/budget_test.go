@@ -305,6 +305,63 @@ func TestModelSizesSaturate(t *testing.T) {
 	}
 }
 
+// An engine, Tart or a VM reporting sizes no Mac has, alone or summing past
+// 2^64, can only shrink headroom: no sum or int64 conversion wraps (#275).
+func TestAbsurdSizesCannotWrapTheBudget(t *testing.T) {
+	const huge = ^uint64(0)
+	cases := map[string]func(*protocol.Snapshot){
+		"a container near 2^64": func(s *protocol.Snapshot) { s.Engines[0].Containers[0].MemoryBytes = huge },
+		"containers summing past 2^64": func(s *protocol.Snapshot) {
+			s.Engines[0].Containers = []protocol.Container{{MemoryBytes: 1 << 63}, {MemoryBytes: 1 << 63}}
+		},
+		"an engine VM's footprint near 2^64": func(s *protocol.Snapshot) { s.Engines[0].VMFootprintBytes = huge },
+		"a Tart VM's memory near 2^64":       func(s *protocol.Snapshot) { s.Tart.VMs[0].MemoryBytes = huge },
+		"a Tart VM's footprint near 2^64":    func(s *protocol.Snapshot) { s.Tart.VMs[0].FootprintBytes = u64(huge) },
+		"Tart VMs summing past 2^64": func(s *protocol.Snapshot) {
+			s.Tart.VMs = []protocol.TartVM{
+				{Name: "a", MemoryBytes: 1 << 63, FootprintBytes: u64(1 << 63)},
+				{Name: "b", MemoryBytes: 1 << 63, FootprintBytes: u64(1 << 63)},
+			}
+		},
+		"a Podman VM near 2^64": func(s *protocol.Snapshot) {
+			s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "m", FootprintBytes: huge}}}
+		},
+		"Podman VMs summing past 2^64": func(s *protocol.Snapshot) {
+			s.Podman = &protocol.Podman{VMs: []protocol.PodmanVM{{Machine: "m", FootprintBytes: 1 << 63}, {Machine: "n", FootprintBytes: 1 << 63}}}
+		},
+		"another VM near 2^64": func(s *protocol.Snapshot) {
+			s.VMs = &protocol.VMs{Other: []protocol.OtherVM{{FootprintBytes: huge}}}
+		},
+		"other VMs summing past 2^64": func(s *protocol.Snapshot) {
+			s.VMs = &protocol.VMs{Other: []protocol.OtherVM{{FootprintBytes: 1 << 63}, {FootprintBytes: 1 << 63}}}
+		},
+		"components summing past 2^64": func(s *protocol.Snapshot) {
+			s.Engines[0].VMFootprintBytes = 1 << 63
+			s.Tart.VMs[0].FootprintBytes = u64(1 << 63)
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := busyMac()
+			edit(s)
+			b := budget.Compute(s, budget.Params{HostBaselineBytes: 8 * gib})
+			if b.HeadroomBytes == nil {
+				t.Fatal("headroom unknown")
+			}
+			if *b.HeadroomBytes > 0 {
+				t.Errorf("headroom = %d, want at most 0", *b.HeadroomBytes)
+			}
+			// busyMac leaves 17 GiB unaccounted: a larger footprint only lowers it.
+			if b.UnaccountedBytes == nil {
+				t.Fatal("unaccounted unknown")
+			}
+			if *b.UnaccountedBytes > int64(17*gib) {
+				t.Errorf("unaccounted = %d, want at most 17 GiB", *b.UnaccountedBytes)
+			}
+		})
+	}
+}
+
 func i64(v int64) *int64 { return &v }
 
 // busyMac is a 64 GiB Mac with every source reporting.

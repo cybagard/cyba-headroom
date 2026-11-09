@@ -1,6 +1,9 @@
 package attribution
 
-import "github.com/cybagard/cyba-headroom/internal/protocol"
+import (
+	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
+)
 
 // OrcaUnknown marks everything unattributed while Orca's worktrees are
 // unknown (no reading, or Orca not running): no match would mean nothing.
@@ -77,8 +80,9 @@ func attribute(s *protocol.Snapshot, leased map[string]string) protocol.Attribut
 	return a
 }
 
-// total fills u's totals. A CPU or footprint total is known only if every
-// part is. Lists are empty rather than null on the wire.
+// total fills u's totals, saturating at units.MaxBytes. A CPU or footprint
+// total is known only if every part is. Lists are empty rather than null on
+// the wire.
 func total(u *protocol.Usage) {
 	if u.Containers == nil {
 		u.Containers = []protocol.AttributedContainer{}
@@ -88,7 +92,7 @@ func total(u *protocol.Usage) {
 	}
 	cpu, cpuKnown := 0.0, true
 	for _, c := range u.Containers {
-		u.ContainerMemoryBytes += c.MemoryBytes
+		u.ContainerMemoryBytes = units.AddSat(u.ContainerMemoryBytes, c.MemoryBytes)
 		if c.CPUPercent == nil {
 			cpuKnown = false
 		} else {
@@ -102,11 +106,11 @@ func total(u *protocol.Usage) {
 	fpKnown := true
 	vmCPU, vmCPUKnown := 0.0, true
 	for _, vm := range u.TartVMs {
-		u.TartMemoryBytes += vm.MemoryBytes
+		u.TartMemoryBytes = units.AddSat(u.TartMemoryBytes, vm.MemoryBytes)
 		if vm.FootprintBytes == nil {
 			fpKnown = false
 		} else {
-			fp += *vm.FootprintBytes
+			fp = units.AddSat(fp, *vm.FootprintBytes)
 		}
 		if vm.CPUPercent == nil {
 			vmCPUKnown = false

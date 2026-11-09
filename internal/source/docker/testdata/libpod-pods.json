@@ -1,6 +1,6 @@
 [
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c0d1c2b3a4f5e6d7c8b9a0f",
@@ -27,7 +27,7 @@
     "Labels": {}
   },
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "0000000000000000000000000000000000000000000000000000000000000b11",
@@ -54,7 +54,7 @@
     "Labels": {}
   },
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "0000000000000000000000000000000000000000000000000000000000000b21",
@@ -87,7 +87,7 @@
     "Labels": {}
   },
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "0000000000000000000000000000000000000000000000000000000000000b31",
@@ -106,7 +106,7 @@
     "Labels": {}
   },
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "0000000000000000000000000000000000000000000000000000000000000b41",
@@ -133,7 +133,7 @@
     "Labels": {}
   },
   {
-    "Cgroup": "machine.slice",
+    "Cgroup": "user.slice",
     "Containers": [
       {
         "Id": "0000000000000000000000000000000000000000000000000000000000000b51",

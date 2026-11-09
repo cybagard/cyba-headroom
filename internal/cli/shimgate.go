@@ -213,9 +213,10 @@ func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gate
 	}
 	req.MultiTarget, req.Targets = c.MultiTarget, c.Targets
 	var idle func() bool
-	if c.Kind == "compose" && dockerCLI(name) {
-		// Compose names the project (-p needs no asking; podman compose is
-		// not asked), and says whether a detached up starts anything.
+	if c.Kind == "compose" && (dockerCLI(name) || name == "podman") {
+		// Compose names the project (-p needs no asking), and says whether
+		// a detached up starts anything. podman compose is asked through
+		// podman, which hands the call to its provider (#349).
 		// Bounded by composeTimeout, also when the daemon turns out to be
 		// down (R7). One ping first: with the daemon down, the call runs
 		// with no probe, within policy.daemon_timeout (#278).
@@ -601,9 +602,9 @@ func callerRequest(getenv func(string) string, ancestors func() []int, getwd fun
 
 // composeProject is a compose call's project, as Compose itself names it
 // (#33): -p (target), else the name docker compose config gives, run with
-// the call's own global options (args, of name: docker or docker-compose:
-// -f, --project-directory,
-// --env-file, --config, ...) in its own environment and working directory.
+// the call's own global options (args, of name: docker, docker-compose or
+// podman: -f, --project-directory, --env-file, --config, ...) in its own
+// environment and working directory.
 // Compose labels each container with the project, so the name is the
 // lease's key. Asking Compose, rather than reading .env, override files and
 // name: the way it does, keeps the two from parting. When Compose cannot

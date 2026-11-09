@@ -355,16 +355,16 @@ func SetsLabel(args []string, key string) bool {
 
 // DryRun returns a docker compose call's args with --dry-run added as a
 // compose option, so Compose says what the call would do and does none of
-// it; for docker-compose, after its docker options. ok is false for any
-// other call, for a compose run (its one-off container is always new), one
-// whose file is on stdin (the call needs it) and one that sets --dry-run
-// itself.
+// it; for docker-compose, after its docker options, and for podman after
+// its own (#349). ok is false for any other call, for a compose run (its
+// one-off container is always new), one whose file is on stdin (the call
+// needs it) and one that sets --dry-run itself.
 func DryRun(name string, args []string) (out []string, ok bool) {
 	all, lead, ok := asDocker(name, args)
 	if !ok {
 		return nil, false
 	}
-	c, at := parseEngine("docker", all)
+	c, at := parseEngine(engineOf(name), all)
 	if c.Kind != "compose" || at < 0 || c.Op == "run" || slices.Contains(c.ComposeFiles, "-") {
 		return nil, false
 	}
@@ -386,14 +386,15 @@ func DryRun(name string, args []string) (out []string, ok bool) {
 // call's project as JSON: the call's own global options (-p, -f,
 // --env-file, --config, --context), which Compose interpolates, those
 // after the command too, then config; with every profile's services if
-// all. name is docker or docker-compose, whose args have no compose word.
-// ok is false for any other call.
+// all. name is docker, docker-compose, whose args have no compose word, or
+// podman, whose options before compose stay (#349). ok is false for any
+// other call.
 func ComposeConfig(name string, args []string, all bool) (out []string, ok bool) {
 	dockerArgs, lead, ok := asDocker(name, args)
 	if !ok {
 		return nil, false
 	}
-	c, at := parseEngine("docker", dockerArgs)
+	c, at := parseEngine(engineOf(name), dockerArgs)
 	if c.Kind != "compose" || at < 0 {
 		return nil, false
 	}
@@ -527,16 +528,26 @@ func withoutDashDash(all []string, at int) []string {
 	return slices.Concat(all[:at], rest)
 }
 
-// asDocker returns a docker or docker-compose call's args as docker's, and
-// where docker-compose's had no compose word (-1 for docker).
+// asDocker returns a docker, docker-compose or podman call's args as
+// docker's (podman's as they are), and where docker-compose's had no
+// compose word (-1 for docker and podman).
 func asDocker(name string, args []string) (all []string, lead int, ok bool) {
 	switch name {
-	case "docker":
+	case "docker", "podman":
 		return args, -1, true
 	case "docker-compose":
 		return asDockerCompose(args)
 	}
 	return nil, -1, false
+}
+
+// engineOf is the engine whose options a compose call of name's has: podman
+// compose's are podman's, the others docker's.
+func engineOf(name string) string {
+	if name == "podman" {
+		return "podman"
+	}
+	return "docker"
 }
 
 // fromDocker undoes asDocker: it drops the compose word at lead, if any.

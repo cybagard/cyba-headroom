@@ -20,9 +20,9 @@
 // binds, the book keeping nothing a new resource could match: a worktree's
 // holds its cost to its timeout. A headroom check sends no key, nor does
 // the shim for a call whose resource it cannot name: for example a compose
-// call with no project (podman compose without -p, or a file on stdin the
-// shim cannot name and whose dir it does not know: one whose dir it knows
-// is keyed by that dir, entry.unnamed), or a start whose target follows an
+// call with no project (a file on stdin the shim cannot name and whose dir
+// it does not know: one whose dir it knows is keyed by that dir,
+// entry.unnamed), or a start whose target follows an
 // option the shim does not know. A start is keyed by the IDs of the containers Docker
 // resolved that it starts (entry.containerIDs), and by its first target
 // as given, a name or an ID, when Docker did not resolve it

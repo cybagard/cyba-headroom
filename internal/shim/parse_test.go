@@ -385,8 +385,11 @@ func TestDockerComposeLeadingRun(t *testing.T) {
 		{"-- -Dp up -d", up("", "")},
 		{"-- -Df up -d", up("", "")},
 		{"-- -Dp x up -d", want{}},
+		// #352: an option's empty value does not end the run.
+		{"--profile '' -H S up -d", up(sock, "")},
+		{"-p '' -D up -d", up("", "")},
 	} {
-		args := strings.Fields(strings.ReplaceAll(tc.argv, "S", sock))
+		args := fieldsWithEmpty(strings.ReplaceAll(tc.argv, "S", sock))
 		c := Parse("docker-compose", args)
 		got := want{compose: c.Kind == "compose", host: c.Host, context: c.Context, target: c.Target, files: c.ComposeFiles}
 		if !reflect.DeepEqual(got, tc.want) || c.HasHost != (tc.want.host != "") {
@@ -672,6 +675,26 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 		{"-H tcp://127.0.0.1:1 - up -d", "ff"},
 		{"-p - up -d", "FF"},
 		{"-p '' up -d", "gg"},
+		// #352: before "--" too, standalone's first pass walks over an
+		// empty word, an option's empty value among them.
+		{"-p '' -D up -d", "gF"},
+		{"--project-name '' -D up -d", "gF"},
+		{"--profile '' -D up -d", "gF"},
+		{"--project-directory '' -D up -d", "gF"},
+		{"--progress '' -D up -d", "gF"},
+		{"--ansi '' -D up -d", "gF"},
+		{"--profile '' --debug up -d", "gF"},
+		{"--profile '' -H tcp://127.0.0.1:1 up -d", "gF"},
+		{"-p '' -D -p y up -d", "gF"},
+		{"-f '' -D up -d", "FF"},
+		{"--env-file '' -D up -d", "FF"},
+		{"-p x -D up -d", "fF"},
+		{"--profile x -D up -d", "fF"},
+		{"--ansi never -D up -d", "fF"},
+		{"--profile '' up -d", "gg"},
+		{"-p '' -f c.yml up -d", "gg"},
+		{"-p '' --compatibility up -d", "gg"},
+		{"-D -p '' up -d", "gg"},
 	} {
 		args := fieldsWithEmpty(tc.argv)
 		for i, form := range []struct {

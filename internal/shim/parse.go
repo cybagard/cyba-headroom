@@ -147,7 +147,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		if len(words) > 1 {
 			return Call{}, -1
 		}
-		rest, ok := composeDashDash(args[1:])
+		rest, ok := composeDashDash(args[1:], composePluginBools)
 		if !ok {
 			return Call{}, -1
 		}
@@ -492,65 +492,39 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 
 // composeDashDash returns a compose call's args (those after the compose
 // word) without a "--" among its global options and the words after it up
-// to the command, which Compose ignores: options, engine ones included,
-// help, version and more "--" (#324). ok is false when there is no command,
-// or "--" is right before it: the call fails. An unknown option is guessed
-// past, so at worst a call that fails is gated.
-func composeDashDash(args []string) (out []string, ok bool) {
+// to the command, which Compose ignores (#324). It finds the command as
+// cobra's Traverse does, bools being the flags it knows take no value: a
+// "--name" (and "--") takes the next word unless it is one of bools, and so
+// does a "-X" that is not; any other word is the value pending, if any,
+// else a flag if it starts with "-", else the command. ok is false with no
+// command: the call fails.
+func composeDashDash(args []string, bools map[string]bool) (out []string, ok bool) {
 	rest, res, _ := scanPast(args, composeGlobal, isComposeCommand, nil)
 	if res != endOfFlags {
 		return args, true
 	}
 	d := len(args) - len(rest) - 1 // the "--"
-	table := withFlags(composeGlobal, composeDocker)
-	i := d + 1
-	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' {
-		i += optionLen(args[i:], table)
-	}
-	if i >= len(args) || args[i-1] == "--" {
-		return nil, false
-	}
-	return slices.Concat(args[:d], args[i:]), true
-}
-
-// optionLen is how many words the option at a[0] takes, its value's
-// included, as Compose reads them after "--": a "--", help and a cluster
-// (-Dp) take none. An unknown one takes a value unless the next word is an
-// option or a command.
-func optionLen(a []string, flags flagSet) int {
-	w, takes := a[0], false
-	unknown := func() bool {
-		return len(a) > 1 && !strings.HasPrefix(a[1], "-") && !isComposeCommand(a[1])
-	}
-	switch {
-	case w == "--", w[1] != '-' && len(w) > 2:
-	case strings.HasPrefix(w, "--"):
-		f, _, joined := strings.Cut(w, "=")
-		t, known := flags[f]
-		takes = !joined && (known && t || !known && unknown())
-	default:
-		for j := 1; j < len(w); j++ {
-			t, known := flags["-"+w[j:j+1]]
-			if !known {
-				takes = unknown()
-				break
-			}
-			if t || strings.HasPrefix(w[j+1:], "=") {
-				takes = t && j+1 == len(w) // else its value is joined
-				break
-			}
+	value := false                 // the word is a flag's value
+	for i := d; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case strings.HasPrefix(a, "--") && !strings.Contains(a, "="):
+			value = !bools[a]
+		case len(a) == 2 && a[0] == '-' && a[1] != '=':
+			value = !bools[a]
+		case value:
+			value = false
+		case len(a) < 2 || a[0] != '-':
+			return slices.Concat(args[:d], args[i:]), true
 		}
 	}
-	if takes {
-		return 2
-	}
-	return 1
+	return nil, false
 }
 
 // withoutDashDash is a docker compose call's args, whose compose options
 // start at at, as composeDashDash leaves them: the call parseEngine read.
 func withoutDashDash(all []string, at int) []string {
-	rest, _ := composeDashDash(all[at:])
+	rest, _ := composeDashDash(all[at:], composePluginBools)
 	return slices.Concat(all[:at], rest)
 }
 
@@ -646,50 +620,43 @@ func parseCompose(engine Call, words, args []string) Call {
 // call it is (#266): its docker options, "compose" at lead, then the rest.
 // The standalone binary takes only a few of docker's options, anywhere in
 // the leading run of options, as its first pass does: it reads docker's,
-// takes any other option for compose's, and stops at the first word or
-// "--". So a compose option with a separate value (-f x) ends the run at
-// its value (plan amendment 1). The options after a "--" are ignored (#324).
-// Docker's options move before "compose", compose's keep their order. ok is false for -v and --version, and for a
-// docker option in compose's part: the real call fails on it. A compose
-// option it does not know only gates a call that fails.
+// takes any other option for compose's, and stops at the first word. So a
+// compose option with a separate value (-f x) ends the run at its value
+// (plan amendment 1). Past a "--", the run goes on but drops docker's
+// options, which Compose then does not see (#324). Docker's options move
+// before "compose", compose's keep their order. ok is false for -v and
+// --version, and for a docker option in compose's part: the real call
+// fails on it. A compose option it does not know only gates a call that
+// fails.
 func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 	var docker, compose []string
+	dashed := false // past a "--"
 	i := 0
-	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' && args[i] != "--" {
+	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' {
 		a := args[i]
 		f, _, joined := strings.Cut(a, "=")
 		takes, known := composeDocker[f]
+		n := 0 // the words a docker option takes
 		switch {
-		case a == "-v" || a == "--version":
+		case a == "--":
+			dashed = true
+		case !dashed && (a == "-v" || a == "--version"):
 			return nil, 0, false
 		case known && takes && joined, known && !takes && !joined:
-			docker, i = append(docker, a), i+1 // a boolean takes no =value
+			n = 1 // a boolean takes no =value
 		case known && takes:
-			docker, i = append(docker, args[i:min(i+2, len(args))]...), min(i+2, len(args))
-		default:
+			n = min(2, len(args)-i)
+		}
+		if n == 0 {
 			compose, i = append(compose, a), i+1
+			continue
 		}
+		if !dashed {
+			docker = append(docker, args[i:i+n]...)
+		}
+		i += n
 	}
-	if i < len(args) && args[i] == "--" {
-		// The first pass reads docker's options straight after "--" too:
-		// they are not the option Compose needs there (#324).
-		j := i + 1
-		for j < len(args) {
-			f, _, joined := strings.Cut(args[j], "=")
-			takes, known := composeDocker[f]
-			if !known || !takes && joined {
-				break
-			}
-			j++
-			if takes && !joined {
-				j++
-			}
-		}
-		if j >= len(args) || len(args[j]) < 2 || args[j][0] != '-' {
-			return nil, 0, false
-		}
-	}
-	rest, ok := composeDashDash(slices.Concat(compose, args[i:]))
+	rest, ok := composeDashDash(slices.Concat(compose, args[i:]), composeBools)
 	if !ok {
 		return nil, 0, false
 	}
@@ -1024,7 +991,11 @@ var (
 	composeGlobal = flags(
 		"--ansi --env-file --file --parallel --profile --progress --project-directory --project-name -f -p",
 		"--all-resources --compatibility --dry-run")
-	composeUp = flags(
+	// The flags Compose knows take no value when it looks for its command
+	// after "--"; the plugin also knows --verbose. Measured (#324).
+	composeBools       = words("--all-resources --compatibility --dry-run --help --no-ansi --version -h -v")
+	composePluginBools = words("--all-resources --compatibility --dry-run --help --no-ansi --version --verbose -h -v")
+	composeUp          = flags(
 		"--attach --exit-code-from --no-attach --pull --scale --timeout --wait-timeout -t",
 		"--abort-on-container-exit --abort-on-container-failure --always-recreate-deps --attach-dependencies --build "+
 			"--detach --dry-run --force-recreate --menu --no-build --no-color --no-deps --no-log-prefix --no-recreate "+

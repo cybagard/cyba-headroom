@@ -30,8 +30,11 @@ type Spec struct {
 }
 
 // Plist renders s as a LaunchAgent property list. The agent starts at login
-// and restarts if it crashes, but stays stopped after a clean exit. It runs
-// at background priority: the daemon does a little work every few seconds.
+// and restarts if it crashes, but stays stopped after a clean exit. Nice and
+// LowPriorityIO yield to interactive work: the daemon does a little work every
+// few seconds. ProcessType is Standard, not Background: the darwinbg band
+// coalesces timers by about 100 ms and throttles CPU and I/O under load, so
+// every source missed its 3 s Collect deadline together (#342).
 func Plist(s Spec) []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
@@ -76,7 +79,7 @@ func Plist(s Spec) []byte {
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Standard</string>
 	<key>LowPriorityIO</key>
 	<true/>
 	<key>Nice</key>

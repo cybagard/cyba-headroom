@@ -1262,6 +1262,7 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 			undecided[k] = w // only missing: still new when it is back (pruned with prev)
 		}
 	}
+	ended := b.undecided // the windows this reading may end
 	b.undecided = undecided
 	// Compose projects running containers whose call was checked: a later
 	// service (depends_on, a slow healthcheck) belongs to the same call.
@@ -1279,13 +1280,14 @@ func (b *Book) Observe(s *protocol.Snapshot) {
 	explained := map[string][]agents.Agent{}
 	for _, r := range unbound {
 		v := b.verdicts[r.key]
+		_, windowed := ended[r.key]
 		switch {
 		case v != nil && !isVM(r.kind):
 			// A container back after a tick or two away keeps its verdict.
 			// A VM run again is a new run.
 		case !b.based[source(r.kind)] || dockerSettling && !isVM(r.kind):
 			b.judge(r, baseline, now) // it may have been there before
-		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r, now):
+		case r.kind == "compose" && gatedProject[r.project+"\x00"+r.dir] || b.lapsedFor(r, now, windowed && r.worktree == ""):
 			b.judge(r, gated, now) // a later service, or its lease lapsed (a slow pull)
 		default:
 			b.judge(r, ungated, now)
@@ -2183,8 +2185,10 @@ func (e *entry) inPods(r resource) bool {
 // Observe drops it: a key that names one container, and a manual compose
 // lease with no dir, which has nothing to tell its call's stack from
 // another worktree's of the same project name. A vouch only gates r: the
-// lease reserves nothing again.
-func (b *Book) lapsedFor(r resource, now time.Time) bool {
+// lease reserves nothing again. A container windowed, unattributed as its
+// undecided window ends (Book.undecides), had its flicker's allowance
+// there: only a lapsed lease of its dir vouches for it (#330).
+func (b *Book) lapsedFor(r resource, now time.Time, windowed bool) bool {
 	stack := func(o *entry) bool { return o.Kind == "compose" && (o.Worktree != "" || o.dir != "") }
 	e := keyed(slices.DeleteFunc(slices.Clone(b.lapsed), func(o *entry) bool {
 		switch {
@@ -2194,7 +2198,7 @@ func (b *Book) lapsedFor(r resource, now time.Time) bool {
 			return true
 		case o.dir != "" && r.dir == o.dir:
 			return false
-		case o.Worktree == "":
+		case o.Worktree == "" || windowed:
 			return true
 		}
 		return r.kind == "compose" && r.worktree != "" && r.worktree != o.Worktree

@@ -3622,6 +3622,76 @@ func TestAnUndecidedContainerIsDecidedWhenItsUpEnds(t *testing.T) {
 	}
 }
 
+// A container no reading places in a worktree, in another dir than w1's up
+// that kept it undecided, is judged ungated and warned once that up lapses,
+// starting nothing (a failed pull): its window already gave a flicker its
+// allowance, so w1's lapsed lease does not vouch for it (#330).
+func TestAContainerOutOfAWindowIsNotVouchedForByTheLapsedUp(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	for len(b.List()) > 0 { // a1 undecided until w1's up lapses
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, ""), c.t))
+	}
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, ""), c.t))
+	if u := b.Ungated(); len(u) != 1 || u[0].Name != "a1" {
+		t.Errorf("ungated %+v, want a1 once w1's up lapsed", u)
+	}
+	if !strings.Contains(log.String(), "ungated: ") || !strings.Contains(log.String(), "name=a1") {
+		t.Errorf("no ungated warning of a1:\n%s", log)
+	}
+}
+
+// A container of w1's lapsed up's own dir (a slow pull), kept undecided
+// after that lapse by w2's wrong-dir up, is still judged gated when w2's up
+// lapses too: the lapsed lease of its dir vouches for it (#330).
+func TestAContainerOutOfAWindowIsVouchedForByALapsedUpOfItsDir(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	c.t = c.t.Add(110 * time.Second)
+	b.Check(upIn("w2", "/src/x"), snap(), cfg)
+	for c.t.Before(t0.Add(2*time.Minute + 5*time.Second)) { // w1's up lapses
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	b.ContainerEvent("start", "b1", "b1", stackLabels("/src/w1"))
+	for range 30 { // b1 undecided until w2's up lapses, then judged
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(addContainer(snap(), protocol.Container{ID: "b1", Name: "b1", MemoryBytes: gib / 2, Labels: stackLabels("/src/w1")}, ""), c.t))
+	}
+	if ls := b.List(); len(ls) != 0 {
+		t.Fatalf("leases %+v, want both ups lapsed", ls)
+	}
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "name=b1") {
+		t.Errorf("ungated %+v, want none: w1's lapsed up vouches for b1:\n%s", u, log)
+	}
+}
+
+// A container no reading places in a worktree, first seen after w1's up
+// lapsed, in another dir, is still vouched for by that lapsed lease: no
+// window gave it a flicker's allowance (#145, #330).
+func TestAContainerFirstSeenAfterTheLapseIsVouchedForInAnotherDir(t *testing.T) {
+	b, c, log := book(t)
+	b.Observe(read(snap(), c.t))
+	b.Check(upIn("w1", "/src/w1"), snap(), cfg)
+	for len(b.List()) > 0 { // w1's up lapses
+		c.t = c.t.Add(5 * time.Second)
+		b.Observe(read(snap(), c.t))
+	}
+	c.t = c.t.Add(time.Second)
+	b.ContainerEvent("start", "a1", "a1", stackLabels("/src/a"))
+	c.t = c.t.Add(5 * time.Second)
+	b.Observe(read(addContainer(snap(), protocol.Container{ID: "a1", Name: "a1", MemoryBytes: gib / 2, Labels: stackLabels("/src/a")}, ""), c.t))
+	if u := b.Ungated(); len(u) != 0 || strings.Contains(log.String(), "name=a1") {
+		t.Errorf("ungated %+v, want none: w1's lapsed up vouches for a1:\n%s", u, log)
+	}
+}
+
 // A container that w1's up (the oldest) and w2's wrong-dir up both key when
 // it is first undecided stays undecided while either is open: w1's ends,
 // two flickered readings judge nothing, and the next, which attributes it

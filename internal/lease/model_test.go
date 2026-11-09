@@ -135,6 +135,10 @@ type mcont struct {
 	judged   int
 	judgedAt time.Time
 	unbound  bool
+	// vouched is set while its verdict is gated by a failed up's lapsed
+	// lease, which vouches for an unattributed container of its project
+	// first judged out of no window (lease.go lapsedFor, #330's residual).
+	vouched bool
 	// byGuess is set once a guessed up started it: the differential compares
 	// its binding with the book's (model.differ).
 	byGuess bool
@@ -169,7 +173,8 @@ type op struct{ kind, a, b int }
 const lostReply = 1 << 8
 
 // rawStart, set in an op's kind, makes op 8's start past the shim a
-// stack's (rawCompose, #222).
+// stack's (rawCompose, #222), and an up's pull fail: it is allowed, and
+// starts nothing (#330).
 const rawStart = 1 << 9
 
 type model struct {
@@ -199,6 +204,9 @@ type model struct {
 	taking   []string             // the leases the asking call takes over
 	polled   map[string]time.Time // each ticket's last ask, kept once the model drops it (heldForNothing)
 	lost     bool                 // the next check's reply is lost (lostReply, #271)
+	failPull bool                 // this op's up fails its pull (rawStart, #330)
+	failed   map[string]string    // a failed up's lease → its project
+	expires  map[string]time.Time // a failed up's lease → when it expires, as last listed
 }
 
 // openBugs are the cases that expose a bug still open, by its issue. They
@@ -325,6 +333,7 @@ func (m *model) check(r policy.Request) protocol.Decision {
 		r.Wait, r.Ticket, w.asked = true, w.ticket, true
 	}
 	d := m.b.Check(r, m.snapshot(), cfg)
+	m.listExpires()
 	taking := m.taking
 	m.taking = nil
 	if m.lost {
@@ -437,7 +446,8 @@ func guessOf(st stack, outcome int) (name, project string) {
 }
 
 // composeUp is an up of st, or with guess ≥ 0, a guessed up of that
-// outcome in st's worktree.
+// outcome in st's worktree. A failed one (a failed pull) is allowed, and
+// starts nothing.
 // tied reports whether another worktree's open guess names project, so
 // the start event of wt's container of it ties (lease.go tied) and only a
 // reading binds it: #109's.
@@ -457,7 +467,7 @@ func (m *model) tied(project, wt string) bool {
 // reading has shown it since. Gone before one, it binds no lease.
 func (m *model) tiedUnread(x *mcont) bool { return x.read <= x.began && m.tied(x.project, x.wt) }
 
-func (m *model) composeUp(st stack, guess int) bool {
+func (m *model) composeUp(st stack, guess int, failed bool) bool {
 	project, wt := st.project, st.wt
 	name := project
 	if guess >= 0 {
@@ -480,6 +490,7 @@ func (m *model) composeUp(st stack, guess int) bool {
 		}
 	}
 	idle := cost == 0 && guess < 0 // Compose's dry run failed too: a guess is never idle
+	failed = failed && guess < 0 && !idle
 	cmd := upCommand(project)
 	taken := map[string]bool{} // its stack's leases it takes over, those not past their timeout
 	for _, l := range m.b.List() {
@@ -521,7 +532,11 @@ func (m *model) composeUp(st stack, guess int) bool {
 		m.outcomes[[]string{"hit", "miss", "miss other"}[guess]]++
 		m.step("%s: guessed compose up %s, comes up as %s → %s", wt, name, project, d.LeaseID)
 	} else {
-		m.step("%s: compose up %s (idle %v) → %s", wt, project, idle, d.LeaseID)
+		m.step("%s: compose up %s (idle %v, failed %v) → %s", wt, project, idle, failed, d.LeaseID)
+	}
+	if failed {
+		m.failed[d.LeaseID] = project
+		m.outcomes["up: failed pull"]++
 	}
 	for _, x := range m.conts {
 		// Removed ones and another worktree's too: the up binds and holds all
@@ -546,6 +561,9 @@ func (m *model) composeUp(st stack, guess int) bool {
 			// A guess holds no running stack (lease.go Check).
 		case !m.bound(x) && m.ticks > 0 && x.read == m.ticks && !m.flick:
 			x.heldBy = d.LeaseID // the last reading found it running in wt, no lease's
+		}
+		if failed {
+			continue // its pull failed: it starts nothing
 		}
 		if x == nil {
 			x = m.newCont(project, sv, wt, map[string]string{protocol.ComposeProjectLabel: project,
@@ -866,6 +884,7 @@ func (m *model) tick() {
 	}
 	m.ticks++
 	m.flick = (m.cur.a+m.ticks*7)%8 == 0
+	m.listExpires()
 	for _, x := range m.conts {
 		x.undecided = m.undecides(x)
 		if x.undecided && x.window == nil {
@@ -891,6 +910,11 @@ func (m *model) tick() {
 				ran = x.readAt
 			}
 			x.read, x.readAt = m.ticks, m.c.t
+			if x.raw && !x.verdict {
+				// Judged now: a lapsed lease vouches only for one out of no
+				// window (lease.go lapsedFor, #330).
+				x.vouched = x.window == nil && m.lapsedUp(x.project)
+			}
 			x.owned, x.verdict, x.verdictAt = x.owned || !m.flick && x.wt != "", true, m.c.t
 			m.deadReading(x)
 			m.firstReading(x)
@@ -1122,6 +1146,27 @@ func (m *model) guessOf(x *mcont) string {
 	return ""
 }
 
+// listExpires records when each open failed up's lease expires.
+func (m *model) listExpires() {
+	for _, l := range m.b.List() {
+		if _, ok := m.failed[l.ID]; ok {
+			m.expires[l.ID] = l.Expires
+		}
+	}
+}
+
+// lapsedUp reports whether a failed up of project lapses at this reading or
+// lapsed less than the timeout before (lease.go lapsedFor). One taken over
+// never lapses: this errs toward vouching.
+func (m *model) lapsedUp(project string) bool {
+	for id, p := range m.failed {
+		if exp, ok := m.expires[id]; ok && p == project && !m.c.t.Before(exp) && m.c.t.Before(exp.Add(timeout)) {
+			return true
+		}
+	}
+	return false
+}
+
 // upCommand is the call of an up of project, named with -p.
 func upCommand(project string) string { return "docker compose -p " + project + " up -d" }
 
@@ -1152,6 +1197,8 @@ func (m *model) invariants() {
 			// needs what it was checked for.
 		case x.firstGated && ungated[x.id]:
 			m.fail("false ungated: %s was started by a checked call", x.id)
+		case x.raw && x.vouched:
+			// Gated or not: a failed up's lapsed lease vouches for it (#330's residual).
 		case x.raw && x.undecided && x.verdict && !ungated[x.id]:
 			m.fail("undecided not ungated: %s keeps its verdict while undecided, and is not listed", x.id)
 		case x.raw && x.undecided:
@@ -1337,7 +1384,8 @@ func (m *model) call(kind int, o op) func() bool {
 		if kind == 2 && o.b%2 == 1 {
 			guess = (o.b / 2) % 3
 		}
-		return func() bool { return m.composeUp(st, guess) }
+		failed := m.failPull
+		return func() bool { return m.composeUp(st, guess, failed) }
 	case 5:
 		stopped := func(x *mcont) bool { return !x.running && !x.gone }
 		x := m.pick(stopped)
@@ -1369,6 +1417,7 @@ func (m *model) run(ops []op) {
 		m.lost, o.kind = o.kind&lostReply != 0, o.kind&^lostReply
 		raw := o.kind&rawStart != 0
 		o.kind &^= rawStart
+		m.failPull = raw
 		m.cur = o
 		m.c.t = m.c.t.Add(10 * time.Millisecond) // calls and events take time
 		st := m.stackAt(o.a)
@@ -1641,7 +1690,7 @@ func newModel(t *testing.T) *model {
 	b, c, log := book(t)
 	m := &model{t: t, b: b, c: c, log: log, leases: map[string]string{}, starts: map[string]int{}, headroom: plenty,
 		open: openIssues(), guesses: map[string]*mguess{}, outcomes: map[string]int{}, several: map[string]int{}, diff: os.Getenv("HEADROOM_MODEL_DIFF") == "1",
-		polled: map[string]time.Time{}}
+		polled: map[string]time.Time{}, failed: map[string]string{}, expires: map[string]time.Time{}}
 	b.Observe(m.snapshot())
 	return m
 }
@@ -1740,7 +1789,7 @@ func TestTheLeaseModel(t *testing.T) {
 		for _, k := range []string{"hit", "miss", "miss other", "takeover", "flicker",
 			"queue: held back", "queue: granted", "queue: granted ahead", "queue: requeued", "queue: ended unpolled",
 			"queue: takeover held", "start: already runs", "reply lost: released", "reply lost: kept", "reply lost: dropped",
-			"raw up: undecided", "raw up: undecided, verdict kept", "raw up: decided, another up open"} {
+			"raw up: undecided", "raw up: undecided, verdict kept", "raw up: decided, another up open", "up: failed pull"} {
 			if outcomes[k] == 0 {
 				t.Errorf("no %s ran: %v", k, outcomes)
 			}
@@ -1876,6 +1925,23 @@ func TestTheLeaseModelOn222(t *testing.T) {
 		if f := play(t, ops); f != nil {
 			t.Errorf("#222, %s:\n%s", name, f.msg)
 		}
+	}
+}
+
+// TestTheLeaseModelOn330 plays seed 0's shape, shrunk: w1's up of app fails
+// its pull and starts nothing; a raw up starts c1, which that up keeps
+// undecided until its lease lapses. Its window gave a flicker its
+// allowance: the lapsed lease does not vouch for c1, which is ungated.
+func TestTheLeaseModelOn330(t *testing.T) {
+	ops := []op{
+		{0 | rawStart, 2, 0}, // w1: compose up app fails its pull
+		{8 | rawStart, 0, 0}, // a raw up starts c1
+		{10, 0, 0},           // tick: undecided
+		{9, 0, 0},            // wait 1m
+		{9, 0, 0},            // wait 1m: the up lapses, c1 is ungated
+	}
+	if f := play(t, ops); f != nil {
+		t.Errorf("#330:\n%s", f.msg)
 	}
 }
 

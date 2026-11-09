@@ -584,6 +584,25 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 	}
 }
 
+// Podman's compat /events, recorded from 6.1 around podman run --rm alpine
+// true and podman run -d --name x, then podman stop x: it takes Docker's
+// filter, names the actions as Docker does, and keeps the labels and name
+// in Actor.Attributes (#67).
+func TestEventsReadPodmansStream(t *testing.T) {
+	sock, _ := engine(t, map[string]string{docker.EventsPath: "events-podman.jsonl"})
+	var got []string
+	_ = docker.New(sock, nil).Events(context.Background(), 0, 0, func(action, id string, timeNano int64, attrs map[string]string) {
+		got = append(got, fmt.Sprint(action, " ", id[len(id)-1:], " ", attrs["name"], " ", attrs["dev.headroom.lease"], " ", timeNano))
+	})
+	want := []string{
+		"start 1 quick lease-1-2 1794208345991668809", "die 1 quick lease-1-2 1794208345993222684",
+		"start 2 x lease-3-4 1794208346170808303", "die 2 x lease-3-4 1794208357292843244",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
 // A reconnect asks for the events since a time, as Docker reads it:
 // seconds, and nine digits of nanoseconds (#146).
 func TestEventsAskForThoseSinceATime(t *testing.T) {

@@ -272,6 +272,61 @@ func TestAPIFailureIsAnError(t *testing.T) {
 	}
 }
 
+// pad pads the JSON in testdata file name with trailing spaces to n bytes.
+func pad(t *testing.T, name string, n int) string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.TrimSpace(string(b))
+	return body + strings.Repeat(" ", n-len(body))
+}
+
+// An Engine API reply is read up to 16 MiB: a longer one is an error, so a
+// broken or hostile engine cannot make headroom read without end (#275).
+func TestAnOversizedReplyIsAnError(t *testing.T) {
+	sock, _ := engine(t, map[string]string{"/info": "info.json", "/containers/json": pad(t, "containers.json", 16<<20+1)})
+	_, err := docker.New(sock, fakeVMs{}).Collect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "GET /containers/json: response over 16 MiB") {
+		t.Fatalf("Collect: %v, want a response over 16 MiB", err)
+	}
+	sock, _ = engine(t, map[string]string{
+		"/info":            "info.json",
+		"/containers/json": pad(t, "containers.json", 16<<20),
+		"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
+	})
+	if d := collect(t, docker.New(sock, fakeVMs{})); len(d.Containers) != 1 || d.Containers[0].MemoryBytes != 69210112 {
+		t.Fatalf("a reply of 16 MiB: containers = %+v", d.Containers)
+	}
+}
+
+// An oversized stats reply drops only that container's stats, as a failed
+// stats call does.
+func TestAnOversizedStatsReplyKeepsTheContainer(t *testing.T) {
+	list, err := os.ReadFile("testdata/containers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHuge := `[{"Id":"huge1","Names":["/huge"],"Image":"alpine"},` + strings.TrimPrefix(strings.TrimSpace(string(list)), "[")
+	sock, _ := engine(t, map[string]string{
+		"/info":            "info.json",
+		"/containers/json": withHuge,
+		"/containers/" + fixtureID + "/stats?stream=false&one-shot=true": "stats.json",
+		"/containers/huge1/stats?stream=false&one-shot=true":             pad(t, "stats.json", 16<<20+1),
+	})
+	d := collect(t, docker.New(sock, fakeVMs{}))
+	if len(d.Containers) != 2 {
+		t.Fatalf("containers = %+v, want both", d.Containers)
+	}
+	if huge := d.Containers[0]; huge.ID != "huge1" || huge.MemoryBytes != 0 || huge.CPUPercent != nil {
+		t.Errorf("oversized container = %+v, want it listed with no memory", huge)
+	}
+	if healthy := d.Containers[1]; healthy.ID != fixtureID || healthy.MemoryBytes != 69210112 {
+		t.Errorf("healthy container = %+v", healthy)
+	}
+}
+
 // A container whose stats fail with anything but Docker's 404 is still
 // running: it stays listed, attributed, with no memory when it has no
 // earlier reading (#267). The others are unaffected.

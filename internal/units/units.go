@@ -23,3 +23,18 @@ func Size(b uint64) string {
 	}
 	return fmt.Sprintf("%d B", b)
 }
+
+// MaxBytes bounds every byte count headroom adds up: far above any Mac's
+// memory, so a bogus size an engine or model server reports only shrinks
+// headroom, and the arithmetic, int64 conversions included, cannot wrap.
+const MaxBytes = uint64(1) << 42
+
+// AddSat returns a + b, saturating at MaxBytes. Either argument may be
+// above MaxBytes.
+func AddSat(a, b uint64) uint64 {
+	a, b = min(a, MaxBytes), min(b, MaxBytes)
+	if b >= MaxBytes-a {
+		return MaxBytes
+	}
+	return a + b
+}

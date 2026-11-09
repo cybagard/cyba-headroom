@@ -15,3 +15,28 @@ func TestSize(t *testing.T) {
 		}
 	}
 }
+
+func TestAddSat(t *testing.T) {
+	const max64 = ^uint64(0)
+	for _, c := range []struct{ a, b, want uint64 }{
+		{0, 0, 0},
+		{1, 2, 3},
+		{0, 1 << 42, 1 << 42},
+		{1<<42 - 1, 1, 1 << 42},
+		{1 << 42, 1, 1 << 42},
+		{1, 1 << 42, 1 << 42},
+		{max64, 0, 1 << 42},
+		{0, max64, 1 << 42},
+		{max64, 1, 1 << 42},
+		{1, max64, 1 << 42},
+		{max64, max64, 1 << 42},
+		{1 << 63, 1 << 63, 1 << 42},
+	} {
+		if got := AddSat(c.a, c.b); got != c.want {
+			t.Errorf("AddSat(%d, %d) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+	if MaxBytes != 1<<42 {
+		t.Errorf("MaxBytes = %d", MaxBytes)
+	}
+}

@@ -483,7 +483,13 @@ func notRunning(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
-// get decodes the answer to GET path on the engine c reaches into v.
+// maxAPI bounds an Engine API reply: far above any real one (a /info is
+// ~10 KB), so a broken or hostile engine cannot make headroom read without
+// end (#275).
+const maxAPI = 16 << 20
+
+// get decodes the answer to GET path on the engine c reaches into v. A reply
+// over maxAPI is an error.
 func get(ctx context.Context, c *http.Client, path string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
@@ -497,14 +503,21 @@ func get(ctx context.Context, c *http.Client, path string, v any) error {
 	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/containers/") {
 		// Docker's own answer, not any proxy's 404.
 		var e struct{ Message string }
-		if json.NewDecoder(resp.Body).Decode(&e) == nil && strings.Contains(strings.ToLower(e.Message), "no such container") {
+		if json.NewDecoder(io.LimitReader(resp.Body, maxAPI)).Decode(&e) == nil && strings.Contains(strings.ToLower(e.Message), "no such container") {
 			return fmt.Errorf("docker: GET %s: %w", path, ErrNoSuchContainer)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("docker: GET %s: %s", path, resp.Status)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxAPI+1))
+	if err != nil {
+		return fmt.Errorf("docker: GET %s: %w", path, err)
+	}
+	if len(b) > maxAPI {
+		return fmt.Errorf("docker: GET %s: response over %d MiB", path, maxAPI>>20)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("docker: GET %s: %w", path, err)
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
 )
 
 // Params are the budget inputs that are configured rather than measured.
@@ -33,7 +34,8 @@ type Params struct {
 
 // Compute returns the budget for s. A source with no reading yet is listed
 // in Unknown and counts as 0; a stale source's last good reading is used and
-// the source is listed in Stale.
+// the source is listed in Stale. Every sum saturates at units.MaxBytes, so a
+// bogus size an engine or VM reports only shrinks headroom (#275).
 func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	var b protocol.Budget
 	// Each component's host cost is removed from host used to leave the
@@ -42,11 +44,11 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	var footprints uint64
 	add := func(c protocol.BudgetComponent) {
 		b.Components = append(b.Components, c)
-		b.ReservedBytes += c.ReservedBytes
+		b.ReservedBytes = units.AddSat(b.ReservedBytes, c.ReservedBytes)
 		if c.UsedBytes == nil {
 			footprintsKnown = false
 		} else {
-			footprints += *c.UsedBytes
+			footprints = units.AddSat(footprints, *c.UsedBytes)
 		}
 	}
 	if s.Host == nil {
@@ -110,7 +112,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		base.UsedBytes = &used
 	}
 	b.Components = append(b.Components, base)
-	b.ReservedBytes += base.ReservedBytes
+	b.ReservedBytes = units.AddSat(b.ReservedBytes, base.ReservedBytes)
 
 	for _, name := range []string{"host", "docker", "tart", "podman", "vms", "lmstudio", "ollama"} {
 		if s.Sources[name].Stale {
@@ -137,14 +139,15 @@ func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
 	var used uint64
 	known := true
 	for _, vm := range t.VMs {
-		r := vm.SizeBytes(p.DefaultTartBytes)
+		r := min(vm.SizeBytes(p.DefaultTartBytes), units.MaxBytes)
 		if vm.FootprintBytes == nil {
 			known = false
 		} else {
-			used += *vm.FootprintBytes
-			r = max(r, *vm.FootprintBytes)
+			fp := min(*vm.FootprintBytes, units.MaxBytes)
+			used = units.AddSat(used, fp)
+			r = max(r, fp)
 		}
-		c.ReservedBytes += r
+		c.ReservedBytes = units.AddSat(c.ReservedBytes, r)
 	}
 	if known {
 		c.UsedBytes = &used
@@ -169,7 +172,7 @@ func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetCompo
 		}) {
 			continue
 		}
-		fp += vm.FootprintBytes
+		fp = units.AddSat(fp, vm.FootprintBytes)
 		n++
 	}
 	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}, n > 0
@@ -180,7 +183,7 @@ func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetCompo
 func otherVMs(v *protocol.VMs) protocol.BudgetComponent {
 	var fp uint64
 	for _, vm := range v.Other {
-		fp += vm.FootprintBytes
+		fp = units.AddSat(fp, vm.FootprintBytes)
 	}
 	return protocol.BudgetComponent{Name: "other_vms", ReservedBytes: fp, UsedBytes: &fp}
 }
@@ -218,11 +221,11 @@ func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 		need = p.PodmanOverheadBytes
 	}
 	for _, ct := range d.Containers {
-		need += ct.MemoryBytes
+		need = units.AddSat(need, ct.MemoryBytes)
 	}
 	c.ReservedBytes = need
 	if d.VMError == "" && d.VMRunning {
-		used := d.VMFootprintBytes
+		used := min(d.VMFootprintBytes, units.MaxBytes)
 		c.UsedBytes = &used
 		c.ReservedBytes = max(need, used)
 	}
@@ -235,7 +238,7 @@ func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 	var sizes uint64
 	for _, m := range l.Models {
-		sizes = addSize(sizes, m.SizeBytes)
+		sizes = units.AddSat(sizes, m.SizeBytes)
 	}
 	return modelServer("lmstudio", l.Running, l.FootprintBytes, p.LMStudioIdleBytes, sizes)
 }
@@ -245,24 +248,9 @@ func lmstudio(l *protocol.LMStudio, p Params) protocol.BudgetComponent {
 func ollama(o *protocol.Ollama, p Params) protocol.BudgetComponent {
 	var sizes uint64
 	for _, m := range o.Models {
-		sizes = addSize(sizes, m.SizeBytes)
+		sizes = units.AddSat(sizes, m.SizeBytes)
 	}
 	return modelServer("ollama", o.Running, o.FootprintBytes, p.OllamaIdleBytes, sizes)
-}
-
-// maxSizes bounds a model server's summed model sizes, as policy's maxBytes
-// bounds a request: far above any Mac's memory, so a bogus size (another
-// user's process may answer /api/ps) only shrinks headroom and the budget's
-// arithmetic cannot wrap.
-const maxSizes = uint64(1) << 42
-
-// addSize adds a model's size to sizes (at most maxSizes), saturating at
-// maxSizes.
-func addSize(sizes, size uint64) uint64 {
-	if size >= maxSizes-sizes {
-		return maxSizes
-	}
-	return sizes + size
 }
 
 // modelServer reserves a model server's idle size plus its loaded models'

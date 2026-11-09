@@ -7,6 +7,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
 )
 
 const gib = uint64(1 << 30)
@@ -178,5 +179,24 @@ func TestLeasedFallsBackOnlyWithoutEvidence(t *testing.T) {
 	if len(u.Containers) != 1 || u.Containers[0].Name != "both" || u.Containers[0].Reason != attribution.Ambiguous ||
 		len(u.TartVMs) != 1 || u.TartVMs[0].Name != "orphan" || u.TartVMs[0].Reason != attribution.NoMatch || u.ContainerMemoryBytes != gib {
 		t.Fatalf("unattributed = %+v", u)
+	}
+}
+
+// Sizes an engine or Tart reports past any Mac's memory saturate their
+// totals at units.MaxBytes rather than wrap to a small sum (#275).
+func TestAbsurdSizesSaturateTheTotals(t *testing.T) {
+	s := snapshot()
+	s.Engines[0].Containers[0].MemoryBytes = ^uint64(0)
+	s.Engines[0].Containers[1].MemoryBytes = 2
+	s.Tart.VMs[0].LaunchCwd = "/Users/dev/w/fix-login"
+	s.Tart.VMs[0].MemoryBytes = 1 << 63
+	s.Tart.VMs[0].FootprintBytes = u64(1 << 63)
+	s.Tart.VMs[1].LaunchCwd = "/Users/dev/w/fix-login"
+	s.Tart.VMs[1].MemoryBytes = 1 << 63
+	s.Tart.VMs[1].FootprintBytes = u64(1 << 63)
+	w := attribution.Attribute(s).Worktrees[0]
+	if w.ContainerMemoryBytes != units.MaxBytes || w.TartMemoryBytes != units.MaxBytes ||
+		w.TartFootprintBytes == nil || *w.TartFootprintBytes != units.MaxBytes {
+		t.Fatalf("totals = %d, %d, %v", w.ContainerMemoryBytes, w.TartMemoryBytes, w.TartFootprintBytes)
 	}
 }

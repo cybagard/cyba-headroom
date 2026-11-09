@@ -76,6 +76,7 @@ type Env struct {
 	ask        func(config.Config, protocol.CheckRequest) (*protocol.Decision, error) // askDaemon
 	release    func(config.Config, string) error                                      // releaseLease
 	ancestors  func() []int                                                           // shim.Ancestors
+	parentSelf func() string                                                          // shim.ParentSelf
 	getwd      func() (string, error)                                                 // os.Getwd
 	stat       func(string) (fs.FileInfo, error)                                      // os.Stat
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus

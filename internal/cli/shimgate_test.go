@@ -59,6 +59,8 @@ type shimRig struct {
 	// ping stands in for the daemon's ping when set; else it answers.
 	ping  func() error
 	pings int
+	// parentSelf stands in for shim.ParentSelf: the parent's marker.
+	parentSelf string
 }
 
 func newShimRig(t testing.TB) *shimRig {
@@ -135,9 +137,10 @@ func (r *shimRig) run(argv ...string) (code int, stderr string) {
 			r.asked = append(r.asked, req)
 			return r.ask(req)
 		},
-		ancestors: func() []int { return []int{4321, 1} },
-		getwd:     r.getwd,
-		now:       func() time.Time { return r.now },
+		ancestors:  func() []int { return []int{4321, 1} },
+		parentSelf: func() string { return r.parentSelf },
+		getwd:      r.getwd,
+		now:        func() time.Time { return r.now },
 		wait: func(d time.Duration) os.Signal {
 			if d == 0 { // is a signal pending?
 				return r.pending
@@ -3237,5 +3240,43 @@ func TestShimGateThePodmanDockerWrapper(t *testing.T) {
 	r.env = r.execEnv
 	if code, _ := r.run("podman", "pod", "start", "web"); code != 0 || r.execed != filepath.Join(r.dir, "podman") || len(r.asked) != 1 {
 		t.Fatalf("re-entry: exit %d, exec %q, asked %d", code, r.execed, len(r.asked))
+	}
+}
+
+// Podman runs its compose provider, docker-compose, as its child: the
+// provider's shim skips the call the podman shim checked, whose lease
+// stands. A marker naming any other process is still checked (#354).
+func TestShimGateTheCheckedPodmansProvider(t *testing.T) {
+	const podman = "4321@1700000000.000001" // the podman the shim exec'd into
+	for name, c := range map[string]struct {
+		parent string // the provider's parent's marker
+		asked  int
+	}{
+		"podman is the parent":        {podman, 1},
+		"podman is the grandparent":   {"4400@1700000000.000002", 2},
+		"a stale marker (reused PID)": {"4321@1700000009.000001", 2},
+	} {
+		r := newShimRig(t)
+		r.ask = allow
+		if code, stderr := r.run("podman", "compose", "-p", "shop", "up", "-d"); code != 0 || len(r.asked) != 1 {
+			t.Fatalf("%s: podman: exit %d, asked %d, stderr %q", name, code, len(r.asked), stderr)
+		}
+		// The provider, a process of its own, in the environment the shim
+		// exec'd podman with.
+		marker := "HEADROOM_SHIM_CHECKED=" + shim.Self()
+		i := slices.Index(r.execEnv, marker)
+		if i < 0 {
+			t.Fatalf("%s: podman's env lacks %q: %q", name, marker, r.execEnv)
+		}
+		r.env = slices.Clone(r.execEnv)
+		r.env[i] = "HEADROOM_SHIM_CHECKED=" + podman
+		r.parentSelf = c.parent
+		code, _ := r.run("docker-compose", "-p", "shop", "up", "-d")
+		if code != 0 || r.execed != filepath.Join(r.dir, "docker-compose") || len(r.asked) != c.asked {
+			t.Errorf("%s: exit %d, exec %q, asked %d, want %d", name, code, r.execed, len(r.asked), c.asked)
+		}
+		if len(r.released) != 0 {
+			t.Errorf("%s: released %q", name, r.released)
+		}
 	}
 }

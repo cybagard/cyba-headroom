@@ -34,8 +34,15 @@ func Ancestors() []int {
 
 // Self names this process for HEADROOM_SHIM_CHECKED: its PID and start
 // time, which an exec keeps and a reused PID does not.
-func Self() string {
-	pid := os.Getpid()
+func Self() string { return selfOf(os.Getpid()) }
+
+// ParentSelf is the parent's Self: a provider that podman runs as its
+// child carries the marker of the shim that exec'd into podman (#354).
+func ParentSelf() string { return selfOf(os.Getppid()) }
+
+// selfOf names process pid as Self does, or by its PID alone if its start
+// time cannot be read.
+func selfOf(pid int) string {
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return strconv.Itoa(pid)

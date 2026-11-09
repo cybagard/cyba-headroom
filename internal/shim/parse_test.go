@@ -133,6 +133,24 @@ func TestParse(t *testing.T) {
 		{"docker compose -- -- up", Call{}},
 		{"docker compose -- -p x -- up -d", Call{}},
 		{"docker compose --dry-run -- -p x up -d", Call{}},
+		// Round 1: help, version and further "--" after the first are ignored
+		// too; the call fails only when "--" is right before the command.
+		{"docker compose -- -h up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- --help up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -h=false up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- --version up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -p x -h up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- --help -p x up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -p x -- -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -- -p x up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -p x -- -- -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -D up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -- -x up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeDetached: true}},
+		{"docker compose -f c.yml -- -h up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", ComposeFiles: []string{"c.yml"}, ComposeDetached: true}},
+		{"docker compose -p x -- -- -p y up -d", Call{Kind: "compose", Op: "up", Command: "docker compose up", Target: "x", ComposeDetached: true}},
+		{"docker compose -- -- up -d", Call{}},
+		{"docker compose -- -p -- up -d", Call{}},
+		{"docker compose -- -p x -- -p y -- up -d", Call{}},
 		// Podman's pods, kube play and machines (#230): one cost each, keyed
 		// by the pod, the kube files' pods or the machine.
 		{"podman pod start web", Call{Kind: "pod", Op: "start", Command: "podman pod start web", Target: "web"}},
@@ -341,6 +359,24 @@ func TestDockerComposeLeadingRun(t *testing.T) {
 		{"-- -- up", want{}},
 		{"-- -p x -- up -d", want{}},
 		{"--dry-run -- -p x up -d", want{}},
+		// Round 1: help, version and further "--" after the first are ignored
+		// too; the call fails only when "--" is right before the command.
+		{"-- -h up -d", up("", "")},
+		{"-- --help up -d", up("", "")},
+		{"-- -h=false up -d", up("", "")},
+		{"-- --version up -d", up("", "")},
+		{"-- -p x -h up -d", up("", "")},
+		{"-- --help -p x up -d", up("", "")},
+		{"-- -p x -- -p y up -d", up("", "")},
+		{"-- -- -p x up -d", up("", "")},
+		{"-- -p x -- -- -p y up -d", up("", "")},
+		{"-- -x up -d", up("", "")},
+		{"-f c.yml -- -h up -d", want{compose: true, files: []string{"c.yml"}}},
+		{"-p x -- -- -p y up -d", want{compose: true, target: "x"}},
+		{"-- -- up -d", want{}},
+		{"-- -p -- up -d", want{}},
+		{"-- -p x -- -p y -- up -d", want{}},
+		{"-- -H S -- -p x up -d", up("", "")},
 	} {
 		args := strings.Fields(strings.ReplaceAll(tc.argv, "S", sock))
 		c := Parse("docker-compose", args)
@@ -590,6 +626,7 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"compose", "--", "--dry-run", "up", "-d"}, []string{"compose", "--dry-run", "up", "-d"}},
 		{[]string{"compose", "--dry-run", "--", "-p", "x", "up", "-d"}, nil},
 		{[]string{"compose", "--", "up", "-d"}, nil},
+		{[]string{"compose", "-f", "c.yml", "--", "-h", "--", "-p", "y", "up", "-d"}, []string{"compose", "--dry-run", "-f", "c.yml", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -616,6 +653,7 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 		{[]string{"-H", "h", "--", "-H", "x", "-p", "y", "up", "-d"}, []string{"-H", "h", "--dry-run", "up", "-d"}},
 		{[]string{"--", "--dry-run", "up", "-d"}, []string{"--dry-run", "up", "-d"}},
 		{[]string{"--", "-H", "h", "up", "-d"}, nil},
+		{[]string{"-p", "x", "--", "--", "--version", "-p", "y", "up", "-d"}, []string{"--dry-run", "-p", "x", "up", "-d"}},
 	} {
 		got, ok := DryRun("docker-compose", tc.args)
 		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
@@ -686,6 +724,8 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 		{"docker", []string{"--context", "x", "compose", "--", "-p", "y", "-H", "h", "up"}, []string{"--context", "x", "compose", "config", "--format", "json"}},
 		{"docker-compose", []string{"-f", "c.yml", "--", "-p", "y", "up", "-d"}, []string{"-f", "c.yml", "config", "--format", "json"}},
 		{"docker-compose", []string{"-H", "h", "--", "-p", "y", "up", "-d"}, []string{"-H", "h", "config", "--format", "json"}},
+		{"docker", []string{"compose", "-f", "c.yml", "--", "--help", "--", "-p", "y", "up", "-d"}, []string{"compose", "-f", "c.yml", "config", "--format", "json"}},
+		{"docker-compose", []string{"-p", "x", "--", "--", "--version", "-p", "y", "up", "-d"}, []string{"-p", "x", "config", "--format", "json"}},
 	} {
 		if got, ok := ComposeConfig(tc.name, tc.args, false); !ok || !slices.Equal(got, tc.want) {
 			t.Errorf("ComposeConfig(%s %q) = %q, %v; want %q", tc.name, tc.args, got, ok, tc.want)

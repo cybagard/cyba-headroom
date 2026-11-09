@@ -491,24 +491,59 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 }
 
 // composeDashDash returns a compose call's args (those after the compose
-// word) without a "--" among its global options and the options after it,
-// which Compose checks but ignores, engine options included (#324). ok is
-// false when no option follows the "--": the call fails. An unknown option
-// is guessed past, so at worst a call that fails is gated.
+// word) without a "--" among its global options and the words after it up
+// to the command, which Compose ignores: options, engine ones included,
+// help, version and more "--" (#324). ok is false when there is no command,
+// or "--" is right before it: the call fails. An unknown option is guessed
+// past, so at worst a call that fails is gated.
 func composeDashDash(args []string) (out []string, ok bool) {
 	rest, res, _ := scanPast(args, composeGlobal, isComposeCommand, nil)
 	if res != endOfFlags {
 		return args, true
 	}
-	head := args[:len(args)-len(rest)-1]
-	if len(rest) == 0 || len(rest[0]) < 2 || rest[0][0] != '-' || rest[0] == "--" {
+	d := len(args) - len(rest) - 1 // the "--"
+	table := withFlags(composeGlobal, composeDocker)
+	i := d + 1
+	for i < len(args) && len(args[i]) > 1 && args[i][0] == '-' {
+		i += optionLen(args[i:], table)
+	}
+	if i >= len(args) || args[i-1] == "--" {
 		return nil, false
 	}
-	rest, res, _ = scanPast(rest, withFlags(composeGlobal, composeDocker), isComposeCommand, nil)
-	if res != scanned || len(rest) == 0 {
-		return nil, false // another "--", --help, or no command
+	return slices.Concat(args[:d], args[i:]), true
+}
+
+// optionLen is how many words the option at a[0] takes, its value's
+// included, as scanPast reads them; a "--" and help take none. An unknown
+// one takes a value unless the next word is an option or a command.
+func optionLen(a []string, flags flagSet) int {
+	w, takes := a[0], false
+	unknown := func() bool {
+		return len(a) > 1 && !strings.HasPrefix(a[1], "-") && !isComposeCommand(a[1])
 	}
-	return slices.Concat(head, rest), true
+	switch {
+	case w == "--":
+	case strings.HasPrefix(w, "--"):
+		f, _, joined := strings.Cut(w, "=")
+		t, known := flags[f]
+		takes = !joined && (known && t || !known && unknown())
+	default:
+		for j := 1; j < len(w); j++ {
+			t, known := flags["-"+w[j:j+1]]
+			if !known {
+				takes = unknown()
+				break
+			}
+			if t || strings.HasPrefix(w[j+1:], "=") {
+				takes = t && j+1 == len(w) // else its value is joined
+				break
+			}
+		}
+	}
+	if takes {
+		return 2
+	}
+	return 1
 }
 
 // withoutDashDash is a docker compose call's args, whose compose options

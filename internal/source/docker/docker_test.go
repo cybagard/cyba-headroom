@@ -630,7 +630,8 @@ func TestEventsReadPodmansStream(t *testing.T) {
 
 // Podman sends no stop (#335): a Podman engine's stream asks for its
 // restarts too, and a die then a start with no restart between is a stop
-// then a start, the stop dated at the die and carrying its attributes. A
+// then a start, the stop dated at the die and carrying the start's
+// attributes: the container's labels and name, as its die's. A
 // restart policy's restart (die, restart, start) and the API's (restart,
 // die, start) make up none, and no restart is delivered.
 func TestEventsMakeUpPodmansStops(t *testing.T) {
@@ -642,12 +643,48 @@ func TestEventsMakeUpPodmansStops(t *testing.T) {
 	want := []string{
 		"start 1 quick  1794208345991668809", "die 1 quick 0 1794208345993222684",
 		"start 2 x  1794208346170808303", "die 2 x 137 1794208357292843244",
-		"die 3 db 137 1794208360100000000", "stop 3 db 137 1794208360100000000", "start 3 db  1794208361200000000",
+		"die 3 db 137 1794208360100000000", "stop 3 db  1794208360100000000", "start 3 db  1794208361200000000",
 		"die 4 crashy 1 1794208362100000000", "start 4 crashy  1794208362400000000",
 		"die 5 api 137 1794208363200000000", "start 5 api  1794208363300000000",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// A Podman die is remembered for a minute (#335): a start within it makes
+// up a stop, and one after it none, the readings having seen the container
+// exit by then.
+func TestEventsMakeUpNoStopForAnOldDie(t *testing.T) {
+	const t0 = 1794208360000000000
+	ev := func(action, id string, at int64) string {
+		return fmt.Sprintf(`{"Type":"container","Action":%q,"Actor":{"ID":%q,"Attributes":{"name":%q}},"timeNano":%d}`, action, id, id, at)
+	}
+	sock, _ := engine(t, map[string]string{docker.PodmanEventsPath: strings.Join([]string{
+		ev("die", "old", t0), ev("die", "new", t0+2e9),
+		ev("start", "new", t0+59e9), ev("start", "old", t0+61e9),
+	}, "\n") + "\n"})
+	var got []string
+	_ = docker.NewKind(sock, protocol.EnginePodman).Events(context.Background(), 0, 0, func(action, id string, timeNano int64, _ map[string]string) {
+		got = append(got, fmt.Sprint(action, " ", id, " ", (timeNano-t0)/1e9))
+	})
+	want := []string{"die old 0", "die new 2", "stop new 2", "start new 59", "start old 61"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// Containers that die and never start again (run --rm, compose down) are
+// forgotten a minute after their die, so a stream that lives for days
+// holds a minute's dies, not every one since it opened (#335).
+func TestEventsForgetPodmansOldDies(t *testing.T) {
+	ids := make([]string, 1000)
+	for i := range ids {
+		ids[i] = fmt.Sprint("c", i)
+	}
+	peak, last := docker.RememberedDies(ids, 1794208360000000000, 61e9)
+	if peak > 61 || last != 0 {
+		t.Fatalf("dies held: at most %d, then %d; want at most a minute's (61), then none", peak, last)
 	}
 }
 

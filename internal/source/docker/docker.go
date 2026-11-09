@@ -656,14 +656,7 @@ func (s *Source) Events(ctx context.Context, since, until int64, fn func(action,
 		return fmt.Errorf("docker: GET /events: %s", resp.Status)
 	}
 	dec := json.NewDecoder(resp.Body)
-	// On Podman, the containers that died and have not started since, and
-	// those restarting (a restart, its start not yet): a die then a start
-	// with no restart is a stop (#335).
-	type died struct {
-		at    int64
-		attrs map[string]string
-	}
-	dies, restarting := map[string]died{}, map[string]bool{}
+	stops := newPodmanStops()
 	for {
 		var ev struct {
 			Type   string
@@ -686,28 +679,63 @@ func (s *Source) Events(ctx context.Context, since, until int64, fn func(action,
 		}
 		id, at := ev.Actor.ID, cmp.Or(ev.TimeNano, ev.Time*1e9)
 		if s.podman {
-			switch ev.Action {
-			case "restart":
-				delete(dies, id)
-				restarting[id] = true
-			case "die":
-				if !restarting[id] {
-					dies[id] = died{at, ev.Actor.Attributes}
-				}
-			case "stop":
-				delete(dies, id)
-			case "start":
-				if d, ok := dies[id]; ok {
-					fn("stop", id, d.at, d.attrs)
-				}
-				delete(dies, id)
-				delete(restarting, id)
+			if stopAt, ok := stops.see(ev.Action, id, at); ok {
+				fn("stop", id, stopAt, ev.Actor.Attributes)
 			}
 		}
 		if ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die" {
 			fn(ev.Action, id, at, ev.Actor.Attributes)
 		}
 	}
+}
+
+// dieHorizon is how long podmanStops remembers a die, by the engine's
+// clock. A made-up stop matters only to a start within a reading or two of
+// its die (5 s each): later, the readings have seen the container exit. A
+// minute covers those with room, and bounds what a stream that lives for
+// days holds: containers that die and never start again (run --rm,
+// compose down) are forgotten (#335).
+const dieHorizon = int64(time.Minute)
+
+// podmanStops makes up the stops a Podman engine does not send (#335): a
+// die then a start with no restart between is a stop. It holds the
+// containers that died within dieHorizon and have not started since, by
+// their die's time, and those restarting (a restart, its start not yet).
+type podmanStops struct {
+	dies       map[string]int64
+	restarting map[string]bool
+}
+
+func newPodmanStops() *podmanStops {
+	return &podmanStops{dies: map[string]int64{}, restarting: map[string]bool{}}
+}
+
+// see takes a Podman event of container id at time at, and returns the
+// time of the stop to make up before it, if any: its die's.
+func (p *podmanStops) see(action, id string, at int64) (stopAt int64, ok bool) {
+	if at > 0 {
+		for k, died := range p.dies {
+			if died < at-dieHorizon {
+				delete(p.dies, k)
+			}
+		}
+	}
+	switch action {
+	case "restart":
+		delete(p.dies, id)
+		p.restarting[id] = true
+	case "die":
+		if !p.restarting[id] {
+			p.dies[id] = at
+		}
+	case "stop":
+		delete(p.dies, id)
+	case "start":
+		stopAt, ok = p.dies[id]
+		delete(p.dies, id)
+		delete(p.restarting, id)
+	}
+	return stopAt, ok
 }
 
 // unixNano is a Unix time in ns as Docker reads one: seconds, and nine

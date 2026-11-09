@@ -76,6 +76,9 @@ func (e Env) withDefaults() Env {
 	if e.ancestors == nil {
 		e.ancestors = shim.Ancestors
 	}
+	if e.parentSelf == nil {
+		e.parentSelf = shim.ParentSelf
+	}
 	if e.getwd == nil {
 		e.getwd = os.Getwd
 	}
@@ -128,9 +131,11 @@ func dockerCLI(name string) bool { return name == "docker" || name == "docker-co
 // gate asks the daemon whether call c may start (R5, #28). Calls that start
 // nothing, calls already checked and calls to a remote engine are not asked
 // about; nor, failing open (R7), is anything when the config or the daemon
-// cannot answer.
+// cannot answer. A call is already checked when the marker names this
+// process (an exec kept it) or its parent: podman runs its compose provider
+// as its child (#354).
 func gate(e Env, name, bin string, c shim.Call, getenv func(string) string) gated {
-	if c.Kind == "" || getenv(shimCheckedVar) == shim.Self() {
+	if checked := getenv(shimCheckedVar); c.Kind == "" || checked == shim.Self() || checked != "" && checked == e.withDefaults().parentSelf() {
 		return gated{proceed: true}
 	}
 	// The engine, once and first: a remote one proceeds before the config

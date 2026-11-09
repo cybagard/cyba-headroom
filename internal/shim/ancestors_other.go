@@ -13,3 +13,6 @@ func Ancestors() []int { return []int{os.Getppid()} }
 
 // Self names this process for HEADROOM_SHIM_CHECKED: its PID.
 func Self() string { return strconv.Itoa(os.Getpid()) }
+
+// ParentSelf is the parent's Self: its PID.
+func ParentSelf() string { return strconv.Itoa(os.Getppid()) }

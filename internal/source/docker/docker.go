@@ -311,7 +311,7 @@ func (s *Source) vmCost(ctx context.Context, engines []protocol.Engine) {
 		for _, vm := range vms {
 			if e.Machine == "" && vm.Kind == vmproc.Docker || e.Machine != "" && vm.Kind == vmproc.Podman && vm.Name == e.Machine {
 				e.VMRunning = true
-				e.VMFootprintBytes = vm.FootprintBytes
+				e.VMFootprintBytes, e.VMSwappedBytes = vm.FootprintBytes, vm.SwappedBytes
 			}
 		}
 		if err == nil && !e.VMRunning && len(e.Containers) > 0 {

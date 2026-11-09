@@ -1,0 +1,89 @@
+{
+ "v": 2,
+ "t": "2026-10-18T14:52:04.917965+02:00",
+ "host": {
+  "total_bytes": 68719476736,
+  "used_bytes": 52316045312,
+  "compressor_bytes": 28628467712,
+  "compressed_bytes": 46802534400,
+  "pressure": "warn",
+  "free_percent": 47,
+  "swap_used_bytes": 1741553664,
+  "swapins_per_sec": 0,
+  "swapouts_per_sec": 0
+ },
+ "budget": {
+  "total_bytes": 68719476736,
+  "reserved_bytes": 57726001888,
+  "headroom_bytes": 10993474848,
+  "unaccounted_bytes": 12764110112,
+  "components": [
+   {
+    "name": "docker-desktop",
+    "reserved_bytes": 22629974512,
+    "used_bytes": 22629974512
+   },
+   {
+    "name": "tart",
+    "reserved_bytes": 34405615704,
+    "used_bytes": 34405615704
+   },
+   {
+    "name": "lmstudio",
+    "reserved_bytes": 690411672,
+    "used_bytes": 690411672
+   },
+   {
+    "name": "ollama",
+    "reserved_bytes": 0,
+    "used_bytes": 0
+   },
+   {
+    "name": "host_baseline",
+    "reserved_bytes": 0,
+    "used_bytes": 12764110112
+   }
+  ],
+  "stale": [
+   "docker",
+   "tart",
+   "podman",
+   "vms",
+   "lmstudio"
+  ]
+ },
+ "engines": [
+  {
+   "kind": "docker-desktop",
+   "socket": "/Users/dev/.docker/run/docker.sock",
+   "running": true,
+   "vm_running": true,
+   "vm_limit_bytes": 21994184704,
+   "vm_footprint_bytes": 22629974512,
+   "containers": [
+    {
+     "name": "app",
+     "image": "app:1",
+     "memory_bytes": 1174093824
+    }
+   ]
+  }
+ ],
+ "tart_vms": [
+  {
+   "name": "vm-a",
+   "os": "darwin",
+   "memory_bytes": 17179869184,
+   "footprint_bytes": 17219888160
+  },
+  {
+   "name": "vm-b",
+   "os": "darwin",
+   "memory_bytes": 17179869184,
+   "footprint_bytes": 17185727544
+  }
+ ],
+ "lmstudio": {
+  "footprint_bytes": 690411672
+ }
+}

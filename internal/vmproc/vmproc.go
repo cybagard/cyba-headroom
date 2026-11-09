@@ -13,11 +13,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,6 +50,9 @@ type VM struct {
 	// FootprintBytes is phys_footprint: what the host pays, as Activity
 	// Monitor shows it.
 	FootprintBytes uint64
+	// SwappedBytes is the part of the footprint macOS has compressed, at full
+	// size; nil when footprint(1) did not report it.
+	SwappedBytes *uint64
 	// CPUPercent is CPU use since the previous List, 100 = one core, as ps
 	// and docker stats count; nil on a process's first List or when its CPU
 	// time could not be read.
@@ -241,7 +246,7 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 	vms := make([]VM, 0, len(pids))
 	for _, pid := range pids {
 		id, err := f.identify(ctx, pid, tart)
-		var fp uint64
+		var fp Footprint
 		if err == nil {
 			fp, err = f.footprint(ctx, pid)
 		}
@@ -251,7 +256,7 @@ func (f *Finder) List(ctx context.Context) ([]VM, error) {
 			}
 			return nil, fmt.Errorf("vmproc: reading VM %d: %w", pid, err)
 		}
-		vms = append(vms, VM{PID: pid, Kind: id.kind, Name: id.name, FootprintBytes: fp})
+		vms = append(vms, VM{PID: pid, Kind: id.kind, Name: id.name, FootprintBytes: fp.Bytes, SwappedBytes: fp.SwappedBytes})
 	}
 	f.readCPU(ctx, vms)
 	return vms, nil
@@ -443,8 +448,18 @@ func printable(s string) string {
 	}, s)
 }
 
-func (f *Finder) footprint(ctx context.Context, pid int) (uint64, error) {
-	return ReadFootprint(ctx, f.sys, pid)
+// footprint reads a VM's phys_footprint and its compressed share, which only
+// the per-category table of --swapped gives (#311).
+func (f *Finder) footprint(ctx context.Context, pid int) (Footprint, error) {
+	out, err := f.sys.Run(ctx, footprintPath, "--swapped", "-f", "bytes", "-p", strconv.Itoa(pid))
+	if err != nil {
+		return Footprint{}, err
+	}
+	_, sum, err := ParseFootprint(out)
+	if err != nil {
+		return Footprint{}, fmt.Errorf("footprint %d: %w", pid, err)
+	}
+	return sum, nil
 }
 
 // Runner runs a command; System and Host implement it.
@@ -470,24 +485,114 @@ func ReadFootprints(ctx context.Context, r Runner, pids ...int) (uint64, error) 
 	if err != nil {
 		return 0, err
 	}
-	var total uint64
-	found := false
+	_, sum, err := ParseFootprint(out)
+	if err != nil {
+		return 0, fmt.Errorf("vmproc: footprint %v: %w", pids, err)
+	}
+	return sum.Bytes, nil
+}
+
+// Footprint is what footprint(1) reads of one process, or of several summed.
+type Footprint struct {
+	// Bytes is phys_footprint.
+	Bytes uint64
+	// DirtyBytes is the TOTAL row's Dirty column; 0 without the table
+	// (--noCategories).
+	DirtyBytes uint64
+	// SwappedBytes is the part of Dirty macOS has compressed, at full size:
+	// the (Swapped) column, which only --swapped prints; nil without it.
+	SwappedBytes *uint64
+}
+
+// footprintHeader is a process section's first line:
+// "com.apple.Virtualization.VirtualMachine [1234]: 64-bit    Footprint: 22627058136 B (…)".
+var footprintHeader = regexp.MustCompile(`\[(\d+)\]: .*Footprint: \d+ B`)
+
+// ParseFootprint reads footprint -f bytes output: each process's
+// phys_footprint and TOTAL row, and their sum. With several processes, each
+// one's TOTAL leaves out what it shares with the others and the Summary
+// section's TOTAL counts that once, so the sum's Dirty and Swapped are that
+// row's. It is an error if no phys_footprint line was read.
+func ParseFootprint(out []byte) (map[int]Footprint, Footprint, error) {
+	per := map[int]Footprint{}
+	var sum, summary Footprint
+	var cols []string
+	// pid is the process whose section this is, 0 in the summary; shared is
+	// a part of it that lists what processes share, whose TOTAL is left out.
+	var pid int
+	inSummary, shared, found := false, false, false
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
-		// "    phys_footprint: 1709280520 B", one per process
-		v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "phys_footprint:")
-		if !ok {
-			continue
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case strings.HasPrefix(line, "Summary Footprint:"):
+			pid, inSummary, shared = 0, true, false
+		case strings.HasPrefix(line, "Shared "):
+			shared = true
+		case footprintHeader.MatchString(line):
+			pid, _ = strconv.Atoi(footprintHeader.FindStringSubmatch(line)[1])
+			per[pid] = Footprint{}
+			shared = false
+		case strings.HasPrefix(line, "Dirty"):
+			cols = strings.Fields(line)
+		case strings.HasSuffix(line, "TOTAL") && !shared:
+			var row Footprint
+			if err := readTotal(&row, line, cols); err != nil {
+				return nil, Footprint{}, err
+			}
+			if inSummary {
+				summary = row
+			} else {
+				f := per[pid]
+				f.DirtyBytes, f.SwappedBytes = row.DirtyBytes, row.SwappedBytes
+				per[pid] = f
+			}
+		case strings.HasPrefix(line, "phys_footprint:") && !inSummary:
+			v := strings.TrimSpace(strings.TrimPrefix(line, "phys_footprint:"))
+			n, err := strconv.ParseUint(strings.TrimSuffix(v, " B"), 10, 64)
+			if err != nil {
+				return nil, Footprint{}, err
+			}
+			f := per[pid]
+			f.Bytes = n
+			per[pid] = f
+			sum.Bytes += n
+			found = true
 		}
-		n, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimSpace(v), " B"), 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("vmproc: footprint %v: %w", pids, err)
-		}
-		total += n
-		found = true
 	}
 	if !found {
-		return 0, fmt.Errorf("vmproc: footprint %v: no phys_footprint line", pids)
+		return nil, Footprint{}, errors.New("no phys_footprint line")
 	}
-	return total, nil
+	if inSummary {
+		sum.DirtyBytes, sum.SwappedBytes = summary.DirtyBytes, summary.SwappedBytes
+	} else if len(per) == 1 {
+		sum.DirtyBytes, sum.SwappedBytes = per[pid].DirtyBytes, per[pid].SwappedBytes
+	}
+	return per, sum, nil
+}
+
+// readTotal sets f's Dirty and Swapped from a TOTAL row, "22627058136 B
+// 1116258304 B 3358720 B 114688 B 3931 TOTAL", whose byte columns cols (the
+// header row: Dirty (Swapped) Clean Reclaimable Regions Category) names.
+func readTotal(f *Footprint, line string, cols []string) error {
+	fields := strings.Fields(line)
+	col := 0
+	for i := 0; i+1 < len(fields) && col < len(cols); i++ {
+		if fields[i+1] != "B" {
+			continue
+		}
+		n, err := strconv.ParseUint(fields[i], 10, 64)
+		if err != nil {
+			return fmt.Errorf("TOTAL row %q: %w", line, err)
+		}
+		switch cols[col] {
+		case "Dirty":
+			f.DirtyBytes = n
+		case "(Swapped)":
+			f.SwappedBytes = &n
+		}
+		col++
+		i++
+	}
+	return nil
 }

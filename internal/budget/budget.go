@@ -42,6 +42,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	// unaccounted rest; one unknown cost makes the rest unknown.
 	footprintsKnown := true
 	var footprints uint64
+	vc := &vmCost{ratio: compressionRatio(s.Host)}
 	add := func(c protocol.BudgetComponent) {
 		b.Components = append(b.Components, c)
 		b.ReservedBytes = units.AddSat(b.ReservedBytes, c.ReservedBytes)
@@ -56,7 +57,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	}
 	if s.Engines != nil {
 		for _, e := range s.Engines {
-			c := docker(e, p)
+			c := docker(e, p, vc)
 			c.Name = engineName(e, s.Engines)
 			add(c)
 		}
@@ -65,7 +66,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 		footprintsKnown = false
 	}
 	if s.Tart != nil {
-		add(tart(s.Tart, p))
+		add(tart(s.Tart, p, vc))
 	} else {
 		b.Unknown = append(b.Unknown, "tart")
 		footprintsKnown = false
@@ -74,7 +75,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	// source's status tells "none running" from "no reading yet". A VM
 	// whose engine is read is that engine's component's (#228).
 	if s.Podman != nil {
-		if c, ok := podman(s.Podman, s.Engines); ok {
+		if c, ok := podman(s.Podman, s.Engines, vc); ok {
 			add(c)
 		}
 	} else if st, ok := s.Sources["podman"]; ok && st.At.IsZero() {
@@ -83,7 +84,7 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	}
 	// Likewise the vms section is absent while every VM has an owner.
 	if s.VMs != nil {
-		add(otherVMs(s.VMs))
+		add(otherVMs(s.VMs, vc))
 	} else if st, ok := s.Sources["vms"]; ok && st.At.IsZero() {
 		b.Unknown = append(b.Unknown, "vms")
 		footprintsKnown = false
@@ -104,8 +105,10 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	base := protocol.BudgetComponent{Name: "host_baseline", ReservedBytes: p.HostBaselineBytes}
 	// Footprints count compressed pages at full size, host used at their
 	// compressed size: swap the compressor's share for its full size first.
+	// A VM's used memory counts its compressed share at compressed size
+	// (#311), so that share stays compressed here too.
 	if h := s.Host; h != nil && h.UsedBytes != nil && h.CompressorBytes != nil && h.CompressedBytes != nil && footprintsKnown {
-		whole := int64(*h.UsedBytes) - int64(*h.CompressorBytes) + int64(*h.CompressedBytes)
+		whole := int64(*h.UsedBytes) - int64(*h.CompressorBytes) + int64(*h.CompressedBytes) - int64(vc.credited)
 		un := whole - int64(footprints)
 		b.UnaccountedBytes = &un
 		used := uint64(max(un, 0))
@@ -130,11 +133,44 @@ func Compute(s *protocol.Snapshot, p Params) protocol.Budget {
 	return b
 }
 
+// vmCost credits VMs with what macOS saves by compressing them (#311). A
+// VM's compressed share, its swapped bytes, costs the host its full size
+// divided by the compressor's ratio, compressed ÷ compressor, host-wide.
+type vmCost struct {
+	// ratio is at least 1; 1 when unknown, which credits nothing.
+	ratio float64
+	// credited is what every VM's used memory was credited, in all.
+	credited uint64
+}
+
+// compressionRatio is the compressor's ratio, compressed ÷ compressor; 1
+// when either is unknown or the compressor is empty, and at least 1.
+func compressionRatio(h *protocol.Host) float64 {
+	if h == nil || h.CompressorBytes == nil || h.CompressedBytes == nil || *h.CompressorBytes == 0 {
+		return 1
+	}
+	return max(float64(*h.CompressedBytes)/float64(*h.CompressorBytes), 1)
+}
+
+// credit returns what compression saves of a VM whose footprint is fp:
+// its swapped share (nil = unknown, no credit), at most fp, less that share
+// at the compressor's ratio. It counts toward the credited total.
+func (v *vmCost) credit(swapped *uint64, fp uint64) uint64 {
+	if swapped == nil || v.ratio <= 1 {
+		return 0
+	}
+	sw := min(*swapped, fp)
+	c := sw - uint64(float64(sw)/v.ratio)
+	v.credited = units.AddSat(v.credited, c)
+	return c
+}
+
 // tart reserves each running VM's configured memory (R2), which the VM grows
 // into and does not give back, or its footprint when the hypervisor's
 // overhead puts it above that. One of unknown config reserves at least the
-// default (protocol.TartVM.SizeBytes, #277).
-func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
+// default (protocol.TartVM.SizeBytes, #277). Its compressed share is
+// credited (vmCost).
+func tart(t *protocol.Tart, p Params, vc *vmCost) protocol.BudgetComponent {
 	c := protocol.BudgetComponent{Name: "tart"}
 	var used uint64
 	known := true
@@ -144,8 +180,9 @@ func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
 			known = false
 		} else {
 			fp := min(*vm.FootprintBytes, units.MaxBytes)
-			used = units.AddSat(used, fp)
-			r = max(r, fp)
+			saved := vc.credit(vm.SwappedBytes, fp)
+			used = units.AddSat(used, fp-saved)
+			r = max(r, fp) - saved
 		}
 		c.ReservedBytes = units.AddSat(c.ReservedBytes, r)
 	}
@@ -162,8 +199,9 @@ func tart(t *protocol.Tart, p Params) protocol.BudgetComponent {
 // component (#228); with none left, there is no component. One the engine
 // could not read (vm_error) stays here too, as one with no engine does: for
 // that tick it counts twice, which errs toward a deny and never reserves
-// too little (#228, plan amendment 1).
-func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetComponent, bool) {
+// too little (#228, plan amendment 1). Their compressed share is credited
+// (vmCost).
+func podman(p *protocol.Podman, engines []protocol.Engine, vc *vmCost) (protocol.BudgetComponent, bool) {
 	var fp uint64
 	n := 0
 	for _, vm := range p.VMs {
@@ -172,7 +210,7 @@ func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetCompo
 		}) {
 			continue
 		}
-		fp = units.AddSat(fp, vm.FootprintBytes)
+		fp = units.AddSat(fp, vm.FootprintBytes-vc.credit(vm.SwappedBytes, vm.FootprintBytes))
 		n++
 	}
 	return protocol.BudgetComponent{Name: "podman", ReservedBytes: fp, UsedBytes: &fp}, n > 0
@@ -180,10 +218,11 @@ func podman(p *protocol.Podman, engines []protocol.Engine) (protocol.BudgetCompo
 
 // otherVMs reserves what the VMs no known owner claims cost the host now:
 // nothing tells how far they will grow. Owned VMs are never among them.
-func otherVMs(v *protocol.VMs) protocol.BudgetComponent {
+// Their compressed share is credited (vmCost).
+func otherVMs(v *protocol.VMs, vc *vmCost) protocol.BudgetComponent {
 	var fp uint64
 	for _, vm := range v.Other {
-		fp = units.AddSat(fp, vm.FootprintBytes)
+		fp = units.AddSat(fp, vm.FootprintBytes-vc.credit(vm.SwappedBytes, vm.FootprintBytes))
 	}
 	return protocol.BudgetComponent{Name: "other_vms", ReservedBytes: fp, UsedBytes: &fp}
 }
@@ -204,13 +243,14 @@ func engineName(e protocol.Engine, engines []protocol.Engine) string {
 	return kind(e)
 }
 
-// docker reserves what an engine's VM already holds or what its containers need plus
-// the VM's overhead, whichever is larger. Not the VM's memory limit: that is a
-// ceiling it rarely reaches, and reserving it would leave no headroom (spike
-// #9). The VM keeps its high-water mark until Resource Saver stops it, so that
-// memory counts as spent. An engine with no VM costs nothing only while no
-// container runs: one that runs some has a VM headroom did not find (#268).
-func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
+// docker reserves the largest of what an engine's VM already holds, what its
+// containers need plus the VM's overhead, and the VM's memory limit (/info
+// MemTotal): a fresh VM grows to its limit within the hour (#311). The VM
+// keeps its high-water mark until Resource Saver stops it, so that memory
+// counts as spent; its compressed share is credited (vmCost). An engine with
+// no VM costs nothing only while no container runs: one that runs some has a
+// VM headroom did not find (#268).
+func docker(d protocol.Engine, p Params, vc *vmCost) protocol.BudgetComponent {
 	var c protocol.BudgetComponent
 	if !d.Running || (d.VMError == "" && !d.VMRunning && len(d.Containers) == 0) {
 		c.UsedBytes = new(uint64)
@@ -223,11 +263,13 @@ func docker(d protocol.Engine, p Params) protocol.BudgetComponent {
 	for _, ct := range d.Containers {
 		need = units.AddSat(need, ct.MemoryBytes)
 	}
-	c.ReservedBytes = need
+	c.ReservedBytes = max(need, min(d.VMLimitBytes, units.MaxBytes))
 	if d.VMError == "" && d.VMRunning {
-		used := min(d.VMFootprintBytes, units.MaxBytes)
+		fp := min(d.VMFootprintBytes, units.MaxBytes)
+		saved := vc.credit(d.VMSwappedBytes, fp)
+		used := fp - saved
 		c.UsedBytes = &used
-		c.ReservedBytes = max(need, used)
+		c.ReservedBytes = max(c.ReservedBytes, fp) - saved
 	}
 	return c
 }

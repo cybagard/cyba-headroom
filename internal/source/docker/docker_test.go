@@ -153,14 +153,18 @@ func runningEngine(t *testing.T) string {
 }
 
 func TestReportsContainersAndVMCost(t *testing.T) {
+	swapped := uint64(1116258304)
 	vms := fakeVMs{
 		{PID: 1, Kind: vmproc.Tart, Name: "macos-a", FootprintBytes: 4 << 30},
-		{PID: 2, Kind: vmproc.Docker, FootprintBytes: 1709280520},
+		{PID: 2, Kind: vmproc.Docker, FootprintBytes: 1709280520, SwappedBytes: &swapped},
 	}
 	d := collect(t, docker.New(runningEngine(t), vms))
 
 	if !d.Running || d.VMLimitBytes != 33333952512 || !d.VMRunning || d.VMFootprintBytes != 1709280520 {
 		t.Fatalf("got running=%v limit=%d vm=%v footprint=%d", d.Running, d.VMLimitBytes, d.VMRunning, d.VMFootprintBytes)
+	}
+	if d.VMSwappedBytes == nil || *d.VMSwappedBytes != swapped {
+		t.Fatalf("swapped = %v, want the VM process's %d", d.VMSwappedBytes, swapped)
 	}
 	if len(d.Containers) != 1 {
 		t.Fatalf("containers = %+v, want 1", d.Containers)

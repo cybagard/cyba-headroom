@@ -30,7 +30,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	var v protocol.VMs
 	for _, vm := range list {
 		if vm.Kind == vmproc.Unknown {
-			v.Other = append(v.Other, protocol.OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes})
+			v.Other = append(v.Other, protocol.OtherVM{PID: vm.PID, Name: vm.Name, FootprintBytes: vm.FootprintBytes, SwappedBytes: vm.SwappedBytes})
 		}
 	}
 	if len(v.Other) == 0 {

@@ -60,9 +60,29 @@ func TestHostListsTheRealVMs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, vm := range vms {
-		if vm.Kind == vmproc.Unknown || vm.FootprintBytes == 0 {
-			t.Errorf("VM %+v not classified or no footprint", vm)
+		if vm.Kind == vmproc.Unknown || vm.FootprintBytes == 0 || vm.SwappedBytes == nil {
+			t.Errorf("VM %+v not classified, or no footprint or swapped share", vm)
 		}
+	}
+}
+
+// footprint --swapped prints this release's (Swapped) column for this
+// process and every VM process (#311).
+func TestHostFootprintSwappedParses(t *testing.T) {
+	for _, pid := range append([]int{os.Getpid()}, psVMs(t)...) {
+		out, err := vmproc.Host{}.Run(context.Background(), "/usr/bin/footprint", "--swapped", "-f", "bytes", "-p", strconv.Itoa(pid))
+		if err != nil {
+			t.Fatalf("footprint %d: %v", pid, err)
+		}
+		per, sum, err := vmproc.ParseFootprint(out)
+		if err != nil {
+			t.Fatalf("footprint %d: %v\n%s", pid, err, out)
+		}
+		f := per[pid]
+		if f.Bytes == 0 || f.DirtyBytes == 0 || f.SwappedBytes == nil || sum.SwappedBytes == nil || *f.SwappedBytes > f.DirtyBytes {
+			t.Fatalf("footprint %d parsed as %+v (sum %+v)\n%s", pid, f, sum, out)
+		}
+		t.Logf("pid %d: footprint %d, dirty %d, swapped %d", pid, f.Bytes, f.DirtyBytes, *f.SwappedBytes)
 	}
 }
 

@@ -355,9 +355,10 @@ type Budget struct {
 	// Orca, the agents and everything else, which the host baseline reserves
 	// for. It is what #23 learns host_baseline_gb from. Signed, because its
 	// inputs are read at slightly different instants. Compressed memory is
-	// counted at full size on both sides, as footprints count it, so the
-	// figure holds under compression; pages swapped out to disk are not
-	// (#23). Absent when host used, compressed or a component's footprint is
+	// counted at full size on both sides, as footprints count it, except a
+	// VM's compressed share, counted at compressed size on both sides (#311),
+	// so the figure holds under compression; pages swapped out to disk are
+	// not (#23). Absent when host used, compressed or a component's footprint is
 	// unknown.
 	UnaccountedBytes *int64 `json:"unaccounted_bytes,omitempty"`
 	// Components are docker, tart, podman (while a Podman machine runs),
@@ -520,6 +521,9 @@ type PodmanVM struct {
 	PID     int    `json:"pid"`
 	// FootprintBytes is what the VM process costs the host (phys_footprint).
 	FootprintBytes uint64 `json:"footprint_bytes"`
+	// SwappedBytes is the part of the footprint macOS has compressed, at
+	// full size (footprint --swapped); absent when it could not be read.
+	SwappedBytes *uint64 `json:"swapped_bytes,omitempty"`
 }
 
 // VMs is the VM processes no known owner (Docker Desktop, Tart, Podman)
@@ -535,6 +539,9 @@ type OtherVM struct {
 	Name string `json:"name"`
 	// FootprintBytes is what the VM process costs the host (phys_footprint).
 	FootprintBytes uint64 `json:"footprint_bytes"`
+	// SwappedBytes is the part of the footprint macOS has compressed, at
+	// full size (footprint --swapped); absent when it could not be read.
+	SwappedBytes *uint64 `json:"swapped_bytes,omitempty"`
 }
 
 // TartVM is one running Tart VM.
@@ -549,6 +556,9 @@ type TartVM struct {
 	// (phys_footprint); absent if its process was not found (e.g. booting),
 	// which means unknown, not free.
 	FootprintBytes *uint64 `json:"footprint_bytes,omitempty"`
+	// SwappedBytes is the part of the footprint macOS has compressed, at
+	// full size (footprint --swapped); absent when it could not be read.
+	SwappedBytes *uint64 `json:"swapped_bytes,omitempty"`
 	// CPUPercent is the VM process's CPU use since the previous reading,
 	// 100 = one core; absent on its first reading or if it could not be
 	// read.
@@ -608,8 +618,8 @@ type Engine struct {
 	// Error is why an untrusted candidate (a Docker context's socket) could
 	// not be read: it is then not running (#227, amendment 4).
 	Error string `json:"error,omitempty"`
-	// VMLimitBytes is the VM's configured memory (/info MemTotal): a ceiling,
-	// not a cost (spike #9).
+	// VMLimitBytes is the VM's configured memory (/info MemTotal): the
+	// ceiling it grows to, which the budget reserves (#311).
 	VMLimitBytes uint64 `json:"vm_limit_bytes"`
 	// VMRunning is false while Resource Saver has stopped the VM, even though
 	// the API still answers.
@@ -617,6 +627,9 @@ type Engine struct {
 	// VMFootprintBytes is what the VM process costs the host (phys_footprint):
 	// overhead plus the guest's high-water mark, which it does not give back.
 	VMFootprintBytes uint64 `json:"vm_footprint_bytes"`
+	// VMSwappedBytes is the part of VMFootprintBytes macOS has compressed,
+	// at full size (footprint --swapped); absent when it could not be read.
+	VMSwappedBytes *uint64 `json:"vm_swapped_bytes,omitempty"`
 	// VMError is set when the VM process could not be read, is not known
 	// for the engine's kind, or is not found while containers run (#268);
 	// VMRunning and VMFootprintBytes are then unknown, not zero.

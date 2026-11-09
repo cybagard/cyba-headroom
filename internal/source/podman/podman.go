@@ -44,7 +44,7 @@ func (s *Source) Collect(ctx context.Context) (daemon.Reading, error) {
 	for _, vm := range vms {
 		switch vm.Kind {
 		case vmproc.Podman:
-			p.VMs = append(p.VMs, protocol.PodmanVM{Machine: vm.Name, PID: vm.PID, FootprintBytes: vm.FootprintBytes})
+			p.VMs = append(p.VMs, protocol.PodmanVM{Machine: vm.Name, PID: vm.PID, FootprintBytes: vm.FootprintBytes, SwappedBytes: vm.SwappedBytes})
 		case vmproc.Docker:
 			docker = true
 		}

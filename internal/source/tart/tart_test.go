@@ -111,13 +111,17 @@ func TestNothingRunning(t *testing.T) {
 }
 
 func TestFootprintFromVMProcess(t *testing.T) {
+	swapped := uint64(1_000_000_000)
 	vms := fakeVMs{
 		{PID: 10, Kind: vmproc.Docker, FootprintBytes: 3 << 30},
-		{PID: 20, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 4350000000},
+		{PID: 20, Kind: vmproc.Tart, Name: "headroom-mac", FootprintBytes: 4350000000, SwappedBytes: &swapped},
 	}
 	got := collect(t, tart.New(runningCLI(), fakeProcs{}, vms, home))
 	if vm := got.VMs[0]; vm.FootprintBytes == nil || *vm.FootprintBytes != 4350000000 {
 		t.Fatalf("footprint = %v, want the headroom-mac process's", vm.FootprintBytes)
+	}
+	if vm := got.VMs[0]; vm.SwappedBytes == nil || *vm.SwappedBytes != swapped {
+		t.Fatalf("swapped = %v, want the headroom-mac process's %d", vm.SwappedBytes, swapped)
 	}
 }
 

@@ -991,6 +991,21 @@ func TestDryRunAddsTheFlagAfterCompose(t *testing.T) {
 			t.Errorf("DryRun(docker-compose %q) = %q, %v; want %q", tc.args, got, ok, tc.want)
 		}
 	}
+	// podman compose hands its args to the provider: podman's own options
+	// before compose pick the socket, and stay (#349).
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"compose", "up", "-d"}, []string{"compose", "--dry-run", "up", "-d"}},
+		{[]string{"--url", "U", "compose", "-f", "a.yml", "up", "-d"}, []string{"--url", "U", "compose", "--dry-run", "-f", "a.yml", "up", "-d"}},
+		{[]string{"-c", "conn", "compose", "-p", "x", "up", "-d"}, []string{"-c", "conn", "compose", "--dry-run", "-p", "x", "up", "-d"}},
+	} {
+		got, ok := DryRun("podman", tc.args)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("DryRun(podman %q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+	}
 }
 
 func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
@@ -1057,6 +1072,10 @@ func TestComposeConfigKeepsTheCallsGlobals(t *testing.T) {
 		{"docker-compose", []string{"-H", "h", "--", "-p", "y", "up", "-d"}, []string{"-H", "h", "config", "--format", "json"}},
 		{"docker", []string{"compose", "-f", "c.yml", "--", "--help", "--", "-p", "y", "up", "-d"}, []string{"compose", "-f", "c.yml", "config", "--format", "json"}},
 		{"docker-compose", []string{"-p", "x", "--", "--", "--version", "-p", "y", "up", "-d"}, []string{"-p", "x", "config", "--format", "json"}},
+		// podman compose: podman's own options stay before compose (#349).
+		{"podman", []string{"compose", "up", "-d"}, []string{"compose", "config", "--format", "json"}},
+		{"podman", []string{"--url", "U", "compose", "-f", "a.yml", "up", "-d"}, []string{"--url", "U", "compose", "-f", "a.yml", "config", "--format", "json"}},
+		{"podman", []string{"-c", "conn", "compose", "-p", "x", "up", "-d"}, []string{"-c", "conn", "compose", "-p", "x", "config", "--format", "json"}},
 	} {
 		if got, ok := ComposeConfig(tc.name, tc.args, false); !ok || !slices.Equal(got, tc.want) {
 			t.Errorf("ComposeConfig(%s %q) = %q, %v; want %q", tc.name, tc.args, got, ok, tc.want)

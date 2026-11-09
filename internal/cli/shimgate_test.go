@@ -1798,10 +1798,6 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 	if r.pings != 2 { // one per docker compose call, before its probes (#278)
 		t.Fatalf("pinged %d times", r.pings)
 	}
-	r.run("podman", "compose", "up", "-d")
-	if asked != 2 || dry != 1 || r.pings != 2 {
-		t.Fatalf("podman: asked %d, dry %d, pinged %d", asked, dry, r.pings)
-	}
 	// docker-compose is docker compose, asked through its own binary in
 	// its own shape (#266).
 	var probes [][]string
@@ -1820,7 +1816,7 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 		{bin, "--profile", "*", "config", "--format", "json"},
 		{bin, "--dry-run", "up", "-d"},
 	}
-	if len(r.asked) != 4 || r.asked[3].Kind != "compose" || r.asked[3].Target != "x" || !r.asked[3].Idle || !reflect.DeepEqual(probes, want) {
+	if len(r.asked) != 3 || r.asked[2].Kind != "compose" || r.asked[2].Target != "x" || !r.asked[2].Idle || !reflect.DeepEqual(probes, want) {
 		t.Fatalf("docker-compose: asked %+v, probes %q", r.asked, probes)
 	}
 	// Compose ignores a "--" among its global options and the options
@@ -1850,6 +1846,63 @@ func TestComposeIsAskedOnlyWhenNeeded(t *testing.T) {
 		last := r.asked[len(r.asked)-1]
 		if last.Kind != "compose" || last.Target != "x" || !reflect.DeepEqual(probes, want) {
 			t.Fatalf("%q: asked %+v, probes %q", argv, last, probes)
+		}
+	}
+	// podman compose is asked through podman, its own options before
+	// compose, which pick the socket (#349). With -p, config is not asked.
+	plain, err := os.MkdirTemp("/tmp", "hr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(plain) })
+	r.getwd = func() (string, error) { return plain, nil }
+	if err := os.WriteFile(filepath.Join(plain, "compose.yaml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	podman := filepath.Join(r.dir, "podman")
+	for _, tc := range []struct {
+		argv   []string
+		target string
+		want   [][]string
+	}{
+		{[]string{"podman", "compose", "up", "-d"}, "x", [][]string{
+			{podman, "compose", "config", "--format", "json"},
+			{podman, "compose", "--profile", "*", "config", "--format", "json"},
+			{podman, "compose", "--dry-run", "up", "-d"},
+		}},
+		{[]string{"podman", "--url", "unix:///tmp/p.sock", "compose", "-f", "a.yml", "up", "-d"}, "x", [][]string{
+			{podman, "--url", "unix:///tmp/p.sock", "compose", "-f", "a.yml", "config", "--format", "json"},
+			{podman, "--url", "unix:///tmp/p.sock", "compose", "-f", "a.yml", "--profile", "*", "config", "--format", "json"},
+			{podman, "--url", "unix:///tmp/p.sock", "compose", "--dry-run", "-f", "a.yml", "up", "-d"},
+		}},
+		{[]string{"podman", "compose", "-p", "shop", "up", "-d"}, "shop", [][]string{
+			{podman, "compose", "-p", "shop", "--profile", "*", "config", "--format", "json"},
+			{podman, "compose", "--dry-run", "-p", "shop", "up", "-d"},
+		}},
+	} {
+		probes = nil
+		pings := r.pings
+		r.run(tc.argv...)
+		last := r.asked[len(r.asked)-1]
+		if last.Kind != "compose" || last.Target != tc.target || last.Guessed || last.ComposeDir != plain || !last.Idle ||
+			r.pings != pings+1 || !reflect.DeepEqual(probes, tc.want) {
+			t.Fatalf("%q: asked %+v, pinged %d, probes %q", tc.argv, last, r.pings-pings, probes)
+		}
+	}
+	// A remote engine is still not asked about, nor probed.
+	env := r.env
+	for _, tc := range []struct {
+		env  string
+		argv []string
+	}{
+		{"", []string{"podman", "--url", "tcp://203.0.113.5:2376", "compose", "up", "-d"}},
+		{"CONTAINER_HOST=tcp://203.0.113.5:2376", []string{"podman", "compose", "up", "-d"}},
+	} {
+		probes = nil
+		n := len(r.asked)
+		r.env = append(slices.Clone(env), tc.env)
+		if code, _ := r.run(tc.argv...); code != 0 || len(r.asked) != n || probes != nil {
+			t.Fatalf("%s %q: code %d, asked %+v, probes %q", tc.env, tc.argv, code, r.asked[n:], probes)
 		}
 	}
 }
@@ -1915,6 +1968,8 @@ func TestAGuessedProjectIsSentAsAGuess(t *testing.T) {
 	}{
 		{"config fails", true, named, []string{"docker", "compose", "up", "-d"}, "shop", true},
 		{"config names it", false, named, []string{"docker", "compose", "up", "-d"}, "x", false},
+		{"podman, config fails", true, named, []string{"podman", "compose", "up", "-d"}, "shop", true},
+		{"podman, config names it", false, named, []string{"podman", "compose", "up", "-d"}, "x", false},
 		{"-p", true, named, []string{"docker", "compose", "-p", "p", "up", "-d"}, "p", false},
 		{"stdin, the project directory's", true, "", []string{"docker", "compose", "--project-directory", "/srv/api", "-f", "-", "up", "-d"}, "api", false},
 		{"stdin, from the environment", true, named, []string{"docker", "compose", "-f", "-", "up", "-d"}, "shop", false},

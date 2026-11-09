@@ -42,6 +42,7 @@ type Source struct {
 	candidates func(context.Context) []Candidate
 	vms        vmproc.Lister
 	clients    map[string]*http.Client
+	podman     bool // Events makes up Podman's stops (NewKind)
 
 	// prev holds each engine's containers' last good stats, by engine ID
 	// and container ID, of the containers in the last list only (#267).
@@ -63,6 +64,14 @@ func New(socket string, vms vmproc.Lister) *Source {
 		return Candidates(socket, func(string) string { return "" }, slog.New(slog.DiscardHandler))
 	}, vms)
 	s.socket, s.one = socket, dial(socket)
+	return s
+}
+
+// NewKind is New for an engine of kind: a Podman engine's Events make up
+// the stops Podman does not send (#335).
+func NewKind(socket, kind string) *Source {
+	s := New(socket, nil)
+	s.podman = kind == protocol.EnginePodman
 	return s
 }
 
@@ -598,6 +607,10 @@ func (s *Source) Clock(ctx context.Context) (int64, error) {
 // EventsPath streams container starts, stops and exits (#67).
 var EventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die"],"type":["container"]}`}}.Encode()
 
+// PodmanEventsPath is EventsPath with restarts as well: a Podman engine
+// sends no stop, and a restart tells its restarts from them (#335).
+var PodmanEventsPath = "/events?" + url.Values{"filters": {`{"event":["start","stop","kill","die","restart"],"type":["container"]}`}}.Encode()
+
 // ErrBadSince is Docker refusing an events stream's since: the caller asks
 // again without it (#146).
 var ErrBadSince = errors.New("docker: events: since refused")
@@ -610,12 +623,17 @@ var ErrBadSince = errors.New("docker: events: since refused")
 // between two readings. With since > 0, Docker first replays the events
 // from since on, that one included, from the few it keeps (#146). With
 // until > 0 as well, the stream ends after the events up to until, that
-// one included, and a stream that ends so returns nil (#170).
+// one included, and a stream that ends so returns nil (#170). A Podman
+// engine sends no stop: its die then start with no restart between is
+// delivered as a die, a stop dated at it, then the start (#335).
 func (s *Source) Events(ctx context.Context, since, until int64, fn func(action, id string, timeNano int64, attrs map[string]string)) error {
 	if s.socket == "" {
 		return errors.New("docker: socket unknown")
 	}
 	path := EventsPath
+	if s.podman {
+		path = PodmanEventsPath
+	}
 	if since > 0 {
 		path += "&since=" + unixNano(since)
 	}
@@ -638,6 +656,14 @@ func (s *Source) Events(ctx context.Context, since, until int64, fn func(action,
 		return fmt.Errorf("docker: GET /events: %s", resp.Status)
 	}
 	dec := json.NewDecoder(resp.Body)
+	// On Podman, the containers that died and have not started since, and
+	// those restarting (a restart, its start not yet): a die then a start
+	// with no restart is a stop (#335).
+	type died struct {
+		at    int64
+		attrs map[string]string
+	}
+	dies, restarting := map[string]died{}, map[string]bool{}
 	for {
 		var ev struct {
 			Type   string
@@ -655,8 +681,31 @@ func (s *Source) Events(ctx context.Context, since, until int64, fn func(action,
 			}
 			return fmt.Errorf("docker: events: %w", err)
 		}
-		if ev.Type == "container" && ev.Actor.ID != "" && (ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die") {
-			fn(ev.Action, ev.Actor.ID, cmp.Or(ev.TimeNano, ev.Time*1e9), ev.Actor.Attributes)
+		if ev.Type != "container" || ev.Actor.ID == "" {
+			continue
+		}
+		id, at := ev.Actor.ID, cmp.Or(ev.TimeNano, ev.Time*1e9)
+		if s.podman {
+			switch ev.Action {
+			case "restart":
+				delete(dies, id)
+				restarting[id] = true
+			case "die":
+				if !restarting[id] {
+					dies[id] = died{at, ev.Actor.Attributes}
+				}
+			case "stop":
+				delete(dies, id)
+			case "start":
+				if d, ok := dies[id]; ok {
+					fn("stop", id, d.at, d.attrs)
+				}
+				delete(dies, id)
+				delete(restarting, id)
+			}
+		}
+		if ev.Action == "start" || ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die" {
+			fn(ev.Action, id, at, ev.Actor.Attributes)
 		}
 	}
 }

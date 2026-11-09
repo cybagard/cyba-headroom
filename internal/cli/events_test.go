@@ -298,6 +298,53 @@ func TestOfferFollowsPodmansEngineOnce(t *testing.T) {
 	}
 }
 
+// A Podman engine's follower makes up the stops Podman does not send, and a
+// Docker engine's does not (#335): each engine's events stream a die then a
+// start, and only the Podman one's delivers a stop between them.
+func TestOfferFollowsAPodmanEngineAsPodman(t *testing.T) {
+	stream := func(path string) string {
+		sock := filepath.Join(daemonDir(t), "api.sock")
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.RequestURI() != path {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = io.WriteString(w, `{"Type":"container","Action":"die","Actor":{"ID":"c"},"timeNano":1}
+{"Type":"container","Action":"start","Actor":{"ID":"c"},"timeNano":2}
+`)
+		}))
+		srv.Listener = ln
+		srv.Start()
+		t.Cleanup(srv.Close)
+		return sock
+	}
+	s := &protocol.Snapshot{Engines: []protocol.Engine{
+		{Kind: protocol.EnginePodman, ID: "podman:podman-machine-default", Socket: stream(docker.PodmanEventsPath), Running: true},
+		{Kind: protocol.EngineDocker, ID: "00000000-0000-4000-8000-000000000001", Socket: stream(docker.EventsPath), Running: true},
+	}}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	got := map[string]int{}
+	f := &engineFollowers{ctx: context.Background(), wg: &wg, followed: map[string]bool{},
+		fn: func(time.Time, string, string, string, map[string]string) {},
+		follow: func(ctx context.Context, src Eventer, _ func(time.Time, string, string, string, map[string]string)) {
+			var actions []string
+			_ = src.Events(ctx, 0, 0, func(action, _ string, _ int64, _ map[string]string) { actions = append(actions, action) })
+			mu.Lock()
+			defer mu.Unlock()
+			got[fmt.Sprint(actions)]++
+		}}
+	f.Offer(s)
+	wg.Wait()
+	if want := map[string]int{"[die stop start]": 1, "[die start]": 1}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("followers' events = %v, want %v", got, want)
+	}
+}
+
 // noVMs lists no VM processes.
 type noVMs struct{}
 

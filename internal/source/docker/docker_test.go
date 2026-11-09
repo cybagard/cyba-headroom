@@ -606,7 +606,10 @@ func TestEventsStreamsContainerStartsAndExits(t *testing.T) {
 // Podman's compat /events, recorded from 6.1 around podman run --rm alpine
 // true and podman run -d --name x, then podman stop x: it takes Docker's
 // filter, names the actions as Docker does, and keeps the labels and name
-// in Actor.Attributes (#67).
+// in Actor.Attributes (#67). Its rows after those are a compose stop then
+// up (db), a restart policy's restart (crashy) and an API restart (api),
+// in the order Podman 6.1 sends them (#335). Read as Docker's, the stream
+// is delivered as it comes: no stop is made up.
 func TestEventsReadPodmansStream(t *testing.T) {
 	sock, _ := engine(t, map[string]string{docker.EventsPath: "events-podman.jsonl"})
 	var got []string
@@ -616,6 +619,32 @@ func TestEventsReadPodmansStream(t *testing.T) {
 	want := []string{
 		"start 1 quick lease-1-2 1794208345991668809", "die 1 quick lease-1-2 1794208345993222684",
 		"start 2 x lease-3-4 1794208346170808303", "die 2 x lease-3-4 1794208357292843244",
+		"die 3 db  1794208360100000000", "start 3 db  1794208361200000000",
+		"die 4 crashy  1794208362100000000", "start 4 crashy  1794208362400000000",
+		"die 5 api  1794208363200000000", "start 5 api  1794208363300000000",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// Podman sends no stop (#335): a Podman engine's stream asks for its
+// restarts too, and a die then a start with no restart between is a stop
+// then a start, the stop dated at the die and carrying its attributes. A
+// restart policy's restart (die, restart, start) and the API's (restart,
+// die, start) make up none, and no restart is delivered.
+func TestEventsMakeUpPodmansStops(t *testing.T) {
+	sock, _ := engine(t, map[string]string{docker.PodmanEventsPath: "events-podman.jsonl"})
+	var got []string
+	_ = docker.NewKind(sock, protocol.EnginePodman).Events(context.Background(), 0, 0, func(action, id string, timeNano int64, attrs map[string]string) {
+		got = append(got, fmt.Sprint(action, " ", id[len(id)-1:], " ", attrs["name"], " ", attrs["exitCode"], " ", timeNano))
+	})
+	want := []string{
+		"start 1 quick  1794208345991668809", "die 1 quick 0 1794208345993222684",
+		"start 2 x  1794208346170808303", "die 2 x 137 1794208357292843244",
+		"die 3 db 137 1794208360100000000", "stop 3 db 137 1794208360100000000", "start 3 db  1794208361200000000",
+		"die 4 crashy 1 1794208362100000000", "start 4 crashy  1794208362400000000",
+		"die 5 api 137 1794208363200000000", "start 5 api  1794208363300000000",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("events = %q, want %q", got, want)

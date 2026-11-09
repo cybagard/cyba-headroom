@@ -45,7 +45,7 @@ func (f *engineFollowers) Offer(s *protocol.Snapshot) {
 			continue
 		}
 		f.followed[e.ID] = true
-		src := docker.New(e.Socket, nil)
+		src := docker.NewKind(e.Socket, e.Kind)
 		f.wg.Go(func() {
 			f.follow(f.ctx, src, f.fn)
 		})

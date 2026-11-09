@@ -60,6 +60,7 @@ import (
 	"github.com/cybagard/cyba-headroom/internal/attribution"
 	"github.com/cybagard/cyba-headroom/internal/policy"
 	"github.com/cybagard/cyba-headroom/internal/protocol"
+	"github.com/cybagard/cyba-headroom/internal/units"
 )
 
 // Book holds the open leases and the snapshot they were last settled on.
@@ -680,9 +681,9 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			taken = append(taken, e)
 			continue
 		}
-		r.LeasedBytes += e.reserved()
+		r.LeasedBytes = units.AddSat(r.LeasedBytes, e.reserved())
 		if e.Worktree == r.Worktree {
-			r.WorktreeLeasedBytes += e.reserved()
+			r.WorktreeLeasedBytes = units.AddSat(r.WorktreeLeasedBytes, e.reserved())
 		}
 		if e.macOS && len(e.bound) == 0 {
 			r.PendingMacOS++ // once bound, its VM counts as running
@@ -797,7 +798,7 @@ func (b *Book) check(r policy.Request, current *protocol.Snapshot, c policy.Conf
 			// twice until the lease ends, at most what the old lease
 			// reserved for it. Either way, as decided, and on top of
 			// what their containers use.
-			e.cost, e.used = max(e.cost, reserved)+used, used
+			e.cost, e.used = units.AddSat(max(e.cost, reserved), used), used
 			if idle {
 				// It adds nothing: what it took over ends when that would
 				// have, however often the up repeats. And what that waited
@@ -951,6 +952,7 @@ func (r resource) runs() []int {
 // alone: a lease's placement (attribution.ByLease) is for status and
 // policy, and never feeds back into binding (#74). A Tart VM is sized as the
 // budget reserves it: protocol.TartVM.SizeBytes with tartDefault (#277).
+// Every size is clamped to units.MaxBytes, as the budget clamps it (#275).
 func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 	owner := map[string]string{}
 	if a := s.Attribution; a != nil {
@@ -974,20 +976,20 @@ func resources(s *protocol.Snapshot, tartDefault uint64) []resource {
 	}
 	for _, c := range s.Containers() {
 		r := containerResource(c.ID, c.Name, c.Labels)
-		r.worktree, r.bytes, r.pod, r.podID, r.podNames = owner[r.key], c.MemoryBytes, c.Pod, c.PodID, podNames
+		r.worktree, r.bytes, r.pod, r.podID, r.podNames = owner[r.key], min(c.MemoryBytes, units.MaxBytes), c.Pod, c.PodID, podNames
 		out = append(out, r)
 	}
 	if s.Podman != nil {
 		// A Podman machine's VM costs what it holds now: its footprint, as
 		// the budget counts it.
 		for _, vm := range s.Podman.VMs {
-			out = append(out, resource{key: "machine:" + vm.Machine, name: vm.Machine, kind: "machine", bytes: vm.FootprintBytes})
+			out = append(out, resource{key: "machine:" + vm.Machine, name: vm.Machine, kind: "machine", bytes: min(vm.FootprintBytes, units.MaxBytes)})
 		}
 	}
 	if s.Tart != nil {
 		for _, vm := range s.Tart.VMs {
 			k := "vm:" + vm.Name
-			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: vm.SizeBytes(tartDefault), os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
+			out = append(out, resource{key: k, name: vm.Name, kind: "vm", worktree: owner[k], bytes: min(vm.SizeBytes(tartDefault), units.MaxBytes), os: vm.OS, runPID: vm.RunPID, runPIDs: vm.RunPIDs})
 		}
 	}
 	return out

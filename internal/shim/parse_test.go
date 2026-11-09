@@ -632,6 +632,29 @@ func TestComposeDashDashMatchesCompose(t *testing.T) {
 		{"-- -l x up -d", "gg"},
 		{"-- -x v up -d", "gg"},
 		{"-- -- up", "ff"},
+		// Review round 4: standalone's first pass turns a --verbose past
+		// "--" into docker's --debug, up to the first word.
+		{"-- -p x --verbose up -d", "gg"},
+		{"-- -f c.yml --verbose up -d", "gg"},
+		{"-- --ansi never --verbose up -d", "gg"},
+		{"-p x --verbose -- -p y up -d", "gg"},
+		{"--verbose -- -p x up -d", "gg"},
+		{"-- -p x -- --verbose up -d", "gg"},
+		{"-- -p --verbose up -d", "fg"},
+		{"-- -H tcp://127.0.0.1:1 --verbose up -d", "fg"},
+		{"-- -D --verbose up -d", "fg"},
+		{"-- -px --verbose up -d", "gg"},
+		{"--project-name x -- --verbose up -d", "gg"},
+		{"-- --verbose -- -p x up -d", "gg"},
+		{"-- --verbose=true up -d", "gg"},
+		{"-- -p x --verbose x up -d", "ff"},
+		{"-- --verbose -p x up -d", "gg"},
+		{"-- -p x --verbose -- -p y up -d", "gg"},
+		{"-p x -- -- --verbose up -d", "gg"},
+		{"-- --tls --verbose -p x up -d", "gg"},
+		{"-- -f c.yml --verbose=true up -d", "gg"},
+		{"-- -p x --verbose=false up -d", "gg"},
+		{"-- -p x --verbose run --rm a true", "gg"},
 	} {
 		args := strings.Fields(tc.argv)
 		for i, form := range []struct {

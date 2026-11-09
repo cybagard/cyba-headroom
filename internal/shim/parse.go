@@ -147,7 +147,7 @@ func parseEngine(name string, all []string) (c Call, at int) {
 		if len(words) > 1 {
 			return Call{}, -1
 		}
-		rest, ok := composeDashDash(args[1:], composePluginBools)
+		rest, ok := composeDashDash(args[1:])
 		if !ok {
 			return Call{}, -1
 		}
@@ -493,12 +493,11 @@ func composeParts(args []string, at int) (before, moved, command []string, ok bo
 // composeDashDash returns a compose call's args (those after the compose
 // word) without a "--" among its global options and the words after it up
 // to the command, which Compose ignores (#324). It finds the command as
-// cobra's Traverse does, bools being the flags it knows take no value: a
-// "--name" (and "--") takes the next word unless it is one of bools, and so
-// does a "-X" that is not; any other word is the value pending, if any,
-// else a flag if it starts with "-", else the command. ok is false with no
-// command: the call fails.
-func composeDashDash(args []string, bools map[string]bool) (out []string, ok bool) {
+// cobra's Traverse does: a "--name" (and "--") takes the next word unless
+// it is one of composeBools, and so does a "-X" that is not; any other
+// word is the value pending, if any, else a flag if it starts with "-",
+// else the command. ok is false with no command: the call fails.
+func composeDashDash(args []string) (out []string, ok bool) {
 	rest, res, _ := scanPast(args, composeGlobal, isComposeCommand, nil)
 	if res != endOfFlags {
 		return args, true
@@ -509,9 +508,9 @@ func composeDashDash(args []string, bools map[string]bool) (out []string, ok boo
 		a := args[i]
 		switch {
 		case strings.HasPrefix(a, "--") && !strings.Contains(a, "="):
-			value = !bools[a]
+			value = !composeBools[a]
 		case len(a) == 2 && a[0] == '-' && a[1] != '=':
-			value = !bools[a]
+			value = !composeBools[a]
 		case value:
 			value = false
 		case len(a) < 2 || a[0] != '-':
@@ -524,7 +523,7 @@ func composeDashDash(args []string, bools map[string]bool) (out []string, ok boo
 // withoutDashDash is a docker compose call's args, whose compose options
 // start at at, as composeDashDash leaves them: the call parseEngine read.
 func withoutDashDash(all []string, at int) []string {
-	rest, _ := composeDashDash(all[at:], composePluginBools)
+	rest, _ := composeDashDash(all[at:])
 	return slices.Concat(all[:at], rest)
 }
 
@@ -623,7 +622,7 @@ func parseCompose(engine Call, words, args []string) Call {
 // takes any other option for compose's, and stops at the first word. So a
 // compose option with a separate value (-f x) ends the run at its value
 // (plan amendment 1). Past a "--", the run goes on but drops docker's
-// options, which Compose then does not see (#324). Docker's options move
+// options, --verbose among them, which Compose then does not see (#324). Docker's options move
 // before "compose", compose's keep their order. ok is false for -v and
 // --version, and for a docker option in compose's part: the real call
 // fails on it. A compose option it does not know only gates a call that
@@ -642,6 +641,8 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 			dashed = true
 		case !dashed && (a == "-v" || a == "--version"):
 			return nil, 0, false
+		case dashed && a == "--verbose":
+			n = 1 // it reads it as docker's --debug
 		case known && takes && joined, known && !takes && !joined:
 			n = 1 // a boolean takes no =value
 		case known && takes:
@@ -656,7 +657,7 @@ func asDockerCompose(args []string) (all []string, lead int, ok bool) {
 		}
 		i += n
 	}
-	rest, ok := composeDashDash(slices.Concat(compose, args[i:]), composeBools)
+	rest, ok := composeDashDash(slices.Concat(compose, args[i:]))
 	if !ok {
 		return nil, 0, false
 	}
@@ -992,10 +993,9 @@ var (
 		"--ansi --env-file --file --parallel --profile --progress --project-directory --project-name -f -p",
 		"--all-resources --compatibility --dry-run")
 	// The flags Compose knows take no value when it looks for its command
-	// after "--"; the plugin also knows --verbose. Measured (#324).
-	composeBools       = words("--all-resources --compatibility --dry-run --help --no-ansi --version -h -v")
-	composePluginBools = words("--all-resources --compatibility --dry-run --help --no-ansi --version --verbose -h -v")
-	composeUp          = flags(
+	// after "--". Measured (#324).
+	composeBools = words("--all-resources --compatibility --dry-run --help --no-ansi --version --verbose -h -v")
+	composeUp    = flags(
 		"--attach --exit-code-from --no-attach --pull --scale --timeout --wait-timeout -t",
 		"--abort-on-container-exit --abort-on-container-failure --always-recreate-deps --attach-dependencies --build "+
 			"--detach --dry-run --force-recreate --menu --no-build --no-color --no-deps --no-log-prefix --no-recreate "+

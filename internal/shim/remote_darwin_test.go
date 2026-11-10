@@ -4,6 +4,7 @@ package shim
 
 import (
 	"context"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -45,6 +46,23 @@ func TestTheResolverFindsTheLoopback(t *testing.T) {
 // host goes to the resolver on either scheme (#118), on ssh:// the hostname
 // ssh -G gives for it (#256).
 func TestTheHostIsReadAsTheClientReadsIt(t *testing.T) {
+	// The real resolver and ssh -G still answer every row, each under
+	// clientTimeout instead of resolveTimeout: a cold Mac's first answer can
+	// outlast it, a timeout reads as this Mac, and a timeout already gates
+	// the call (#339, #361). This test is about what the client reaches.
+	const clientTimeout = 5 * time.Second
+	oldLookup, oldSSH := lookupIP, sshConfig
+	t.Cleanup(func() { lookupIP, sshConfig = oldLookup, oldSSH })
+	lookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
+		defer cancel()
+		return oldLookup(ctx, host)
+	}
+	sshConfig = func(_ context.Context, path string, args ...string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
+		defer cancel()
+		return oldSSH(ctx, path, args...)
+	}
 	for _, c := range []struct {
 		endpoint string
 		thisMac  bool

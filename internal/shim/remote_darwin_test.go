@@ -6,13 +6,17 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 // macOS resolves 127.1 and localhost itself, with getaddrinfo, as the
 // docker CLI's dialer does: the shim's resolver finds the loopback (#118).
 func TestTheResolverFindsTheLoopback(t *testing.T) {
+	// Not resolveTimeout: a cold Mac's first lookup can outlast it, and a
+	// timeout already gates the call (#339). This test is about the answer.
+	const lookupDeadline = 5 * time.Second
 	for _, host := range []string{"127.1", "localhost"} {
-		ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), lookupDeadline)
 		addrs, err := lookupIP(ctx, host)
 		cancel()
 		if err != nil {

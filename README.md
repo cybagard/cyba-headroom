@@ -41,7 +41,9 @@ headroom run -- claude
 
 If Orca does not find `headroom`, use the full path, `/opt/homebrew/bin/headroom run -- <agent>`.
 
-Do not also run `headroom install`. To upgrade, run `brew upgrade cybagard/tap/headroom`, then `brew services restart headroom`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then remove the shim directory (by default `rm -rf ~/.config/headroom/shims`).
+Always give brew the full name, `cybagard/tap/headroom`: to `install`, `reinstall`, `upgrade`, `info` and `uninstall`. The short name, `headroom`, resolves to an unrelated cask (Headroom.app). That includes the command in brew's own reinstall hint, `brew reinstall headroom`, which installs that cask instead. Only `brew services` takes the short name.
+
+Do not also run `headroom install`. To upgrade, run `brew upgrade cybagard/tap/headroom`, then `brew services restart headroom`. To uninstall, run `brew services stop headroom`, then `brew uninstall cybagard/tap/headroom`, then remove the shim directory (by default `rm -rf ~/.config/headroom/shims`). That keeps the config, the samples (`~/.config/headroom/samples/`), the lock file `~/.config/headroom/d.sock.lock` and the logs (`~/Library/Logs/headroom/`). To remove all of them, run `rm -rf ~/.config/headroom ~/Library/Logs/headroom`. Then remove the snippet from your shell files, if you added it (see [Login shells](#login-shells)).
 
 ### Install from the release tarball
 
@@ -61,7 +63,29 @@ shasum -a 256 -c SHA256SUMS &&
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
 ```
 
-To upgrade, run `install` again. `headroom uninstall` removes the binary, the LaunchAgent and the shims. It keeps the config, the samples and the logs.
+To upgrade, run `install` again. `headroom uninstall` removes the binary, the LaunchAgent and the shims. It keeps the config, the samples (`~/.config/headroom/samples/`), the lock file `~/.config/headroom/d.sock.lock` and the logs (`~/Library/Logs/headroom/`). To remove all of them, run `rm -rf ~/.config/headroom ~/Library/Logs/headroom`. Then remove the snippet from your shell files, if you added it (see [Login shells](#login-shells)).
+
+### Login shells
+
+This step is optional: `headroom run -- <agent>` puts the shims first on PATH without it. Add it if an agent or you start login shells (`zsh -l`, `bash -l`, a terminal or SSH) whose calls should be gated. In those shells, `/etc/zprofile` runs `path_helper`, which moves the shim directory behind `/usr/local/bin`.
+
+For zsh, add these lines at the end of both `~/.zlogin` and `~/.zshrc`:
+
+```zsh
+# headroom: shims first (also in login shells, after path_helper)
+typeset -U path
+path=("$HOME/.config/headroom/shims" $path)
+```
+
+`~/.zlogin` alone misses `zsh -i -c`, in which `~/.zshrc` puts other entries ahead of the shims; `~/.zshrc` alone misses `zsh -lc`.
+
+For bash, add this line at the end of the first of `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists: `bash -l` reads only that one. Create `~/.bash_profile` only if none of them exists.
+
+```sh
+export PATH="$HOME/.config/headroom/shims:$PATH"
+```
+
+The `login` line of `headroom doctor` then shows that `zsh -l` keeps the shims first.
 
 ## Usage
 

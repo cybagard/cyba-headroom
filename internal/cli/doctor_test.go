@@ -480,7 +480,7 @@ func TestDoctorLoginShell(t *testing.T) {
 	}{
 		"path_helper puts docker first": {func(r *doctorRig) {
 			r.login = "docker=/usr/local/bin/docker\npodman=\ntart=" + filepath.Join(r.shims, "tart") + "\n"
-		}, "!", []string{"docker → /usr/local/bin/docker", "run ungated", "headroom shows them as ungated"}},
+		}, "!", []string{"docker → /usr/local/bin/docker", "run ungated", "headroom shows them as ungated", "https://github.com/cybagard/cyba-headroom#login-shells"}},
 		"shell fails": {func(r *doctorRig) {
 			r.login, r.loginErr = "", errors.New("signal: killed")
 		}, "!", []string{"could not run", "killed"}},
@@ -812,7 +812,10 @@ func TestDoctorAgents(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0 (agents only warn):\n%s", code, out)
 	}
-	wantMark(t, out, "agents", "!", "headroom run -- <agent>", "~/.zprofile", r.shims)
+	wantMark(t, out, "agents", "!", "headroom run -- <agent>", "https://github.com/cybagard/cyba-headroom#login-shells", r.shims)
+	if l := doctorLine(t, out, "agents"); strings.Contains(l, "~/.zprofile") {
+		t.Errorf("agents line %q names ~/.zprofile, not the README section", l)
+	}
 	if !strings.Contains(out, "Fix login: claude (pid 4321) runs docker, tart without the shims") {
 		t.Errorf("the agent is not listed:\n%s", out)
 	}
@@ -843,5 +846,16 @@ func TestDoctorAgentsWithoutOrca(t *testing.T) {
 				t.Errorf("asked about sessions %v", r.sessions)
 			}
 		})
+	}
+}
+
+// The login and agents hints link this README section (#367).
+func TestREADMEHasTheLoginShellsSection(t *testing.T) {
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), "\n### Login shells\n") {
+		t.Error(`README has no "### Login shells" section, which doctor's hints link`)
 	}
 }

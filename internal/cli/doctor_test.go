@@ -784,12 +784,14 @@ func TestDoctorNamesBrewServicesForHomebrewsBinary(t *testing.T) {
 		plist string // headroom's or none
 		brew  bool
 	}{
-		"Cellar":                   {exe: "prefix/Cellar/headroom/0.3.0/bin/headroom", brew: true},
-		"opt":                      {exe: "prefix/opt/headroom/bin/headroom", brew: true},
-		"opt through a link":       {exe: "elsewhere/headroom->prefix/opt/headroom/bin/headroom", brew: true},
-		"opt linking elsewhere":    {exe: "prefix/opt/headroom/bin/headroom->dev/bin/headroom", brew: true},
-		"a copy in ~/.local/bin":   {exe: "home/.local/bin/headroom"},
-		"another formula's Cellar": {exe: "prefix/Cellar/headroom-tools/1.0/bin/headroom"},
+		"Cellar":               {exe: "prefix/Cellar/headroom/0.3.0/bin/headroom", brew: true},
+		"opt link into Cellar": {exe: "prefix/opt/headroom/bin/headroom->prefix/Cellar/headroom/0.3.0/bin/headroom", brew: true},
+		// Homebrew's opt link always resolves into its Cellar: a tarball
+		// copied to /opt/headroom/bin is not Homebrew's.
+		"a copy in opt/headroom/bin": {exe: "prefix/opt/headroom/bin/headroom"},
+		"opt linking elsewhere":      {exe: "prefix/opt/headroom/bin/headroom->dev/bin/headroom"},
+		"a copy in ~/.local/bin":     {exe: "home/.local/bin/headroom"},
+		"another formula's Cellar":   {exe: "prefix/Cellar/headroom-tools/1.0/bin/headroom"},
 		// install --bin <brew link> gives Homebrew's binary headroom's own
 		// agent (#181): that is not Homebrew's install.
 		"Cellar, headroom's agent": {exe: "prefix/Cellar/headroom/0.3.0/bin/headroom", plist: agentLabel + ".plist"},

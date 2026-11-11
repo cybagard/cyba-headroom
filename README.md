@@ -79,7 +79,7 @@ path=("$HOME/.config/headroom/shims" $path)
 
 `~/.zlogin` alone misses `zsh -i -c`, in which `~/.zshrc` puts other entries ahead of the shims; `~/.zshrc` alone misses `zsh -lc`.
 
-For bash, add this line at the end of `~/.bash_profile`:
+For bash, add this line at the end of the first of `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists: `bash -l` reads only that one. Create `~/.bash_profile` only if none of them exists.
 
 ```sh
 export PATH="$HOME/.config/headroom/shims:$PATH"

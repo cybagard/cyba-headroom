@@ -107,6 +107,14 @@ func brewPlist(home string) string {
 	return ""
 }
 
+// homebrewBinary reports whether exe, with symlinks resolved, is the
+// formula's: in its keg, Cellar/headroom/, in any Homebrew prefix. The opt
+// and bin links resolve there; a copy elsewhere is not Homebrew's (#365).
+func homebrewBinary(exe string) bool {
+	p, err := filepath.EvalSymlinks(exe)
+	return err == nil && strings.Contains(filepath.ToSlash(p), "/Cellar/headroom/")
+}
+
 // install copies the binary, writes the plist, (re)loads the agent and waits
 // for the daemon to answer.
 func (in *installer) install(ctx context.Context) int {

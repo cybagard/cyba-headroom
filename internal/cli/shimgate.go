@@ -85,6 +85,9 @@ func (e Env) withDefaults() Env {
 	if e.stat == nil {
 		e.stat = os.Stat
 	}
+	if e.executable == nil {
+		e.executable = os.Executable
+	}
 	if e.composeAsk == nil {
 		env, _ := e.envOf()
 		e.composeAsk = func(bin string, args []string) ([]byte, error) { return askCompose(bin, args, env, "") }

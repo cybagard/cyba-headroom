@@ -4,7 +4,7 @@ import "testing"
 
 const (
 	zshV1 = "# >>> headroom shell-setup v1 >>> (do not edit; `headroom shell-setup --remove` removes it)\n" +
-		"typeset -U path; path=('/Users/dev/.config/headroom/shims' $path)\n" +
+		"typeset -U path; path=('/Users/dev/.config/headroom/shims' \"${path[@]}\")\n" +
 		"# <<< headroom shell-setup <<<\n"
 	bashV1 = "# >>> headroom shell-setup v1 >>> (do not edit; `headroom shell-setup --remove` removes it)\n" +
 		"export PATH='/Users/dev/.config/headroom/shims':\"$PATH\"\n" +
@@ -23,7 +23,7 @@ func TestBlock(t *testing.T) {
 		t.Errorf("bash:\n%s", got)
 	}
 	// A quote in the dir stays inside the word.
-	want := "typeset -U path; path=('/Users/dev/it'\\''s' $path)\n"
+	want := "typeset -U path; path=('/Users/dev/it'\\''s' \"${path[@]}\")\n"
 	if got := Line("zsh", "/Users/dev/it's"); got != want {
 		t.Errorf("quoted: %q, want %q", got, want)
 	}
@@ -67,7 +67,7 @@ func crlf(s string) string {
 
 // Remove after Apply gives back the original bytes.
 func TestRemoveUndoesApply(t *testing.T) {
-	for _, in := range []string{"", "a=1\n", "a=1", "a=1\n\n", "a=1\r\n", "a=1\r\nb=2"} {
+	for _, in := range []string{"", "a=1\n", "a=1", "a=1\n\n", "a=1\r\n", "a=1\r\nb=2", "a=1\r", "a=1\n\r", "a=1\r\n\r"} {
 		applied, _ := Apply(in, zshV1)
 		got, changed, err := Remove(applied)
 		if got != in || !changed || err != nil {
@@ -87,7 +87,6 @@ func TestRemove(t *testing.T) {
 		{"a block that is not last keeps the line before it", "a=1\n" + zshV1 + "b=2\n", "a=1\nb=2\n", true},
 		{"an old block", "a=1\n\n" + old, "a=1\n", true},
 		{"two blocks", "a=1\n\n" + zshV1 + "\n" + old, "a=1\n", true},
-		{"a file converted to CRLF", "a=1\r\n\r\n" + crlf(zshV1), "a=1\r\n", true},
 	} {
 		got, changed, err := Remove(c.in)
 		if got != c.want || changed != c.changed || err != nil {

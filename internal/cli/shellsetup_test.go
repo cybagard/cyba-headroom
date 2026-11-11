@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io/fs"
 	"maps"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-headroom/internal/shellblock"
 )
@@ -295,4 +297,85 @@ func TestShellSetupRefusesAnUnendedBlock(t *testing.T) {
 			t.Errorf("%s: changed: %q", flag, b)
 		}
 	}
+}
+
+// finishes fails the test if f does not return within d.
+func finishes(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); f() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s: still running after %s", what, d)
+	}
+}
+
+// nonRegular makes name in dir a FIFO, or a link to /dev/zero: reading
+// either never ends.
+func nonRegular(t *testing.T, path, kind string) {
+	t.Helper()
+	var err error
+	if kind == "fifo" {
+		err = syscall.Mkfifo(path, 0o644)
+	} else {
+		err = os.Symlink("/dev/zero", path)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A FIFO .zshrc, or one linked to /dev/zero, is refused at once in every
+// mode, never read (#370).
+func TestShellSetupRefusesAFIFOOrADevice(t *testing.T) {
+	for _, kind := range []string{"fifo", "/dev/zero"} {
+		for flag, wantCode := range map[string]int{"": 0, "--apply": 1, "--remove": 1} {
+			r := newShellRig(t, "/bin/zsh")
+			nonRegular(t, r.path(".zshrc"), kind)
+			args := []string{}
+			if flag != "" {
+				args = append(args, flag)
+			}
+			finishes(t, 5*time.Second, kind+" "+flag, func() {
+				code, out, errs := r.run(args...)
+				if code != wantCode {
+					t.Errorf("%s %s: exit %d, want %d: %s", kind, flag, code, wantCode, errs)
+				}
+				wantIn(t, out+errs, r.path(".zshrc"))
+			})
+		}
+	}
+}
+
+// Uninstall keeps such a file, saying so, and does not hang.
+func TestUninstallKeepsAFIFOOrADevice(t *testing.T) {
+	for _, kind := range []string{"fifo", "/dev/zero"} {
+		f := newInstallFixture(t)
+		nonRegular(t, filepath.Join(f.home, ".zshrc"), kind)
+		finishes(t, 5*time.Second, kind, func() {
+			if code := f.in.uninstall(context.Background()); code != 0 {
+				t.Errorf("%s: exit %d: %s", kind, code, f.errb.String())
+			}
+		})
+		if _, kept, _ := strings.Cut(f.out.String(), "kept:"); !strings.Contains(kept, filepath.Join(f.home, ".zshrc")) {
+			t.Errorf("%s: .zshrc not listed as kept:\n%s", kind, f.out.String())
+		}
+	}
+}
+
+// A file over the size cap is refused, not read whole.
+func TestShellSetupRefusesAHugeFile(t *testing.T) {
+	r := newShellRig(t, "/bin/zsh")
+	if err := os.WriteFile(r.path(".zshrc"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(r.path(".zshrc"), maxDotfile+1); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := r.run("--apply")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	wantIn(t, out+errs, r.path(".zshrc"), "larger than")
 }

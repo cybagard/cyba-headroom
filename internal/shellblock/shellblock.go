@@ -20,13 +20,15 @@ const (
 var ErrNoEnd = errors.New("a headroom shell-setup begin marker has no end marker")
 
 // Line is the line that puts dir first on PATH in shell ("zsh" or "bash").
-// zsh's typeset -U keeps one copy when nested login shells run it again.
+// zsh's typeset -U keeps one copy when nested login shells run it again;
+// "${path[@]}" is the whole array also under ksh_arrays, where $path is
+// its first element.
 func Line(shell, dir string) string {
 	q := "'" + strings.ReplaceAll(dir, "'", `'\''`) + "'"
 	if shell == "bash" {
 		return "export PATH=" + q + `:"$PATH"` + "\n"
 	}
-	return "typeset -U path; path=(" + q + " $path)\n"
+	return "typeset -U path; path=(" + q + ` "${path[@]}")` + "\n"
 }
 
 // Block is Line between the markers.
@@ -95,17 +97,10 @@ func Remove(content string) (out string, changed bool, err error) {
 		before := out[:start]
 		// A blank line before the block goes; so does the break ending
 		// the line before it, if the block is last.
-		if rest, ok := cutBreak(before); ok && (rest == "" || strings.HasSuffix(rest, "\n") || stop == len(out)) {
+		// Only the "\n" Apply wrote: a "\r" before it is the file's.
+		if rest, ok := strings.CutSuffix(before, "\n"); ok && (rest == "" || strings.HasSuffix(rest, "\n") || stop == len(out)) {
 			before = rest
 		}
 		out, changed = before+out[stop:], true
 	}
-}
-
-// cutBreak removes the line break (LF or CRLF) that ends s, if any.
-func cutBreak(s string) (string, bool) {
-	if !strings.HasSuffix(s, "\n") {
-		return s, false
-	}
-	return strings.TrimSuffix(s[:len(s)-1], "\r"), true
 }

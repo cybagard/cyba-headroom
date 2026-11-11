@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -68,12 +69,17 @@ func shellTargets(shell string, getenv func(string) string, stat func(string) (f
 	return all[:1]
 }
 
+// maxDotfile is the largest startup file shell-setup reads.
+const maxDotfile = 16 << 20
+
 // dotfile is one of a shell's startup files, as shell-setup found it.
 type dotfile struct {
 	path    string
 	exists  bool
 	mode    fs.FileMode
 	content string
+	// read is true if content is the file's: it is missing, or was read.
+	read bool
 	// refused says why shell-setup may not write the file; "" if it may.
 	refused string
 }
@@ -81,35 +87,74 @@ type dotfile struct {
 // readDotfile reads p without following a link. shell-setup writes only a
 // regular file the euid owns: renaming over a link would replace it, and
 // another user's file would become ours (#370). A refused file's content
-// is still read, through a link, to say whether it holds a block.
+// is still read, through a link, to say whether it holds a block, but only
+// if it is a regular file: a FIFO or a device would never end.
 func readDotfile(p string, lstat func(string) (fs.FileInfo, error)) dotfile {
 	d := dotfile{path: p, mode: 0o644}
 	fi, err := lstat(p)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
+		d.read = true
 		return d
 	case err != nil:
 		d.exists, d.refused = true, oneLine(err)
 		return d
 	}
 	d.exists, d.mode = true, fi.Mode().Perm()
+	link := fi.Mode()&fs.ModeSymlink != 0
 	st, _ := fi.Sys().(*syscall.Stat_t)
 	switch {
-	case fi.Mode()&fs.ModeSymlink != 0:
+	case link:
 		d.refused = "a symlink"
 	case !fi.Mode().IsRegular():
 		d.refused = "not a regular file"
+		return d
 	case st == nil:
 		d.refused = "its owner is unknown"
 	case int(st.Uid) != os.Geteuid():
 		d.refused = fmt.Sprintf("owned by uid %d, not you", st.Uid)
 	}
-	b, err := os.ReadFile(p)
-	if err != nil && d.refused == "" {
+	content, err := readRegular(p, !link)
+	switch {
+	case link && errors.Is(err, fs.ErrNotExist): // a dangling link: no block
+		d.read = true
+	case err != nil && d.refused == "":
 		d.refused = oneLine(err)
+	case err != nil && link:
+		d.refused += " (" + oneLine(err) + ")"
+	case err == nil:
+		d.content, d.read = content, true
 	}
-	d.content = string(b)
 	return d
+}
+
+// readRegular reads p if it is a regular file of at most maxDotfile bytes.
+// It opens p without blocking, so a FIFO swapped in after the Lstat cannot
+// hang it, and without following a link if nofollow.
+func readRegular(p string, nofollow bool) (string, error) {
+	flags := os.O_RDONLY | syscall.O_NONBLOCK
+	if nofollow {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(p, flags, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	switch {
+	case err != nil:
+		return "", err
+	case !fi.Mode().IsRegular():
+		return "", errors.New("not a regular file")
+	case fi.Size() > maxDotfile:
+		return "", fmt.Errorf("larger than %d MiB", maxDotfile>>20)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxDotfile+1))
+	if err == nil && len(b) > maxDotfile {
+		err = fmt.Errorf("larger than %d MiB", maxDotfile>>20)
+	}
+	return string(b), err
 }
 
 // apply writes block into d, and says what it did.
@@ -138,6 +183,9 @@ func (d dotfile) apply(block string) (string, error) {
 // it and nothing else was added since. It says what it did: "" if d has no
 // block.
 func (d dotfile) remove() (string, error) {
+	if !d.read {
+		return "", errors.New(d.refused)
+	}
 	out, changed, err := shellblock.Remove(d.content)
 	switch {
 	case err != nil:

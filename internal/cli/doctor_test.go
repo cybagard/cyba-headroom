@@ -38,6 +38,7 @@ type doctorRig struct {
 	found    map[int][]agents.Agent
 	sessions []int
 	shimDir  string
+	exe      string // the running binary; "" is the test binary
 }
 
 func newDoctorRig(t *testing.T) *doctorRig {
@@ -87,6 +88,12 @@ func (r *doctorRig) run() (int, string) {
 		ancestors: func() []int { return r.ancestors },
 		getwd:     func() (string, error) { return r.cwd, nil },
 		fallbacks: map[string][]string{}, // only the rig's tools, not the host's
+		executable: func() (string, error) {
+			if r.exe == "" {
+				return os.Executable()
+			}
+			return r.exe, nil
+		},
 		status: func(config.Config) (*protocol.Snapshot, error) {
 			return r.snap, r.statusErr
 		},
@@ -763,6 +770,78 @@ func TestDoctorShimsRemedyNamesWhatRelinksThem(t *testing.T) {
 			if l := doctorLine(t, out, "shims"); tc.not != "" && strings.Contains(l, tc.not) {
 				t.Errorf("shims line %q says %q", l, tc.not)
 			}
+		})
+	}
+}
+
+// `brew services stop` removes Homebrew's plist but leaves its binary: run
+// from the formula's binary, with no LaunchAgent, doctor names brew
+// services, not headroom install, which the README tells Homebrew users not
+// to run (#365).
+func TestDoctorNamesBrewServicesForHomebrewsBinary(t *testing.T) {
+	for name, tc := range map[string]struct {
+		exe   string // under the rig's dir; "->" makes the first a link to the second
+		plist string // headroom's or none
+		brew  bool
+	}{
+		"Cellar":                   {exe: "prefix/Cellar/headroom/0.3.0/bin/headroom", brew: true},
+		"opt":                      {exe: "prefix/opt/headroom/bin/headroom", brew: true},
+		"opt through a link":       {exe: "elsewhere/headroom->prefix/opt/headroom/bin/headroom", brew: true},
+		"opt linking elsewhere":    {exe: "prefix/opt/headroom/bin/headroom->dev/bin/headroom", brew: true},
+		"a copy in ~/.local/bin":   {exe: "home/.local/bin/headroom"},
+		"another formula's Cellar": {exe: "prefix/Cellar/headroom-tools/1.0/bin/headroom"},
+		// install --bin <brew link> gives Homebrew's binary headroom's own
+		// agent (#181): that is not Homebrew's install.
+		"Cellar, headroom's agent": {exe: "prefix/Cellar/headroom/0.3.0/bin/headroom", plist: agentLabel + ".plist"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newDoctorRig(t)
+			r.env["HOME"] = filepath.Join(r.cfg, "home")
+			exe, target, linked := strings.Cut(tc.exe, "->")
+			r.exe = filepath.Join(r.cfg, exe)
+			if !linked {
+				target = exe
+			}
+			for _, p := range []string{filepath.Join(r.cfg, target), r.exe} {
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(r.cfg, target), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if linked {
+				if err := os.Symlink(filepath.Join(r.cfg, target), r.exe); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.plist != "" {
+				path := filepath.Join(r.env["HOME"], "Library", "LaunchAgents", tc.plist)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Each line's remedy shows: the daemon down, a shim missing, and
+			// the shims off PATH.
+			r.snap, r.statusErr = nil, errors.New("connection refused")
+			if err := os.Remove(filepath.Join(r.shims, "tart")); err != nil {
+				t.Fatal(err)
+			}
+			r.env["PATH"] = r.tools + ":/usr/bin"
+			_, out := r.run()
+			start, shims, path := "start it with `headroom install`", "then run `headroom install`", "(after `headroom install`)"
+			if tc.brew {
+				start, shims, path = "start it with `brew services start headroom`", "then run `brew services start headroom`", "(after `brew services start headroom`)"
+				if strings.Contains(out, "headroom install") {
+					t.Errorf("doctor suggests headroom install:\n%s", out)
+				}
+			}
+			wantMark(t, out, "daemon", "!", start)
+			wantMark(t, out, "shims", "✗", shims)
+			wantMark(t, out, "PATH", "✗", path)
 		})
 	}
 }

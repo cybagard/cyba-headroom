@@ -61,7 +61,7 @@ func runDoctor(e Env) int {
 
 func doctor(e Env) []finding {
 	h := e.withDefaults()
-	self, _ := os.Executable()
+	self, _ := h.executable()
 	// The login shell runs the user's whole profile: start it now, beside
 	// the other checks.
 	login := make(chan finding, 1)
@@ -94,7 +94,7 @@ func doctor(e Env) []finding {
 	}
 
 	snap, serr := h.status(cfg)
-	out = append(out, daemonFinding(e.Getenv("HOME"), cfg.Socket, serr,
+	out = append(out, daemonFinding(e.Getenv("HOME"), self, cfg.Socket, serr,
 		func() (int, error) { return h.ping(cfg) }, h.agentPID))
 
 	out = append(out, identityFinding(e.Getenv, h, snap))
@@ -106,16 +106,18 @@ func doctor(e Env) []finding {
 // and which LaunchAgent runs it: headroom's or Homebrew's (#185), if launchd
 // runs that agent as the daemon that answered (#316), the rule install
 // applies. ping returns the daemon's PID; agentPID, launchd's for a label.
-func daemonFinding(home, socket string, err error, ping func() (int, error), agentPID func(label string) (int, error)) finding {
+// self is the running binary.
+func daemonFinding(home, self, socket string, err error, ping func() (int, error), agentPID func(label string) (int, error)) finding {
 	ours, brewFile := false, ""
 	if home != "" {
 		_, serr := os.Stat(agentPlist(home))
 		ours, brewFile = serr == nil, brewPlist(home)
 	}
 	brew := brewFile != ""
-	// headroom install refuses while Homebrew's agent is there.
+	// headroom install refuses while Homebrew's agent is there; `brew
+	// services stop` removes it, but not the formula's binary (#365).
 	start := "`headroom install`"
-	if brew {
+	if brew || brewStopped(home, self) {
 		start = "`brew services start headroom`"
 	}
 	if err != nil {
@@ -163,6 +165,18 @@ func daemonFinding(home, socket string, err error, ping func() (int, error), age
 	return finding{mark: pass, name: "daemon", detail: fmt.Sprintf("running at %s, %s", socket, manager)}
 }
 
+// brewStopped reports whether headroom is Homebrew's with its service
+// stopped: no LaunchAgent in home, and self is the formula's binary (#365).
+func brewStopped(home, self string) bool {
+	if home == "" || brewPlist(home) != "" {
+		return false
+	}
+	if _, err := os.Stat(agentPlist(home)); err == nil {
+		return false
+	}
+	return homebrewBinary(self)
+}
+
 // daemonStatus asks the daemon for its snapshot. A whole snapshot takes
 // longer than a check, so wait at least 2 s, not the shim's timeout.
 func daemonStatus(cfg config.Config) (*protocol.Snapshot, error) {
@@ -187,6 +201,8 @@ func shimsFinding(home, dir, self string) finding {
 		relink := "`headroom install`"
 		if home != "" && brewPlist(home) != "" {
 			relink = "`brew services restart headroom`"
+		} else if brewStopped(home, self) {
+			relink = "`brew services start headroom`"
 		}
 		return finding{mark: fail, name: "shims", detail: fmt.Sprintf("in %s: %s; then run %s", dir, strings.Join(bad, ", "), relink)}
 	}
@@ -229,6 +245,8 @@ func pathFinding(getenv func(string) string, shimDir string, fallbacks map[strin
 		if _, err := os.Stat(agentPlist(home)); err == nil {
 			start = "`headroom uninstall`"
 		}
+	} else if brewStopped(home, self) {
+		start = "`brew services start headroom`"
 	}
 	restart := ". PATH is fixed when an agent starts: restart it with `headroom run -- <agent>` (after " + start + ")"
 	switch {

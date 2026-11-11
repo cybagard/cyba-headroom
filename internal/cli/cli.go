@@ -78,6 +78,7 @@ type Env struct {
 	ancestors  func() []int                                                           // shim.Ancestors
 	parentSelf func() string                                                          // shim.ParentSelf
 	getwd      func() (string, error)                                                 // os.Getwd
+	executable func() (string, error)                                                 // os.Executable
 	stat       func(string) (fs.FileInfo, error)                                      // os.Stat
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell

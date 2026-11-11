@@ -487,7 +487,7 @@ func TestDoctorLoginShell(t *testing.T) {
 	}{
 		"path_helper puts docker first": {func(r *doctorRig) {
 			r.login = "docker=/usr/local/bin/docker\npodman=\ntart=" + filepath.Join(r.shims, "tart") + "\n"
-		}, "!", []string{"docker → /usr/local/bin/docker", "run ungated", "headroom shows them as ungated", "https://github.com/cybagard/cyba-headroom#login-shells"}},
+		}, "!", []string{"docker → /usr/local/bin/docker", "run ungated", "headroom shows them as ungated", "run `headroom shell-setup --apply`", "https://github.com/cybagard/cyba-headroom#login-shells"}},
 		"shell fails": {func(r *doctorRig) {
 			r.login, r.loginErr = "", errors.New("signal: killed")
 		}, "!", []string{"could not run", "killed"}},
@@ -893,7 +893,7 @@ func TestDoctorAgents(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0 (agents only warn):\n%s", code, out)
 	}
-	wantMark(t, out, "agents", "!", "headroom run -- <agent>", "https://github.com/cybagard/cyba-headroom#login-shells", r.shims)
+	wantMark(t, out, "agents", "!", "headroom run -- <agent>", "run `headroom shell-setup --apply`", "https://github.com/cybagard/cyba-headroom#login-shells", r.shims)
 	if l := doctorLine(t, out, "agents"); strings.Contains(l, "~/.zprofile") {
 		t.Errorf("agents line %q names ~/.zprofile, not the README section", l)
 	}

@@ -69,12 +69,20 @@ To upgrade, run `install` again. `headroom uninstall` removes the binary, the La
 
 This step is optional: `headroom run -- <agent>` puts the shims first on PATH without it. Add it if an agent or you start login shells (`zsh -l`, `bash -l`, a terminal or SSH) whose calls should be gated. In those shells, `/etc/zprofile` runs `path_helper`, which moves the shim directory behind `/usr/local/bin`.
 
-For zsh, add these lines at the end of both `~/.zlogin` and `~/.zshrc`:
+Run:
+
+```sh
+headroom shell-setup --apply
+```
+
+It adds a marked block at the end of the files your shell (`$SHELL`) reads, which puts the shim directory first; `--shell zsh` or `--shell bash` chooses the other shell. Without `--apply` it shows the block and the files, and changes nothing. `headroom shell-setup --remove` removes the block, and so does `headroom uninstall`. It refuses a file that is a symlink, or not yours: add the lines below to it by hand.
+
+To add the lines by hand instead: for zsh, add these lines at the end of both `~/.zlogin` and `~/.zshrc`:
 
 ```zsh
 # headroom: shims first (also in login shells, after path_helper)
 typeset -U path
-path=("$HOME/.config/headroom/shims" $path)
+path=("$HOME/.config/headroom/shims" "${path[@]}")
 ```
 
 `~/.zlogin` alone misses `zsh -i -c`, in which `~/.zshrc` puts other entries ahead of the shims; `~/.zshrc` alone misses `zsh -lc`.

@@ -381,7 +381,7 @@ func agentsFinding(snap *protocol.Snapshot, shimDir string, find func(context.Co
 	if len(more) == 0 {
 		return finding{mark: pass, name: "agents", detail: "every agent in Orca's worktrees runs the tools through the shims"}
 	}
-	return finding{mark: warn, name: "agents", detail: fmt.Sprintf("agents run tools without the shims, ungated: launch each through `headroom run -- <agent>`, or put %s first on PATH for login shells: %s", shimDir, loginShellsDoc), more: more}
+	return finding{mark: warn, name: "agents", detail: fmt.Sprintf("agents run tools without the shims, ungated: launch each through `headroom run -- <agent>`, or run `headroom shell-setup --apply` to put %s first on PATH for login shells (see %s)", shimDir, loginShellsDoc), more: more}
 }
 
 // worktreeName labels worktree id as the view does.
@@ -452,7 +452,7 @@ func loginFinding(getenv func(string) string, ask func(string) (string, error), 
 		return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` finds none of %s", sh, strings.Join(shimList(), ", "))}
 	}
 	if len(ungated) > 0 {
-		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated, and headroom shows them as ungated; to put the shims first, see %s", sh, strings.Join(ungated, ", "), loginShellsDoc)}
+		return finding{mark: warn, name: "login", detail: fmt.Sprintf("`%s -l` puts the real tools first (%s): scripts that start a login shell run ungated, and headroom shows them as ungated; to put the shims first, run `headroom shell-setup --apply` (see %s)", sh, strings.Join(ungated, ", "), loginShellsDoc)}
 	}
 	return finding{mark: pass, name: "login", detail: fmt.Sprintf("`%s -l` keeps the shims first", sh)}
 }

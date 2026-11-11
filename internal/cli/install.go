@@ -296,6 +296,13 @@ func (in *installer) installShims(bin, prefix string) bool {
 		fmt.Fprintf(in.out, "\nTo gate the agents Orca launches, set each one's command in Orca → Settings → Agents:\n%s\n"+
 			"Agents already running keep their old PATH until restarted.\n", strings.Join(lines, "\n"))
 	}
+	// Agents Orca starts without that command, and scripts, start a login
+	// shell, which puts the real tools first: install names the fix and
+	// never applies it (#370).
+	shell, _ := shellFrom(in.getenv("SHELL"))
+	files := shellTargets(shell, in.getenv, os.Stat)
+	fmt.Fprintf(in.out, "\nLogin shells (Orca's agent-view and loop agents, scripts): `%s%s shell-setup --apply` puts the shims first in %s\n",
+		prefix, shellWord(bin), strings.Join(files, ", "))
 	return len(lines) > 0
 }
 
@@ -417,8 +424,9 @@ func (in *installer) uninstall(ctx context.Context) int {
 			removeLock(lock, cfgDir)
 		}
 	}
+	shellGone, shellKept := removeShellBlocks(in.getenv, os.Lstat)
 	fmt.Fprintln(in.out, "headroom daemon removed from launchd.")
-	if len(gone) > 0 || len(shims) > 0 {
+	if len(gone) > 0 || len(shims) > 0 || len(shellGone) > 0 {
 		fmt.Fprintln(in.out, "removed:")
 	}
 	for _, p := range gone {
@@ -431,7 +439,13 @@ func (in *installer) uninstall(ctx context.Context) int {
 	if len(shims) > 0 {
 		fmt.Fprintf(in.out, "  shims    %s (%s)\n", in.shimDir, strings.Join(shims, ", "))
 	}
+	for _, p := range shellGone {
+		fmt.Fprintf(in.out, "  shell    %s (the headroom shell-setup block)\n", p)
+	}
 	fmt.Fprintln(in.out, "kept:")
+	for _, p := range shellKept {
+		fmt.Fprintf(in.out, "  shell    %s\n", p)
+	}
 	if kept != "" {
 		fmt.Fprintf(in.out, "  binary   %s (a link install did not copy)\n", kept)
 	}

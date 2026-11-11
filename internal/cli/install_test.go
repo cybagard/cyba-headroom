@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/cybagard/cyba-headroom/internal/daemon"
 	"github.com/cybagard/cyba-headroom/internal/launchd"
+	"github.com/cybagard/cyba-headroom/internal/shellblock"
 )
 
 // fakeAgent stands in for launchd.Agent.
@@ -1464,5 +1466,70 @@ func TestUninstallLeavesASymlinkedLock(t *testing.T) {
 	}
 	if _, err := os.Lstat(lock); err != nil {
 		t.Errorf("symlinked lock removed: %v", err)
+	}
+}
+
+// Install names the command that puts the shims first in login shells, and
+// the files it would write, but writes none of them (#370).
+func TestInstallSuggestsShellSetup(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("exit %d: %s", code, f.errb.String())
+	}
+	out := f.out.String()
+	for _, want := range []string{"Login shells", "shell-setup --apply", filepath.Join(f.home, ".zlogin"), filepath.Join(f.home, ".zshrc")} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	for _, name := range []string{".zlogin", ".zshrc"} {
+		if _, err := os.Lstat(filepath.Join(f.home, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("install wrote %s: %v", name, err)
+		}
+	}
+}
+
+// Uninstall removes the block from every shell's files, whatever $SHELL
+// is, and keeps one it may not change, saying why (#370).
+func TestUninstallRemovesTheShellBlocks(t *testing.T) {
+	f := newInstallFixture(t)
+	if code := f.in.install(context.Background()); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, f.errb.String())
+	}
+	block := shellblock.Block("zsh", f.in.shimDir)
+	files := map[string]string{".zshrc": "a=1\n", ".profile": "b=2"}
+	for name, content := range files {
+		applied, _ := shellblock.Apply(content, block)
+		if err := os.WriteFile(filepath.Join(f.home, name), []byte(applied), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(f.home, "real-zlogin")
+	if err := os.WriteFile(target, []byte(block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(f.home, ".zlogin")); err != nil {
+		t.Fatal(err)
+	}
+	f.out.Reset()
+	if code := f.in.uninstall(context.Background()); code != 0 {
+		t.Fatalf("uninstall: exit %d: %s", code, f.errb.String())
+	}
+	for name, content := range files {
+		if b, err := os.ReadFile(filepath.Join(f.home, name)); err != nil || string(b) != content {
+			t.Errorf("%s: %q, %v; want %q", name, b, err, content)
+		}
+	}
+	if b, _ := os.ReadFile(target); string(b) != block {
+		t.Errorf("the link's target changed: %q", b)
+	}
+	removed, kept, _ := strings.Cut(f.out.String(), "kept:")
+	for _, name := range []string{".zshrc", ".profile"} {
+		if !strings.Contains(removed, filepath.Join(f.home, name)) {
+			t.Errorf("%s not listed as removed:\n%s", name, f.out.String())
+		}
+	}
+	if !strings.Contains(kept, filepath.Join(f.home, ".zlogin")+" (a symlink") {
+		t.Errorf(".zlogin not listed as kept:\n%s", f.out.String())
 	}
 }

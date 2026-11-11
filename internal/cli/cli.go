@@ -80,6 +80,7 @@ type Env struct {
 	getwd      func() (string, error)                                                 // os.Getwd
 	executable func() (string, error)                                                 // os.Executable
 	stat       func(string) (fs.FileInfo, error)                                      // os.Stat
+	lstat      func(string) (fs.FileInfo, error)                                      // os.Lstat
 	status     func(config.Config) (*protocol.Snapshot, error)                        // daemonStatus
 	loginShell func(shell string) (string, error)                                     // askLoginShell
 	ping       func(config.Config) (int, error)                                       // pingDaemon
@@ -153,6 +154,8 @@ func Run(e Env) int {
 		return runRun(e)
 	case "doctor":
 		return runDoctor(e)
+	case "shell-setup":
+		return runShellSetup(e)
 	default:
 		fmt.Fprintf(e.Stderr, "headroom: unknown command %q\n\n", cmd)
 		usage(e.Stderr)
@@ -563,6 +566,9 @@ func usage(w io.Writer) {
   headroom run -- <agent> [args]
                       launch an agent with the shim dir first on PATH
   headroom doctor     check PATH order and identity in this shell
+  headroom shell-setup [--apply | --remove] [--shell zsh|bash]
+                      show (or add, or remove) the lines that put the shims
+                      first on PATH in login and interactive shells
   headroom install [--bin PATH]
                       run the daemon as a LaunchAgent; copies this binary to
                       PATH (default ~/.local/bin/headroom)

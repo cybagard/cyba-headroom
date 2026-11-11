@@ -82,7 +82,7 @@ To add the lines by hand instead: for zsh, add these lines at the end of both `~
 ```zsh
 # headroom: shims first (also in login shells, after path_helper)
 typeset -U path
-path=("$HOME/.config/headroom/shims" $path)
+path=("$HOME/.config/headroom/shims" "${path[@]}")
 ```
 
 `~/.zlogin` alone misses `zsh -i -c`, in which `~/.zshrc` puts other entries ahead of the shims; `~/.zshrc` alone misses `zsh -lc`.
